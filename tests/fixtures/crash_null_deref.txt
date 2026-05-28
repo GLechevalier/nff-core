@@ -1,4 +1,4 @@
-Guru Meditation Error: Core  0 panic'ed (StoreProhibited). Exception was unhandled.
+Guru Meditation Error: Core  0 panic'ed (LoadProhibited). Exception was unhandled.
 
 Core  0 register dump:
 PC      : 0x400d1234  PS      : 0x00060033  A0      : 0x800d1240  A1      : 0x3ffb0010

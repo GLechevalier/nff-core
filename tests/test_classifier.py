@@ -50,7 +50,7 @@ def test_store_prohibited_non_null_has_candidates():
     crash = CrashRecord(
         build_id="x",
         panic_type="guru_meditation",
-        exception_cause=28,
+        exception_cause=29,
         fault_addr="0x400d0000",
         raw="test",
     )

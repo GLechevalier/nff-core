@@ -4,10 +4,10 @@ from dataclasses import dataclass, field
 from nff_diagnosis.schemas import CrashRecord
 from nff_diagnosis.schemas.diagnosis_output import Candidate, CrashClass
 
-# Xtensa ESP32 EXCCAUSE values referenced in the rule table
-_EXCCAUSE_STORE_PROHIBITED = 28
-_EXCCAUSE_LOAD_PROHIBITED = 3
-_EXCCAUSE_ILLEGAL_INSTRUCTION = 6
+# Xtensa ESP32 EXCCAUSE values (Xtensa ISA Ref, Table 4-64)
+_EXCCAUSE_STORE_PROHIBITED = 29  # 0x1d — store to non-writable/execute-only page
+_EXCCAUSE_LOAD_PROHIBITED = 28   # 0x1c — load from non-readable page
+_EXCCAUSE_ILLEGAL_INSTRUCTION = 0
 _EXCCAUSE_DEBUG = 5
 _EXCCAUSE_DEBUG_ALT = 1
 
@@ -67,7 +67,7 @@ class RuleClassifier:
             return ClassificationResult(
                 crash_class="null_deref",
                 confidence=0.96,
-                rationale=f"StoreProhibited (EXCCAUSE=28) writing to null-range address {addr}.",
+                rationale=f"StoreProhibited (EXCCAUSE=29) writing to null-range address {addr}.",
             )
 
         # Rule 3: StoreProhibited, address outside null range
@@ -75,7 +75,7 @@ class RuleClassifier:
             return ClassificationResult(
                 crash_class="null_deref",
                 confidence=0.75,
-                rationale=f"StoreProhibited (EXCCAUSE=28) at {addr}; address outside null range — could be misaligned write.",
+                rationale=f"StoreProhibited (EXCCAUSE=29) at {addr}; address outside null range — could be misaligned write.",
                 candidates=[
                     Candidate(
                         crash_class="heap_corruption",
@@ -89,7 +89,7 @@ class RuleClassifier:
             return ClassificationResult(
                 crash_class="null_deref",
                 confidence=0.96,
-                rationale=f"LoadProhibited (EXCCAUSE=3) reading from null-range address {addr}.",
+                rationale=f"LoadProhibited (EXCCAUSE=28) reading from null-range address {addr}.",
             )
 
         # Rule 5: LoadProhibited + heap interior address → heap_corruption (ambiguous)
@@ -97,7 +97,7 @@ class RuleClassifier:
             return ClassificationResult(
                 crash_class="heap_corruption",
                 confidence=0.72,
-                rationale=f"LoadProhibited (EXCCAUSE=3) at heap interior address {addr}.",
+                rationale=f"LoadProhibited (EXCCAUSE=28) at heap interior address {addr}.",
                 candidates=[
                     Candidate(
                         crash_class="null_deref",
@@ -127,7 +127,7 @@ class RuleClassifier:
             return ClassificationResult(
                 crash_class="null_deref",
                 confidence=0.60,
-                rationale=f"LoadProhibited (EXCCAUSE=3) at {addr}; address not in heap or null range.",
+                rationale=f"LoadProhibited (EXCCAUSE=28) at {addr}; address not in heap or null range.",
                 candidates=[
                     Candidate(
                         crash_class="heap_corruption",

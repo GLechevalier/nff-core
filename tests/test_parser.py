@@ -43,7 +43,7 @@ def test_stack_overflow_backtrace(stack_overflow_raw: str):
 def test_heap_corrupt_parsed(heap_corrupt_raw: str):
     fields = ESP32PanicParser().parse(heap_corrupt_raw)
     assert fields["panic_type"] == "guru_meditation"
-    assert fields["exception_cause"] == 3
+    assert fields["exception_cause"] == 28
     assert fields["fault_addr"] == "0x3ffc2a18"
     assert len(fields["backtrace"]) == 4
 
