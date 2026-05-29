@@ -92,7 +92,31 @@ class RuleClassifier:
                 rationale=f"LoadProhibited (EXCCAUSE=28) reading from null-range address {addr}.",
             )
 
-        # Rule 5: LoadProhibited + heap interior address → heap_corruption (ambiguous)
+        # Rule 5: repeated PCs → stack_overflow (evaluated before address-range rules because
+        # a stack overflow into DRAM will produce a heap-range fault_addr, making it look like
+        # heap_corruption; the unwinder-stuck pattern is a stronger signal than the address alone).
+        if _has_repeated_pcs(crash.backtrace):
+            return ClassificationResult(
+                crash_class="stack_overflow",
+                confidence=0.93,
+                rationale="Backtrace contains 3+ identical PCs; unwinder is stuck on a corrupt stack frame.",
+                candidates=[
+                    Candidate(
+                        crash_class="heap_corruption",
+                        explanation="A corrupted heap link can also trap the unwinder in a loop.",
+                    )
+                ] if _is_heap_range(addr) else [],
+            )
+
+        # Rule 6: IllegalInstruction + repeated PCs (SP corruption)
+        if cause == _EXCCAUSE_ILLEGAL_INSTRUCTION and _has_repeated_pcs(crash.backtrace, min_repeat=2):
+            return ClassificationResult(
+                crash_class="stack_overflow",
+                confidence=0.85,
+                rationale="IllegalInstruction with repeated backtrace PCs; SP likely corrupted, CPU executing stack data.",
+            )
+
+        # Rule 7: LoadProhibited + heap interior address → heap_corruption (ambiguous)
         if cause == _EXCCAUSE_LOAD_PROHIBITED and _is_heap_range(addr):
             return ClassificationResult(
                 crash_class="heap_corruption",
@@ -104,22 +128,6 @@ class RuleClassifier:
                         explanation="Heap-range fault_addr could be an offset from a NULL pointer rather than a corrupted heap link.",
                     )
                 ],
-            )
-
-        # Rule 6: repeated PCs in backtrace → stack overflow (unwinder stuck)
-        if _has_repeated_pcs(crash.backtrace):
-            return ClassificationResult(
-                crash_class="stack_overflow",
-                confidence=0.93,
-                rationale="Backtrace contains 3+ identical PCs; unwinder is stuck on a corrupt stack frame.",
-            )
-
-        # Rule 7: IllegalInstruction + repeated PCs (SP corruption)
-        if cause == _EXCCAUSE_ILLEGAL_INSTRUCTION and _has_repeated_pcs(crash.backtrace, min_repeat=2):
-            return ClassificationResult(
-                crash_class="stack_overflow",
-                confidence=0.85,
-                rationale="IllegalInstruction with repeated backtrace PCs; SP likely corrupted, CPU executing stack data.",
             )
 
         # Rule 8: LoadProhibited, address not in known ranges

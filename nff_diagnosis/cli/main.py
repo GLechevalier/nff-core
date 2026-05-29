@@ -1,6 +1,9 @@
 from pathlib import Path
 
 import click
+from dotenv import load_dotenv
+
+load_dotenv()
 
 from nff_diagnosis.cli.cmd_capture import capture_group
 from nff_diagnosis.cli.cmd_diagnose import diagnose_cmd
