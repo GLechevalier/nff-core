@@ -1,0 +1,14 @@
+services:
+  nff-fleet:
+    build: .
+    ports:
+      - "8883:8883"
+      - "3000:3000"
+    env_file:
+      - .env
+    volumes:
+      - ./data/certs:/data/certs
+      - ./data/firmware:/data/firmware
+      - ./data/keys:/data/keys
+      - ./data/audit:/data/audit
+    restart: unless-stopped
