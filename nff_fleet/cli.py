@@ -13,6 +13,8 @@ def cli():
 @cli.command()
 def start():
     """Start the MQTT broker and MCP server."""
+    import logging
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
     from nff_fleet.server import mcp
     mcp.run(transport="streamable-http", host="0.0.0.0", port=settings.mcp_port)
 

@@ -32,14 +32,14 @@ async def send_command(
 
     loop = asyncio.get_event_loop()
     fut: asyncio.Future = loop.create_future()
-    router.register_pending(nonce, fut)
+    router.register_pending(device_id, fut)
 
     import json
     topic = f"nff/devices/{device_id}/cmd"
     try:
-        await router.publish(topic, json.dumps(signed))
+        await router.publish(topic, json.dumps(signed, separators=(",", ":")))
         return await asyncio.wait_for(fut, timeout=timeout)
     except asyncio.TimeoutError:
         raise TimeoutError(f"Device {device_id} did not respond within {timeout}s")
     finally:
-        router.unregister_pending(nonce)
+        router.unregister_pending(device_id)

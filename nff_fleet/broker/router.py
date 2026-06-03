@@ -4,7 +4,6 @@ import logging
 from typing import Any
 
 from amqtt.client import MQTTClient
-from amqtt.mqtt.constants import QOS_1
 
 from nff_fleet.config import settings
 from nff_fleet.registry import registry
@@ -14,16 +13,15 @@ logger = logging.getLogger(__name__)
 # Retained crash payloads keyed by device_id
 _crash_cache: dict[str, dict] = {}
 
-# Pending command futures keyed by nonce — populated by commands.py
+# Pending command futures keyed by device_id — one in-flight command per device
 _pending: dict[str, asyncio.Future] = {}
 
 _router_client: MQTTClient | None = None
 _router_task: asyncio.Task | None = None
 
 
-def resolve_response(payload: dict[str, Any]) -> None:
-    nonce = payload.get("nonce")
-    if nonce and (fut := _pending.get(nonce)):
+def resolve_response(device_id: str, payload: dict[str, Any]) -> None:
+    if fut := _pending.get(device_id):
         if not fut.done():
             fut.set_result(payload)
 
@@ -32,12 +30,12 @@ def get_crash(device_id: str) -> dict | None:
     return _crash_cache.get(device_id)
 
 
-def register_pending(nonce: str, fut: asyncio.Future) -> None:
-    _pending[nonce] = fut
+def register_pending(device_id: str, fut: asyncio.Future) -> None:
+    _pending[device_id] = fut
 
 
-def unregister_pending(nonce: str) -> None:
-    _pending.pop(nonce, None)
+def unregister_pending(device_id: str) -> None:
+    _pending.pop(device_id, None)
 
 
 async def _handle_message(topic: str, payload_bytes: bytes) -> None:
@@ -62,7 +60,7 @@ async def _handle_message(topic: str, payload_bytes: bytes) -> None:
         logger.debug("Heartbeat from %s: %s", device_id, payload.get("status"))
 
     elif msg_type == "response":
-        resolve_response(payload)
+        resolve_response(device_id, payload)
 
     elif msg_type == "crash":
         _crash_cache[device_id] = payload
@@ -73,7 +71,8 @@ async def _router_loop(client: MQTTClient) -> None:
     broker_url = "mqtt://server:@127.0.0.1:11883/"
     try:
         await client.connect(broker_url, cleansession=True)
-        await client.subscribe([("nff/devices/#", QOS_1)])
+        # QoS 0: broker delivers device messages to router without waiting for PUBACK
+        await client.subscribe([("nff/devices/#", 0)])
         logger.info("Router subscribed to nff/devices/#")
         while True:
             message = await client.deliver_message()
@@ -111,7 +110,7 @@ async def stop_router() -> None:
     logger.info("Router stopped")
 
 
-async def publish(topic: str, payload: str, qos: int = QOS_1) -> None:
+async def publish(topic: str, payload: str, qos: int = 0) -> None:
     if _router_client is None:
         raise RuntimeError("Router not started")
     await _router_client.publish(topic, payload.encode(), qos=qos)
