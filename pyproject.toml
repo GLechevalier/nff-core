@@ -15,6 +15,7 @@ dependencies = [
     "click>=8.0",
     "uvicorn>=0.30",
     "aiofiles>=23.0",
+    "supabase>=2.0",
 ]
 
 [project.scripts]

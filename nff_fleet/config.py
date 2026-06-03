@@ -23,6 +23,9 @@ class NffFleetSettings(BaseSettings):
 
     mcp_secret: str = "change-me-in-production"
 
+    supabase_url: str | None = None
+    supabase_key: str | None = None
+
     @property
     def certs_dir(self) -> Path:
         return self.data_dir / "certs"

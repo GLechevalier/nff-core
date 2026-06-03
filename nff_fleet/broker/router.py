@@ -7,6 +7,7 @@ from amqtt.client import MQTTClient
 
 from nff_fleet.config import settings
 from nff_fleet.registry import registry
+from nff_fleet import db
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +58,9 @@ async def _handle_message(topic: str, payload_bytes: bytes) -> None:
         registry.update_heartbeat(device_id, payload)
         if payload.get("status") == "offline":
             registry.set_offline(device_id)
+            db.upsert_device(device_id, {"status": "offline"})
+        else:
+            db.upsert_device(device_id, payload, with_telemetry=True)
         logger.debug("Heartbeat from %s: %s", device_id, payload.get("status"))
 
     elif msg_type == "response":
@@ -64,6 +68,7 @@ async def _handle_message(topic: str, payload_bytes: bytes) -> None:
 
     elif msg_type == "crash":
         _crash_cache[device_id] = payload
+        db.ingest_crash(device_id, payload)
         logger.info("Crash report cached for %s", device_id)
 
 

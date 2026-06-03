@@ -6,6 +6,7 @@ from pathlib import Path
 import aiofiles
 
 from nff_fleet.config import settings
+from nff_fleet import db
 
 _lock = asyncio.Lock()
 
@@ -28,3 +29,4 @@ async def log_command(
     async with _lock:
         async with aiofiles.open(log_path, "a") as f:
             await f.write(json.dumps(entry) + "\n")
+    db.append_audit(device_id, action, nonce, session_id)
