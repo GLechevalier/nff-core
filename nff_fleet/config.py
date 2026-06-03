@@ -6,7 +6,7 @@ class NffFleetSettings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="NFF_FLEET_", env_file=".env", extra="ignore")
 
     mqtt_port: int = 8883
-    mcp_port: int = 3000
+    mcp_port: int = 3001
 
     data_dir: Path = Path("/data")
 
