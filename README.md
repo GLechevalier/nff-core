@@ -206,6 +206,9 @@ sources, including uncommitted edits), then runs `arduino-cli compile -u`:
 
 ## Running a full OTA (local test)
 
+> Full end-to-end walkthrough (server + device steps, what the response actually means,
+> troubleshooting): **[docs/OTA_FLOW.md](docs/OTA_FLOW.md)**.
+
 `fleet_push_ota` signs an `ota` command, the device downloads the firmware over HTTPS, verifies
 SHA-256, flashes the alternate partition, and reboots. A few non-obvious requirements:
 
