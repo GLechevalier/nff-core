@@ -19,6 +19,9 @@ class NffFleetSettings(BaseSettings):
     command_timeout: float = 30.0
     ota_bulk_limit: int = 10
 
+    heartbeat_timeout: float = 90.0   # device marked offline after this many seconds of silence
+    reaper_interval: float = 30.0     # how often the reaper sweeps for stale devices
+
     audit_log: Path = Path("/data/audit/commands.jsonl")
 
     mcp_secret: str = "change-me-in-production"

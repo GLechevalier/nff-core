@@ -37,5 +37,13 @@ class DeviceRegistry:
     def online_devices(self) -> list[DeviceInfo]:
         return [d for d in self._devices.values() if d.status == "online"]
 
+    def stale_online_devices(self, timeout: float) -> list[DeviceInfo]:
+        cutoff = time.time() - timeout
+        return [
+            d
+            for d in self._devices.values()
+            if d.status == "online" and d.last_seen < cutoff
+        ]
+
 
 registry = DeviceRegistry()

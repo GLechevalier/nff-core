@@ -4,6 +4,7 @@ from fastmcp import FastMCP
 
 from nff_fleet.broker.broker import start_broker, stop_broker
 from nff_fleet.broker.router import start_router, stop_router
+from nff_fleet.reaper import start_reaper, stop_reaper
 from nff_fleet.config import settings
 from nff_fleet import signing, db as _db
 
@@ -14,9 +15,11 @@ async def _lifespan(app):
     await _db.init()
     await start_broker()
     await start_router()
+    await start_reaper()
     await _db.set_agent_connected(True)
     yield
     await _db.set_agent_connected(False)
+    await stop_reaper()
     await stop_router()
     await stop_broker()
     await _db.shutdown()
