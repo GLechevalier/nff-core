@@ -17,7 +17,6 @@ class NffFleetSettings(BaseSettings):
     cmd_sign_key: Path = Path("/data/keys/cmd_sign.pem")
 
     command_timeout: float = 30.0
-    ota_bulk_limit: int = 10
 
     heartbeat_timeout: float = 90.0   # device marked offline after this many seconds of silence
     reaper_interval: float = 30.0     # how often the reaper sweeps for stale devices

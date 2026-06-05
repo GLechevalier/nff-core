@@ -29,15 +29,19 @@ mcp = FastMCP("nff-fleet", lifespan=_lifespan)
 
 # Register tools
 from nff_fleet.tools.devices import fleet_list_devices, fleet_ping, fleet_reboot
-from nff_fleet.tools.ota import fleet_push_ota, fleet_store_elf
+from nff_fleet.tools.ota import fleet_store_elf
 from nff_fleet.tools.crash import fleet_get_crash, fleet_resolve_backtrace
 from nff_fleet.tools.diag import fleet_get_diag
 
 mcp.tool()(fleet_list_devices)
 mcp.tool()(fleet_ping)
 mcp.tool()(fleet_reboot)
-mcp.tool()(fleet_push_ota)
 mcp.tool()(fleet_store_elf)
 mcp.tool()(fleet_get_crash)
 mcp.tool()(fleet_resolve_backtrace)
 mcp.tool()(fleet_get_diag)
+
+# Internal service-to-service control surface (nff-ota calls this to deliver commands).
+from nff_fleet import control as _control  # noqa: E402  (registers @mcp.custom_route)
+
+_control.register(mcp)

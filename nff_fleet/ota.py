@@ -1,5 +1,12 @@
-import base64
-import hashlib
+"""ELF staging for crash symbolication.
+
+NOTE: OTA delivery has moved entirely to nff-ota. nff-fleet only *sends commands*
+(see nff_fleet/control.py). What remains here is ELF storage used by the crash
+path (nff_fleet/crash.py:resolve_backtrace runs addr2line against the stored ELF).
+This belongs to the crash/diagnosis concern and is slated to move to nff-diagnosis
+in a separate effort; it is kept here only because the crash path still uses it.
+"""
+
 from pathlib import Path
 
 import aiofiles
@@ -17,13 +24,3 @@ async def store_elf(build_id: str, data: bytes) -> Path:
     async with aiofiles.open(dest, "wb") as f:
         await f.write(data)
     return dest
-
-
-def ota_payload(build_id: str, firmware_url: str) -> dict:
-    sha256 = hashlib.sha256(elf_path(build_id).read_bytes()).hexdigest()
-    return {
-        "action": "ota",
-        "version": build_id,
-        "sha256": sha256,
-        "url": firmware_url,
-    }

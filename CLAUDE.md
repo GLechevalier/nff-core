@@ -26,8 +26,12 @@ management. The two services do not know about each other.
 | Per-device deployment status (Supabase) | Crash reports (retained MQTT topics) |
 | HTTP polling by devices | Persistent MQTT connections |
 
-When Claude pushes OTA: call nff-ota to get the pre-signed firmware URL, then pass it to
-`fleet_push_ota`. nff-fleet delivers it to the device over MQTT and waits for `ota_result`.
+**OTA delivery:** nff-ota is the OTA brain. nff-fleet does **not** expose any OTA tool and
+makes no OTA decisions — it only *sends commands*. nff-ota decides what to push and calls
+nff-fleet's internal `POST /internal/command` endpoint (see `nff_fleet/control.py`); fleet
+signs the `ota|version|sha256|nonce|timestamp` payload and delivers it over MQTT, returning
+the device's response. The `action` field of the payload drives signing generically, so no
+OTA-specific code lives in fleet.
 
 ---
 
@@ -95,11 +99,21 @@ def on_response(payload):
 | `fleet_list_devices` | `tools/devices.py` | Return online/offline devices from DeviceRegistry |
 | `fleet_ping` | `tools/devices.py` | Send signed ping, return round-trip latency or timeout |
 | `fleet_reboot` | `tools/devices.py` | Send signed reboot command |
-| `fleet_push_ota` | `tools/ota.py` | Sign + publish OTA command, block until `ota_result` |
-| `fleet_store_elf` | `tools/ota.py` | Persist ELF to `/data/firmware/{build_id}/` |
+| `fleet_store_elf` | `tools/ota.py` | Persist ELF to `/data/firmware/{build_id}/` (crash symbolication helper¹) |
 | `fleet_get_crash` | `tools/crash.py` | Read retained crash topic (works offline) |
-| `fleet_resolve_backtrace` | `tools/crash.py` | Run `addr2line` against stored ELF |
+| `fleet_resolve_backtrace` | `tools/crash.py` | Run `addr2line` against stored ELF¹ |
 | `fleet_get_diag` | `tools/diag.py` | Send diag command, return heap + FreeRTOS task list |
+
+OTA is **not** a fleet tool — nff-ota owns it and delivers via the internal HTTP endpoint:
+
+| Endpoint | Module | Description |
+|---|---|---|
+| `POST /internal/command` | `control.py` | Shared-secret service endpoint nff-ota calls to sign + deliver any command (incl. OTA) over MQTT |
+
+¹ `fleet_store_elf` + `fleet_resolve_backtrace` + the ELF store are crash *symbolication*,
+which is really nff-diagnosis's job (it already owns the ELF catalog + `addr2line` via
+`POST /ingest`). Decoupling fleet from diagnosis is a separate, deferred effort — these tools
+remain here only until then.
 
 ---
 
@@ -259,8 +273,8 @@ Port 3000  — HTTP MCP        Claude connects here
 - Every MQTT command carries ECDSA-P256 signature + nonce + timestamp — devices reject
   unsigned or replayed commands even if TLS is broken
 - ACL plugin enforces that device-42 cannot publish to or subscribe to device-43 topics
-- OTA targeting more than 10 devices simultaneously requires explicit `confirmed=True`
-  parameter in `fleet_push_ota`
+- `POST /internal/command` requires a matching `X-Fleet-Secret` header (`mcp_secret`); bulk
+  rollout / blast-radius policy now lives in nff-ota, the OTA brain
 - All commands are written to the audit log before being published
 
 ---

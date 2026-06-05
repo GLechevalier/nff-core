@@ -159,58 +159,6 @@ async def _ingest_crash(device_id: str, payload: dict[str, Any]) -> None:
 
 
 # ---------------------------------------------------------------------------
-# OTA jobs
-# ---------------------------------------------------------------------------
-
-def create_ota_job(
-    job_id: str,
-    device_id: str,
-    from_version: str | None,
-    target_version: str,
-) -> None:
-    if not _enabled:
-        return
-    _fire(_create_ota_job(job_id, device_id, from_version, target_version))
-
-
-async def _create_ota_job(
-    job_id: str,
-    device_id: str,
-    from_version: str | None,
-    target_version: str,
-) -> None:
-    await _client.table("ota_jobs").insert(
-        {
-            "id": job_id,
-            "device_id": device_id,
-            "from_version": from_version,
-            "target_version": target_version,
-            "status": "pending",
-            "progress": 0,
-            "started_at": _now(),
-            "completed_at": None,
-        }
-    ).execute()
-
-
-def update_ota_job(job_id: str, status: str, progress: int = 100) -> None:
-    if not _enabled:
-        return
-    _fire(_update_ota_job(job_id, status, progress))
-
-
-async def _update_ota_job(job_id: str, status: str, progress: int) -> None:
-    terminal = status in ("committed", "rolled_back", "timed_out")
-    await _client.table("ota_jobs").update(
-        {
-            "status": status,
-            "progress": progress,
-            "completed_at": _now() if terminal else None,
-        }
-    ).eq("id", job_id).execute()
-
-
-# ---------------------------------------------------------------------------
 # Audit log
 # ---------------------------------------------------------------------------
 

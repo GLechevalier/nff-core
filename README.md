@@ -28,13 +28,16 @@ Every command is signed with an ECDSA-P256 key. Devices reject unsigned or repla
 | `fleet_list_devices` | List all known devices with online/offline status |
 | `fleet_ping` | Send a signed ping, return round-trip latency |
 | `fleet_reboot` | Send a signed reboot command |
-| `fleet_push_ota` | Push a firmware URL to one or more devices, wait for `ota_result` |
-| `fleet_store_elf` | Persist an ELF binary under `/data/firmware/{build_id}/` |
+| `fleet_store_elf` | Persist an ELF binary under `/data/firmware/{build_id}/` (crash symbolication helper) |
 | `fleet_get_crash` | Read the retained crash report for a device (works offline) |
 | `fleet_resolve_backtrace` | Run `addr2line` against a stored ELF to symbolize a crash |
 | `fleet_get_diag` | Request heap stats + FreeRTOS task list from a live device |
 
-Bulk OTA to more than 10 devices at once requires `confirmed=True`.
+**OTA is not a fleet tool.** nff-ota owns OTA and delivers through fleet's internal endpoint:
+
+| Endpoint | What it does |
+|------|-------------|
+| `POST /internal/command` | Service-to-service (shared `X-Fleet-Secret`): sign + deliver any command — including `ota` — over MQTT and return the device response. nff-ota calls this; fleet makes no OTA decisions. |
 
 ---
 
@@ -79,7 +82,7 @@ nff-fleet provision export-cmd-key     # export command-verify public key (for d
 claude mcp add nff-fleet --transport http http://localhost:3000/mcp
 ```
 
-Then ask Claude: *"List all online devices"*, *"Ping device-42"*, *"Push OTA build abc123 from https://... to device-42"*.
+Then ask Claude: *"List all online devices"*, *"Ping device-42"*, *"Get the crash report for device-42"*. (To push firmware, ask nff-ota — it delivers through this service.)
 
 ---
 
@@ -97,9 +100,8 @@ All settings use the `NFF_FLEET_` env prefix. Copy `.env.example` to `.env`:
 | `NFF_FLEET_TLS_SERVER_KEY` | `/data/certs/server.key` | Broker TLS key |
 | `NFF_FLEET_CMD_SIGN_KEY` | `/data/keys/cmd_sign.pem` | ECDSA P-256 signing key |
 | `NFF_FLEET_COMMAND_TIMEOUT` | `30.0` | Default command timeout (seconds) |
-| `NFF_FLEET_OTA_BULK_LIMIT` | `10` | Max devices for unconfirmed bulk OTA |
 | `NFF_FLEET_AUDIT_LOG` | `/data/audit/commands.jsonl` | Append-only command audit log |
-| `NFF_FLEET_MCP_SECRET` | — | Bearer token for MCP session identification |
+| `NFF_FLEET_MCP_SECRET` | — | Bearer token for MCP sessions **and** the `X-Fleet-Secret` for `POST /internal/command` |
 
 ---
 
@@ -120,20 +122,22 @@ All settings use the `NFF_FLEET_` env prefix. Copy `.env.example` to `.env`:
 - **mTLS** — each device gets a unique client certificate (CN = device_id) issued by the built-in CA. The broker enforces it.
 - **ACL** — amqtt ACL plugin scopes each device to its own topics. `device-42` cannot read or write `device-43` topics.
 - **Audit log** — every `send_command` call is written to `/data/audit/commands.jsonl` before publishing.
-- **Bulk OTA guard** — pushing to more than 10 devices requires `confirmed=True`.
+- **Internal endpoint auth** — `POST /internal/command` requires a matching `X-Fleet-Secret`. Rollout / blast-radius policy lives in nff-ota.
 
 ---
 
 ## Relationship with nff-ota
 
-| nff-ota | nff-fleet (this repo) |
+| nff-ota (the OTA brain) | nff-fleet (this repo) |
 |---------|----------------------|
 | Firmware artifact catalog | Real-time device presence |
 | Deployment plans + phased rollouts | Command delivery (MQTT QoS-1) |
 | Per-device deployment status (Supabase) | Crash report cache (retained MQTT) |
-| HTTP polling by devices | Persistent MQTT connections |
+| Decides what/when to push | Signs + sends commands; makes no OTA decisions |
 
-When Claude pushes OTA: call nff-ota to get a pre-signed firmware URL, then pass it to `fleet_push_ota`. nff-fleet delivers it over MQTT and waits for `ota_result`.
+**OTA delivery:** nff-ota decides what to push and calls fleet's `POST /internal/command`
+(shared `X-Fleet-Secret`). Fleet signs the `ota|version|sha256|nonce|timestamp` payload and
+delivers it over MQTT, returning the device response. nff-fleet exposes no OTA tool of its own.
 
 ---
 
@@ -166,7 +170,8 @@ nff-fleet/
     ├── registry.py        — DeviceRegistry: in-memory online/offline state
     ├── commands.py        — send_command(): sign, publish, await nonce future
     ├── signing.py         — ECDSA-P256 sign/verify
-    ├── ota.py             — ELF storage + OTA payload construction
+    ├── control.py         — POST /internal/command: nff-ota's command-delivery endpoint
+    ├── ota.py             — ELF storage for crash symbolication (no OTA logic)
     ├── crash.py           — crash report cache + addr2line wrapper
     ├── diag.py            — diagnostics command + response parser
     ├── audit.py           — JSONL append-only audit log
@@ -209,17 +214,25 @@ sources, including uncommitted edits), then runs `arduino-cli compile -u`:
 > Full end-to-end walkthrough (server + device steps, what the response actually means,
 > troubleshooting): **[docs/OTA_FLOW.md](docs/OTA_FLOW.md)**.
 
-`fleet_push_ota` signs an `ota` command, the device downloads the firmware over HTTPS, verifies
-SHA-256, flashes the alternate partition, and reboots. A few non-obvious requirements:
+OTA is initiated from **nff-ota** (`start_deployment`), which calls fleet's
+`POST /internal/command`. Fleet signs the `ota` command; the device downloads the firmware
+over HTTPS, verifies SHA-256, flashes the alternate partition, and reboots. A few non-obvious
+requirements (independent of which service initiates):
 
-- **Version must be a semver ≥ the device's current `fw`** — `build_id` *is* the OTA version,
-  and the device enforces anti-downgrade. A non-semver `build_id` (e.g. `testbuild001`) is rejected.
-- **The fleet SHA-256s `/data/firmware/{build_id}/firmware.elf`** to build the signed command, and
-  the device verifies the *downloaded* bytes against that hash. Serve the **same bytes** at the
-  firmware URL — for an app image, place the `.bin` at that path and serve the identical `.bin`.
+- **Version must be a semver ≥ the device's current `fw`** — the device enforces anti-downgrade.
+  A non-semver version is rejected. nff-ota uses the artifact's `version` field.
+- **The SHA-256 must match the bytes the device downloads.** nff-ota computes the sha256 over the
+  served BIN and includes it in the command; serve the **same bytes** at the firmware URL.
 - The Arduino port downloads with `setInsecure()`, so a self-signed HTTPS server works for testing.
 
 ```text
-fleet_push_ota("device-42", "https://<host>:8443/firmware.bin", build_id="1.0.1")
-  → ota_started → device downloads → SHA-256 OK → reboot → heartbeat shows fw=1.0.1
+# From nff-ota (the OTA brain):
+start_deployment(deployment_id)
+  → fleet POST /internal/command {action: ota, version, sha256, url}
+  → fleet signs + MQTT push → device downloads → SHA-256 OK → reboot → heartbeat shows new fw
+
+# The same delivery primitive, exercised directly against fleet for a local test:
+curl -X POST http://localhost:3001/internal/command \
+  -H "X-Fleet-Secret: $NFF_FLEET_MCP_SECRET" \
+  -d '{"device_id":"device-42","payload":{"action":"ota","version":"1.0.1","sha256":"<hex>","url":"https://<host>:8443/firmware.bin"}}'
 ```
