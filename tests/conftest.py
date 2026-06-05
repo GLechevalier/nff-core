@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import secrets
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from cryptography.hazmat.primitives import serialization
@@ -46,6 +46,7 @@ def _make_supabase_mock() -> MagicMock:
     # Each chained call returns the same mock so .select().eq().execute() works.
     table_mock.select.return_value = table_mock
     table_mock.insert.return_value = table_mock
+    table_mock.upsert.return_value = table_mock
     table_mock.update.return_value = table_mock
     table_mock.delete.return_value = table_mock
     table_mock.eq.return_value = table_mock
@@ -53,14 +54,17 @@ def _make_supabase_mock() -> MagicMock:
     table_mock.neq.return_value = table_mock
     table_mock.order.return_value = table_mock
     table_mock.limit.return_value = table_mock
-    table_mock.execute = MagicMock(return_value=MagicMock(data=[], error=None))
+    # Client is an AsyncClient: .execute() is awaited (the chained builder
+    # methods above stay synchronous and return the same table mock).
+    table_mock.execute = AsyncMock(return_value=MagicMock(data=[], error=None))
     mock.table.return_value = table_mock
 
-    # --- storage API ---
+    # --- storage API (async) ---
     storage_bucket = MagicMock()
-    storage_bucket.upload.return_value = MagicMock(error=None)
-    storage_bucket.download.return_value = b""
-    storage_bucket.remove.return_value = MagicMock(error=None)
+    storage_bucket.upload = AsyncMock(return_value=MagicMock(error=None))
+    storage_bucket.download = AsyncMock(return_value=b"")
+    storage_bucket.remove = AsyncMock(return_value=MagicMock(error=None))
+    storage_bucket.create_signed_url = AsyncMock(return_value={"signedURL": "https://signed.example/firmware.bin"})
     mock.storage.from_.return_value = storage_bucket
 
     return mock

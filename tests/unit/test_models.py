@@ -41,41 +41,47 @@ class TestUploadArtifactParams:
 
 class TestRegisterDeviceParams:
     def test_valid(self):
-        p = RegisterDeviceParams(identity_attributes={"mac": "aa:bb:cc:dd:ee:ff"})
+        p = RegisterDeviceParams(device_id="test-device-01", identity_attributes={"mac": "aa:bb:cc:dd:ee:ff"})
+        assert p.device_id == "test-device-01"
         assert p.identity_attributes["mac"] == "aa:bb:cc:dd:ee:ff"
 
     def test_empty_identity_rejected(self):
         with pytest.raises(ValidationError):
-            RegisterDeviceParams(identity_attributes={})
+            RegisterDeviceParams(device_id="d", identity_attributes={})
+
+    def test_missing_device_id_rejected(self):
+        with pytest.raises(ValidationError):
+            RegisterDeviceParams(identity_attributes={"mac": "aa:bb"})
 
     def test_default_tags_empty(self):
-        p = RegisterDeviceParams(identity_attributes={"mac": "aa:bb"})
+        p = RegisterDeviceParams(device_id="d", identity_attributes={"mac": "aa:bb"})
         assert p.tags == []
 
 
 class TestCreateDeploymentParams:
     def test_valid(self):
         p = CreateDeploymentParams(
-            name="deploy-v1", artifact_id="art-123", device_group_id="grp-456"
+            name="deploy-v1", target_version="1.0.0", device_group_id="grp-456"
         )
+        assert p.target_version == "1.0.0"
         assert p.max_devices_in_flight == 10
         assert p.retries == 3
 
     def test_max_devices_in_flight_minimum(self):
         with pytest.raises(ValidationError):
             CreateDeploymentParams(
-                name="d", artifact_id="a", device_group_id="g", max_devices_in_flight=0
+                name="d", target_version="1.0.0", device_group_id="g", max_devices_in_flight=0
             )
 
     def test_retries_minimum(self):
         with pytest.raises(ValidationError):
             CreateDeploymentParams(
-                name="d", artifact_id="a", device_group_id="g", retries=-1
+                name="d", target_version="1.0.0", device_group_id="g", retries=-1
             )
 
     def test_empty_name_rejected(self):
         with pytest.raises(ValidationError):
-            CreateDeploymentParams(name="", artifact_id="a", device_group_id="g")
+            CreateDeploymentParams(name="", target_version="1.0.0", device_group_id="g")
 
 
 class TestReportDeviceStatusParams:

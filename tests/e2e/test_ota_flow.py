@@ -48,17 +48,20 @@ async def test_full_ota_lifecycle(supabase_client, tmp_path, ed25519_keypair):
     fw_file = tmp_path / "firmware.bin"
     fw_file.write_bytes(fw_data)
 
+    version = f"e2e-{run_id}"
     art_result = await upload_artifact(UploadArtifactParams(
-        name=f"fw-e2e-{run_id}", version="1.0.0",
+        name=f"fw-e2e-{run_id}", version=version,
         device_types=["esp32"], file_path=str(fw_file)
     ))
     assert art_result.error is None, art_result.error
-    artifact_id = art_result.artifact.id
+    assert art_result.artifact.id == version
 
-    # 2. Register and accept 3 devices
+    # 2. Register and accept 3 devices (keyed by their real device ids)
     device_ids = []
     for i in range(3):
+        device_id = f"e2e-dev-{run_id}-{i}"
         reg = await register_device(RegisterDeviceParams(
+            device_id=device_id,
             identity_attributes={"mac": f"aa:bb:cc:dd:ee:{run_id[-2:]}{i:02d}"}
         ))
         assert reg.error is None, reg.error
@@ -77,7 +80,7 @@ async def test_full_ota_lifecycle(supabase_client, tmp_path, ed25519_keypair):
 
     # 4. Create deployment
     dep = await create_deployment(CreateDeploymentParams(
-        name=f"e2e-deploy-{run_id}", artifact_id=artifact_id, device_group_id=group_id
+        name=f"e2e-deploy-{run_id}", target_version=version, device_group_id=group_id
     ))
     assert dep.error is None, dep.error
     deployment_id = dep.deployment.id

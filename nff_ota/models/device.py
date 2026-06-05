@@ -6,6 +6,7 @@ DeviceStatus = Literal["pending", "preauthorized", "accepted", "rejected", "deco
 
 
 class RegisterDeviceParams(BaseModel):
+    device_id: str = Field(min_length=1)  # the device's real fleet id (e.g. "test-device-01")
     identity_attributes: dict[str, str] = Field(min_length=1)
     public_key: str = ""
     tags: list[str] = Field(default_factory=list)
@@ -19,6 +20,7 @@ class RegisterDeviceParams(BaseModel):
 
 
 class PreauthorizeDeviceParams(BaseModel):
+    device_id: str = Field(min_length=1)  # the device's real fleet id
     identity_attributes: dict[str, str] = Field(min_length=1)
     public_key: str = ""
 
@@ -32,8 +34,8 @@ class DeviceInfo(BaseModel):
     id: str
     identity_attributes: dict[str, str]
     public_key: str | None
-    status: DeviceStatus
-    current_artifact_id: str | None
+    status: DeviceStatus  # enrollment status (devices.ota_status), not connectivity
+    current_firmware_version: str | None
     tags: list[str]
     created_at: str
 

@@ -1,7 +1,7 @@
 """Integration tests for device group tools."""
 from __future__ import annotations
 
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -24,7 +24,7 @@ def _group_row(group_id: str = "grp-1", name: str = "fleet") -> dict:
 
 
 def _make_table_mock(call_responses: list[list[dict]]) -> MagicMock:
-    """Returns a mock where each successive .execute() call returns the next response."""
+    """Returns a mock where each successive awaited .execute() returns the next response."""
     call_n = [0]
     def side_effect(name):
         t = MagicMock()
@@ -35,7 +35,7 @@ def _make_table_mock(call_responses: list[list[dict]]) -> MagicMock:
         t.eq.return_value = t
         t.in_.return_value = t
         t.order.return_value = t
-        def execute():
+        async def execute():
             idx = call_n[0]
             call_n[0] += 1
             data = call_responses[idx] if idx < len(call_responses) else []
@@ -54,7 +54,7 @@ class TestCreateGroup:
             t.select.return_value = t
             t.insert.return_value = t
             t.eq.return_value = t
-            t.execute.return_value = MagicMock(data=[row], error=None)
+            t.execute = AsyncMock(return_value=MagicMock(data=[row], error=None))
             return t
         mock_supabase.table.side_effect = table_se
 
@@ -108,7 +108,7 @@ class TestAddRemoveDevices:
 
 class TestListGroups:
     async def test_list_empty(self, mock_supabase):
-        mock_supabase.table.return_value.select.return_value.order.return_value.execute.return_value = MagicMock(data=[], error=None)
+        mock_supabase.table.return_value.select.return_value.order.return_value.execute = AsyncMock(return_value=MagicMock(data=[], error=None))
         result = await list_groups()
         assert result == []
 
@@ -122,7 +122,7 @@ class TestListGroups:
             t.order.return_value = t
             t.eq.return_value = t
 
-            def execute():
+            async def execute():
                 call_n[0] += 1
                 if call_n[0] == 1:
                     return MagicMock(data=rows, error=None)

@@ -12,9 +12,12 @@ Mender-inspired **Over-The-Air firmware update manager** exposed as an [MCP](htt
 2. **Register & authenticate** devices through a pending → accepted lifecycle
 3. **Group** accepted devices for targeted rollouts
 4. **Deploy** a firmware artifact to a device group, with configurable concurrency and retry limits
-5. **Track** per-device progress through `downloading → installing → rebooting → success`
+5. **Push** the update — `nff-ota` is the OTA brain; it asks **nff-fleet** to deliver the signed command to each device over MQTT
+6. **Track** per-device progress through `downloading → installing → rebooting → success`
 
 Deployments auto-finalize when all devices reach a terminal state. Devices that were preauthorized are accepted automatically on first contact.
+
+> **nff-ota decides, nff-fleet delivers.** nff-ota never talks to devices directly — the only wire to a device is nff-fleet's MQTT broker. When you start a deployment, nff-ota builds the OTA command (version, sha256, pre-signed firmware URL) and calls nff-fleet's `POST /internal/command`; fleet signs it and pushes it over MQTT. nff-fleet does **not** make any OTA decisions — it only sends commands.
 
 ---
 
@@ -22,7 +25,7 @@ Deployments auto-finalize when all devices reach a terminal state. Devices that 
 
 ```
 MCP Client (Claude / any host)
-        │  stdio (MCP protocol)
+        │  streamable-http :3002 (MCP protocol)
         ▼
   nff_ota/server.py  ──  FastMCP + lifespan
         │
@@ -32,12 +35,14 @@ MCP Client (Claude / any host)
   │  devices     devices://    │
   │  deployments deployments:/ │
   │  groups      device-groups:│
-  └─────┬──────────────────────┘
-        │  supabase-py (async)
-        ▼
-  Supabase project
-   ├── PostgreSQL (5 tables)
-   └── Storage bucket  (firmware ELF + stripped BIN)
+  └──┬───────────────────┬─────┘
+     │ supabase-py(async)│ httpx → nff-fleet
+     ▼                   ▼
+  Supabase project    nff-fleet  (command-delivery plane)
+   ├── PostgreSQL       POST /internal/command
+   │   (5 tables)         │ signs + MQTT push
+   └── Storage bucket     ▼
+       (ELF + BIN)      device (nff-sdk-c)
 ```
 
 ---
@@ -49,6 +54,7 @@ sequenceDiagram
     participant C as MCP Client
     participant S as nff-ota
     participant DB as Supabase
+    participant F as nff-fleet
     participant D as Device
 
     C->>S: create_deployment(artifact_id, group_id)
@@ -56,28 +62,45 @@ sequenceDiagram
     S->>DB: insert deployment + device_deployment rows (status=pending)
     S-->>C: deployment_id
 
-    D->>S: check for pending update
-    S->>DB: query device_deployments for device
-    DB-->>S: pending deployment + artifact_id
-    S-->>D: deployment_id + artifact download URL
+    C->>S: start_deployment(deployment_id)
+    S->>DB: load artifact (version, sha256) + signed firmware URL
+    loop each pending device (max_devices_in_flight)
+        S->>DB: device_deployment status=downloading, attempts+1
+        S->>F: POST /internal/command {device_id, ota: version/sha256/url}
+        F->>D: signed OTA command over MQTT
+        D->>D: download BIN over HTTPS, verify sha256, swap partition
+        D-->>F: ota_result (ack)
+        F-->>S: device response
+    end
+    S-->>C: delivered / failed / skipped per device
 
-    D->>S: report_device_status(downloading)
-    S->>DB: status=downloading, attempts+1
-    D->>DB: download pre-stripped BIN from Storage
-    DB-->>D: firmware bytes (.bin)
-
-    D->>S: report_device_status(installing)
-    S->>DB: status=installing
-    Note over D: flashes firmware
-
-    D->>S: report_device_status(rebooting)
-    S->>DB: status=rebooting
-    Note over D: reboots
-
-    D->>S: report_device_status(success)
-    S->>DB: status=success, device.current_artifact_id=artifact_id
-    S->>DB: all devices terminal → deployment=finished
+    Note over F,D: Final committed/rolled_back + crash routing arrive via the
+    Note over F,D: deferred ota_result feedback loop (see docs/OTA_ROADMAP.md)
 ```
+
+---
+
+## Delivery via nff-fleet
+
+nff-ota has no device channel of its own. `start_deployment` delivers each OTA command
+through **nff-fleet**'s `POST /internal/command` endpoint (authenticated with the shared
+`OTA_FLEET_SECRET`). Fleet signs the `ota|version|sha256|nonce|timestamp` payload with its
+command key and publishes it over MQTT.
+
+**Device identity mapping.** nff-ota keys devices by Supabase UUID (`devices.id`), but
+fleet addresses devices by their MQTT identity (the client-certificate CN, e.g.
+`device-42`). Record that identity when registering a device, under
+`identity_attributes.mqtt_id`:
+
+```jsonc
+register_device(identity_attributes={ "mqtt_id": "device-42", "mac": "..." })
+```
+
+`start_deployment` resolves `identity_attributes.mqtt_id` for each device; devices without
+it are reported as `skipped` (nothing is delivered for them).
+
+See [`docs/OTA_ROADMAP.md`](docs/OTA_ROADMAP.md) for what is intentionally deferred
+(phased-rollout gates, final `ota_result` reconciliation + rollback, crash→diagnosis routing).
 
 ---
 
@@ -131,13 +154,16 @@ cp .env.example .env
 | `OTA_DEFAULT_MAX_DEVICES_IN_FLIGHT` | `10` | Concurrent device update limit |
 | `OTA_DEFAULT_MAX_RETRIES` | `3` | Max retry attempts per device |
 | `OTA_TRUSTED_SIGNING_KEY_PATH` | *(empty)* | Path to Ed25519 public key for artifact verification |
+| `OTA_FLEET_URL` | *(empty)* | Base URL of nff-fleet's command-delivery endpoint (e.g. `http://localhost:3001`) — required to push updates |
+| `OTA_FLEET_SECRET` | *(empty)* | Shared secret sent as `X-Fleet-Secret`; must match nff-fleet's `NFF_FLEET_MCP_SECRET` |
+| `OTA_FLEET_TIMEOUT` | `120` | Seconds to await a device's response to an OTA command |
 
 ---
 
 ## Running
 
 ```bash
-nff-ota        # starts the stdio MCP server
+nff-ota        # starts the streamable-http MCP server on 0.0.0.0:3002
 ```
 
 Or via the module:
@@ -146,20 +172,14 @@ Or via the module:
 python -m nff_ota
 ```
 
+Host/port are configurable via `OTA_MCP_HOST` / `OTA_MCP_PORT` (default `0.0.0.0:3002`).
+
 ### MCP client config (Claude Desktop / claude-code)
 
-```json
-{
-  "mcpServers": {
-    "nff-ota": {
-      "command": "nff-ota",
-      "env": {
-        "OTA_SUPABASE_URL": "https://your-project.supabase.co",
-        "OTA_SUPABASE_KEY": "your-service-role-key"
-      }
-    }
-  }
-}
+Register it over HTTP (the server must already be running):
+
+```bash
+claude mcp add nff-ota --transport http http://localhost:3002/mcp
 ```
 
 ---
@@ -196,11 +216,12 @@ python -m nff_ota
 #### Deployments
 | Tool | Description |
 |---|---|
-| `create_deployment` | Create a deployment targeting an artifact + device group |
+| `create_deployment` | Create a deployment targeting an artifact + device group (devices start `pending`) |
+| `start_deployment` | Push the firmware: build the OTA command and deliver it to each pending device **via nff-fleet** |
 | `get_deployment_status` | Aggregated status with per-device breakdown |
 | `abort_deployment` | Abort a scheduled or active deployment |
 | `list_deployments` | List deployments, filter by status |
-| `report_device_status` | Device reports its current update stage (called by the device) |
+| `report_device_status` | Manually advance a device's update stage (final outcome reconciliation is the deferred feedback loop) |
 
 ### Resources (read-only metadata)
 

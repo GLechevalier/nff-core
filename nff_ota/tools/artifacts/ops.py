@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -9,11 +8,19 @@ from nff_ota.client import get_client
 from nff_ota.config import settings
 from nff_ota.crypto import sha256_bytes, sign_ed25519, verify_ed25519
 from nff_ota.models.artifact import ArtifactInfo, ArtifactResult, UploadArtifactParams
-from nff_ota.storage import delete_artifact_file, storage_path, upload_artifact as _upload_file
+from nff_ota.storage import create_signed_url as _create_signed_url, delete_artifact_file, storage_path, upload_artifact as _upload_file
+
+# Deployable-image columns nff-ota owns on the shared firmware_versions table.
+_ARTIFACT_FIELDS = ("name", "device_types", "checksum_sha256", "size_bytes", "signature", "storage_path", "provides", "depends")
 
 
 async def upload_artifact(params: UploadArtifactParams) -> ArtifactResult:
-    """Upload a firmware artifact and register it. The file is read from file_path on the server."""
+    """Upload a firmware artifact and register it against its version. The file is read from file_path on the server.
+
+    A firmware version is the unit of identity (firmware_versions.version). Uploading
+    attaches the deployable binary + checksum/signature to that version row, creating
+    it if the version is not already tracked.
+    """
     try:
         data = Path(params.file_path).read_bytes()
     except OSError as e:
@@ -39,18 +46,18 @@ async def upload_artifact(params: UploadArtifactParams) -> ArtifactResult:
         if not verify_ed25519(pub_pem, data, signature):
             return ArtifactResult(error="Signature verification failed against trusted key")
 
-    artifact_id = str(uuid.uuid4())
-    path = storage_path(artifact_id)
+    path = storage_path(params.version)
 
     try:
-        await _upload_file(artifact_id, data)
+        await _upload_file(params.version, data)
     except Exception as e:
         return ArtifactResult(error=f"Storage upload failed: {e}")
 
+    # Upsert by version: attach deployable fields without clobbering any existing
+    # git-lineage columns (build_id/changelog/...) the dashboard may have set.
     row = {
-        "id": artifact_id,
-        "name": params.name,
         "version": params.version,
+        "name": params.name,
         "device_types": params.device_types,
         "checksum_sha256": checksum,
         "size_bytes": len(data),
@@ -58,29 +65,28 @@ async def upload_artifact(params: UploadArtifactParams) -> ArtifactResult:
         "storage_path": path,
         "provides": params.provides,
         "depends": params.depends,
-        "created_at": datetime.now(timezone.utc).isoformat(),
     }
 
     try:
         client = get_client()
-        resp = client.table("artifacts").insert(row).execute()
-        if resp.error:
-            return ArtifactResult(error=str(resp.error))
+        resp = await client.table("firmware_versions").upsert(row, on_conflict="version").execute()
         inserted = resp.data[0] if resp.data else row
     except Exception as e:
-        return ArtifactResult(error=f"Database insert failed: {e}")
+        return ArtifactResult(error=f"Database upsert failed: {e}")
 
     return ArtifactResult(artifact=_row_to_info(inserted))
 
 
 async def list_artifacts(device_type: str | None = None, version_prefix: str | None = None) -> list[ArtifactInfo]:
-    """List all registered artifacts, optionally filtered by device_type or version prefix."""
+    """List registered firmware artifacts (versions that carry a deployable binary)."""
     client = get_client()
-    query = client.table("artifacts").select("*").order("created_at", desc=True)
-    resp = query.execute()
+    query = client.table("firmware_versions").select("*").order("version", desc=True)
+    resp = await query.execute()
     rows = resp.data or []
     result = []
     for row in rows:
+        if not row.get("storage_path"):
+            continue  # a pure lineage row with no uploaded binary is not a deployable artifact
         dtypes = row.get("device_types") or []
         if isinstance(dtypes, str):
             dtypes = json.loads(dtypes)
@@ -92,34 +98,55 @@ async def list_artifacts(device_type: str | None = None, version_prefix: str | N
     return result
 
 
-async def delete_artifact(artifact_id: str) -> ArtifactResult:
-    """Delete an artifact. Fails if any active (non-terminal) deployment references it."""
+async def delete_artifact(version: str) -> ArtifactResult:
+    """Unregister an artifact (remove its binary + deployable fields). Fails if any active deployment references the version.
+
+    The firmware_versions row itself is preserved so version lineage / dashboard
+    history and any FK references stay intact.
+    """
     client = get_client()
 
     # Guard: check for active deployments
     active_statuses = ["scheduled", "active", "paused"]
     dep_resp = (
-        client.table("deployments")
+        await client.table("deployments")
         .select("id")
-        .eq("artifact_id", artifact_id)
+        .eq("target_version", version)
         .in_("status", active_statuses)
         .execute()
     )
     if dep_resp.data:
-        return ArtifactResult(error=f"Cannot delete: {len(dep_resp.data)} active deployment(s) reference this artifact")
+        return ArtifactResult(error=f"Cannot delete: {len(dep_resp.data)} active deployment(s) reference this version")
 
-    # Fetch artifact to confirm it exists
-    art_resp = client.table("artifacts").select("*").eq("id", artifact_id).execute()
+    # Fetch the version to confirm it exists and actually has a binary
+    art_resp = await client.table("firmware_versions").select("*").eq("version", version).execute()
     if not art_resp.data:
-        return ArtifactResult(error=f"Artifact {artifact_id!r} not found")
+        return ArtifactResult(error=f"Firmware version {version!r} not found")
+    if not art_resp.data[0].get("storage_path"):
+        return ArtifactResult(error=f"Firmware version {version!r} has no uploaded artifact to delete")
 
     try:
-        await delete_artifact_file(artifact_id)
+        await delete_artifact_file(version)
     except Exception as e:
         return ArtifactResult(error=f"Storage delete failed: {e}")
 
-    client.table("artifacts").delete().eq("id", artifact_id).execute()
+    cleared = {"checksum_sha256": None, "signature": None, "storage_path": None, "size_bytes": 0}
+    await client.table("firmware_versions").update(cleared).eq("version", version).execute()
     return ArtifactResult(artifact=_row_to_info(art_resp.data[0]))
+
+
+async def get_firmware_url(version: str, expires_in: int = 3600) -> ArtifactResult:
+    """Generate a pre-signed HTTPS download URL for a stored firmware version.
+
+    expires_in: seconds until the URL expires (default 3600 = 1 hour).
+    This URL is embedded in the OTA command that start_deployment delivers through
+    nff-fleet; the device downloads the BIN directly from it and verifies the sha256.
+    """
+    try:
+        url = await _create_signed_url(version, expires_in)
+        return ArtifactResult(download_url=url)
+    except Exception as e:
+        return ArtifactResult(error=f"Failed to generate download URL: {e}")
 
 
 def _row_to_info(row: dict) -> ArtifactInfo:
@@ -133,15 +160,15 @@ def _row_to_info(row: dict) -> ArtifactInfo:
     if isinstance(depends, str):
         depends = json.loads(depends)
     return ArtifactInfo(
-        id=row["id"],
-        name=row["name"],
+        id=row["version"],
+        name=row.get("name") or row["version"],
         version=row["version"],
         device_types=dtypes,
-        checksum_sha256=row["checksum_sha256"],
-        size_bytes=row["size_bytes"],
+        checksum_sha256=row.get("checksum_sha256") or "",
+        size_bytes=row.get("size_bytes") or 0,
         signature=row.get("signature"),
-        storage_path=row["storage_path"],
+        storage_path=row.get("storage_path") or "",
         provides=provides,
         depends=depends,
-        created_at=str(row["created_at"]),
+        created_at=str(row.get("created_at") or ""),
     )

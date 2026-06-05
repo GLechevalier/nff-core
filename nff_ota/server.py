@@ -35,6 +35,8 @@ mcp = FastMCP(
     ),
     log_level=settings.log_level,
     lifespan=lifespan,
+    host=settings.mcp_host,
+    port=settings.mcp_port,
 )
 
 register_artifacts(mcp)
@@ -46,4 +48,4 @@ register_prompts(mcp)
 
 
 def main() -> None:
-    mcp.run("stdio")
+    mcp.run(transport="streamable-http")

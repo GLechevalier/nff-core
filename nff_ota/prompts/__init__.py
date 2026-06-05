@@ -9,7 +9,7 @@ def register_prompts(root: FastMCP) -> None:
 
 Step 1 – Upload the artifact:
   Call upload_artifact with the firmware file path, name='{artifact_name}', version, and device_types.
-  Record the returned artifact_id and verify checksum_sha256.
+  The version is the artifact's identity. Verify the returned checksum_sha256.
 
 Step 2 – Verify device group:
   Call list_groups to confirm '{device_group_name}' exists. Note its id.
@@ -17,14 +17,14 @@ Step 2 – Verify device group:
   If devices are pending, call accept_device for each.
 
 Step 3 – Create the deployment:
-  Call create_deployment with name, artifact_id, and device_group_id.
+  Call create_deployment with name, target_version (the version uploaded in Step 1), and device_group_id.
   Default max_devices_in_flight=10 and retries=3 are safe starting points.
   Omit start_time to start immediately.
 
 Step 4 – Monitor progress:
   Poll get_deployment_status(deployment_id) periodically.
   Watch for: pending → downloading → installing → rebooting → success on each device.
-  If failure_count grows, investigate individual device_deployments.
+  If failure_count grows, investigate the individual per-device ota_jobs.
 
 Step 5 – Confirm completion:
   When deployment.status == 'finished', verify success_count == total_count.

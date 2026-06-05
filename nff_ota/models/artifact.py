@@ -19,7 +19,7 @@ class UploadArtifactParams(BaseModel):
 
 
 class ArtifactInfo(BaseModel):
-    id: str
+    id: str  # the firmware version (firmware_versions PK); artifacts are keyed by version
     name: str
     version: str
     device_types: list[str]
@@ -34,4 +34,5 @@ class ArtifactInfo(BaseModel):
 
 class ArtifactResult(BaseModel):
     artifact: ArtifactInfo | None = None
+    download_url: str | None = None
     error: str | None = None

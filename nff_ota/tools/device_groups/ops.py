@@ -18,9 +18,7 @@ async def create_group(params: CreateGroupParams) -> GroupResult:
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
     try:
-        resp = client.table("device_groups").insert(row).execute()
-        if resp.error:
-            return GroupResult(error=str(resp.error))
+        resp = await client.table("device_groups").insert(row).execute()
         inserted = (resp.data or [row])[0]
     except Exception as e:
         return GroupResult(error=f"Database insert failed: {e}")
@@ -30,43 +28,43 @@ async def create_group(params: CreateGroupParams) -> GroupResult:
 async def add_devices_to_group(params: ModifyGroupMembersParams) -> GroupResult:
     """Add devices to a group (idempotent)."""
     client = get_client()
-    grp_resp = client.table("device_groups").select("*").eq("id", params.group_id).execute()
+    grp_resp = await client.table("device_groups").select("*").eq("id", params.group_id).execute()
     if not grp_resp.data:
         return GroupResult(error=f"Group {params.group_id!r} not found")
     rows = [{"group_id": params.group_id, "device_id": did} for did in params.device_ids]
     try:
-        client.table("device_group_members").insert(rows).execute()
+        await client.table("device_group_members").insert(rows).execute()
     except Exception:
         pass  # ignore duplicate-key errors (idempotent)
-    count = _member_count(params.group_id)
+    count = await _member_count(params.group_id)
     return GroupResult(group=_row_to_info(grp_resp.data[0], member_count=count))
 
 
 async def remove_devices_from_group(params: ModifyGroupMembersParams) -> GroupResult:
     """Remove devices from a group."""
     client = get_client()
-    grp_resp = client.table("device_groups").select("*").eq("id", params.group_id).execute()
+    grp_resp = await client.table("device_groups").select("*").eq("id", params.group_id).execute()
     if not grp_resp.data:
         return GroupResult(error=f"Group {params.group_id!r} not found")
-    client.table("device_group_members").delete().eq("group_id", params.group_id).in_("device_id", params.device_ids).execute()
-    count = _member_count(params.group_id)
+    await client.table("device_group_members").delete().eq("group_id", params.group_id).in_("device_id", params.device_ids).execute()
+    count = await _member_count(params.group_id)
     return GroupResult(group=_row_to_info(grp_resp.data[0], member_count=count))
 
 
 async def list_groups() -> list[GroupInfo]:
     """List all device groups with their member counts."""
     client = get_client()
-    resp = client.table("device_groups").select("*").order("created_at", desc=True).execute()
+    resp = await client.table("device_groups").select("*").order("created_at", desc=True).execute()
     result = []
     for row in (resp.data or []):
-        count = _member_count(row["id"])
+        count = await _member_count(row["id"])
         result.append(_row_to_info(row, member_count=count))
     return result
 
 
-def _member_count(group_id: str) -> int:
+async def _member_count(group_id: str) -> int:
     client = get_client()
-    resp = client.table("device_group_members").select("device_id").eq("group_id", group_id).execute()
+    resp = await client.table("device_group_members").select("device_id").eq("group_id", group_id).execute()
     return len(resp.data or [])
 
 

@@ -6,10 +6,12 @@ from nff_ota.tools.deployments.ops import (
     get_deployment_status,
     list_deployments,
     report_device_status,
+    start_deployment,
 )
 
 _TOOLS = [
     create_deployment,
+    start_deployment,
     get_deployment_status,
     abort_deployment,
     list_deployments,

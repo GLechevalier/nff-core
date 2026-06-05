@@ -1,31 +1,45 @@
+import re
+
 from nff_ota.client import get_client
 from nff_ota.config import settings
 
 
-def storage_path(artifact_id: str) -> str:
-    """Deterministic bucket path: {first2}/{artifact_id}.bin"""
-    return f"{artifact_id[:2]}/{artifact_id}.bin"
+def storage_path(version: str) -> str:
+    """Deterministic bucket path for a firmware version: firmware/{safe_version}.bin
+
+    The version is the firmware_versions PK; sanitise it so it is a safe object key.
+    """
+    safe = re.sub(r"[^A-Za-z0-9._-]", "_", version)
+    return f"firmware/{safe}.bin"
 
 
-async def upload_artifact(artifact_id: str, data: bytes) -> str:
-    path = storage_path(artifact_id)
+async def upload_artifact(version: str, data: bytes) -> str:
+    path = storage_path(version)
     client = get_client()
-    client.storage.from_(settings.artifact_bucket).upload(
+    await client.storage.from_(settings.artifact_bucket).upload(
         path=path,
         file=data,
-        file_options={"content-type": "application/octet-stream"},
+        file_options={"content-type": "application/octet-stream", "upsert": "true"},
     )
     return path
 
 
-async def download_artifact(artifact_id: str) -> bytes:
-    path = storage_path(artifact_id)
+async def download_artifact(version: str) -> bytes:
+    path = storage_path(version)
     client = get_client()
-    return client.storage.from_(settings.artifact_bucket).download(path)
+    return await client.storage.from_(settings.artifact_bucket).download(path)
 
 
-async def delete_artifact_file(artifact_id: str) -> bool:
-    path = storage_path(artifact_id)
+async def create_signed_url(version: str, expires_in: int = 3600) -> str:
+    """Return a time-limited pre-signed HTTPS download URL for the firmware binary."""
+    path = storage_path(version)
     client = get_client()
-    client.storage.from_(settings.artifact_bucket).remove([path])
+    res = await client.storage.from_(settings.artifact_bucket).create_signed_url(path, expires_in)
+    return res["signedURL"]
+
+
+async def delete_artifact_file(version: str) -> bool:
+    path = storage_path(version)
+    client = get_client()
+    await client.storage.from_(settings.artifact_bucket).remove([path])
     return True

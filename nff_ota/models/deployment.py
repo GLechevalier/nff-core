@@ -18,7 +18,7 @@ DeviceDeploymentStatusLiteral = Literal[
 
 class CreateDeploymentParams(BaseModel):
     name: str = Field(min_length=1)
-    artifact_id: str = Field(min_length=1)
+    target_version: str = Field(min_length=1)  # firmware_versions.version to deploy
     device_group_id: str = Field(min_length=1)
     start_time: str | None = None
     max_devices_in_flight: int = Field(default=10, ge=1)
@@ -44,7 +44,7 @@ class DeviceDeploymentInfo(BaseModel):
 class DeploymentInfo(BaseModel):
     id: str
     name: str
-    artifact_id: str
+    target_version: str
     device_group_id: str
     status: DeploymentStatusLiteral
     max_devices_in_flight: int
@@ -68,6 +68,22 @@ class DeploymentStatus(BaseModel):
 
 class DeploymentResult(BaseModel):
     deployment: DeploymentInfo | None = None
+    error: str | None = None
+
+
+class DeviceDeliveryResult(BaseModel):
+    device_id: str
+    mqtt_id: str | None = None
+    outcome: Literal["delivered", "failed", "skipped"]
+    detail: str = ""
+
+
+class StartDeploymentResult(BaseModel):
+    deployment: DeploymentInfo | None = None
+    delivered: int = 0
+    failed: int = 0
+    skipped: int = 0
+    devices: list[DeviceDeliveryResult] = Field(default_factory=list)
     error: str | None = None
 
 
