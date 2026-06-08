@@ -205,3 +205,19 @@ async def set_agent_connected(connected: bool) -> None:
         ).neq("id", "").execute()
     except Exception as exc:
         logger.warning("db: set_agent_connected(%s) failed: %s", connected, exc)
+
+
+# ---------------------------------------------------------------------------
+# Service liveness
+# ---------------------------------------------------------------------------
+
+async def service_heartbeat(service: str, version: str | None = None) -> None:
+    """Announce that this service is alive. The dashboard reads service_status
+    and treats a service as offline once its heartbeat goes stale. Raises on
+    failure so the caller's retry loop can log it."""
+    if not _enabled:
+        return
+    await _client.rpc(
+        "service_heartbeat",
+        {"p_service": service, "p_version": version},
+    ).execute()

@@ -8,6 +8,7 @@ from amqtt.client import MQTTClient
 from nff_fleet.config import settings
 from nff_fleet.registry import registry
 from nff_fleet import db
+from nff_fleet import ota_result
 
 logger = logging.getLogger(__name__)
 
@@ -64,7 +65,13 @@ async def _handle_message(topic: str, payload_bytes: bytes) -> None:
         logger.debug("Heartbeat from %s: %s", device_id, payload.get("status"))
 
     elif msg_type == "response":
-        resolve_response(device_id, payload)
+        # An ota_result is published to the same response topic but arrives long after
+        # the original command future has resolved/timed out — route it to nff-ota
+        # instead of dropping it in resolve_response (which only resolves a pending future).
+        if payload.get("type") == "ota_result":
+            ota_result.forward_ota_result(device_id, payload)
+        else:
+            resolve_response(device_id, payload)
 
     elif msg_type == "crash":
         _crash_cache[device_id] = payload

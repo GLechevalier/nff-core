@@ -25,6 +25,11 @@ class NffFleetSettings(BaseSettings):
 
     mcp_secret: str = "change-me-in-production"
 
+    # nff-ota's base URL. When set, device ota_result messages are forwarded to
+    # {ota_url}/internal/ota-result (authenticated with mcp_secret) so nff-ota can
+    # finalize the deployment. Unset → forwarding is disabled (loop stays open).
+    ota_url: str | None = None
+
     supabase_url: str | None = None
     supabase_key: str | None = None
 
