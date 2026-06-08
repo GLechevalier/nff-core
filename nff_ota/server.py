@@ -5,7 +5,7 @@ from typing import AsyncIterator
 
 from mcp.server.fastmcp import FastMCP
 
-from nff_ota import poller, reaper, webhooks
+from nff_ota import heartbeat, poller, reaper, webhooks
 from nff_ota.client import close_client, init_client
 from nff_ota.config import settings
 from nff_ota.prompts import register_prompts
@@ -54,4 +54,10 @@ webhooks.register(mcp)
 
 
 def main() -> None:
+    # The heartbeat is started at the process level, NOT inside the MCP lifespan:
+    # this server's streamable-http transport enters/exits `lifespan` per request,
+    # so a lifespan-scoped heartbeat would be started and immediately stopped on
+    # every call and never tick while idle. A process-level daemon thread beats
+    # for the whole process lifetime instead, independent of the SDK's lifespan.
+    heartbeat.start()
     mcp.run(transport="streamable-http")
