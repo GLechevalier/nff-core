@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import uuid
 from datetime import datetime, timezone
 
@@ -20,8 +21,10 @@ from nff_ota.models.deployment import (
 from nff_ota.storage import create_signed_url
 from nff_ota.transitions import validate_transition
 
-_TERMINAL_DD = {"success", "already-installed", "aborted", "decommissioned", "failure"}
+_TERMINAL_DD = {"success", "already-installed", "aborted", "decommissioned", "failure", "timed_out"}
 _TERMINAL_DEP = {"finished", "aborted"}
+
+logger = logging.getLogger(__name__)
 
 
 async def create_deployment(params: CreateDeploymentParams) -> DeploymentResult:
@@ -40,26 +43,9 @@ async def create_deployment(params: CreateDeploymentParams) -> DeploymentResult:
     if not grp_resp.data:
         return DeploymentResult(error=f"Device group {params.device_group_id!r} not found")
 
-    members_resp = (
-        await client.table("device_group_members")
-        .select("device_id")
-        .eq("group_id", params.device_group_id)
-        .execute()
-    )
-    member_ids = [r["device_id"] for r in (members_resp.data or [])]
-    if not member_ids:
-        return DeploymentResult(error="Device group has no members")
-
-    accepted_resp = (
-        await client.table("devices")
-        .select("id, current_firmware_version, firmware_version")
-        .in_("id", member_ids)
-        .eq("ota_status", "accepted")
-        .execute()
-    )
-    accepted = accepted_resp.data or []
-    if not accepted:
-        return DeploymentResult(error="Device group has no accepted devices")
+    accepted, err = await _resolve_accepted_devices(params.device_group_id)
+    if err:
+        return DeploymentResult(error=err)
 
     # Determine initial deployment status
     now = datetime.now(timezone.utc)
@@ -89,25 +75,83 @@ async def create_deployment(params: CreateDeploymentParams) -> DeploymentResult:
     dep_resp = await client.table("deployments").insert(dep_row).execute()
 
     # Create per-device job rows in ota_jobs
+    await _insert_jobs(deployment_id, params.target_version, accepted)
+
+    inserted = (dep_resp.data or [dep_row])[0]
+    return DeploymentResult(deployment=_dep_row_to_info(inserted))
+
+
+async def _resolve_accepted_devices(device_group_id: str) -> tuple[list[dict], str | None]:
+    """Return a group's accepted member devices (id + firmware fields), or an error.
+
+    Encapsulates the targeting rule shared by ``create_deployment`` and the poller:
+    a device receives a job only if it is a member of the group AND has
+    ``ota_status='accepted'``. Returns ([], reason) when the group has no members or
+    none of them are accepted.
+    """
+    client = get_client()
+    members_resp = (
+        await client.table("device_group_members")
+        .select("device_id")
+        .eq("group_id", device_group_id)
+        .execute()
+    )
+    member_ids = [r["device_id"] for r in (members_resp.data or [])]
+    if not member_ids:
+        return [], "Device group has no members"
+
+    accepted_resp = (
+        await client.table("devices")
+        .select("id, current_firmware_version, firmware_version")
+        .in_("id", member_ids)
+        .eq("ota_status", "accepted")
+        .execute()
+    )
+    accepted = accepted_resp.data or []
+    if not accepted:
+        return [], "Device group has no accepted devices"
+    return accepted, None
+
+
+async def _insert_jobs(deployment_id: str, target_version: str, accepted: list[dict]) -> int:
+    """Insert pending ota_jobs rows for the given accepted devices. Returns the count."""
+    client = get_client()
+    now = datetime.now(timezone.utc).isoformat()
     job_rows = [
         {
             "id": str(uuid.uuid4()),
             "deployment_id": deployment_id,
             "device_id": dev["id"],
             "from_version": dev.get("current_firmware_version") or dev.get("firmware_version") or "unknown",
-            "target_version": params.target_version,
+            "target_version": target_version,
             "status": "pending",
             "progress": 0,
             "attempts": 0,
-            "started_at": now.isoformat(),
-            "last_updated": now.isoformat(),
+            "started_at": now,
+            "last_updated": now,
         }
         for dev in accepted
     ]
     await client.table("ota_jobs").insert(job_rows).execute()
+    return len(job_rows)
 
-    inserted = (dep_resp.data or [dep_row])[0]
-    return DeploymentResult(deployment=_dep_row_to_info(inserted))
+
+async def _materialize_jobs(
+    deployment_id: str, target_version: str, device_group_id: str
+) -> tuple[int, str | None]:
+    """Create pending ota_jobs for a deployment from its group's accepted members.
+
+    Used by the deployment poller for dashboard-created 'scheduled' deployment rows
+    that have no jobs yet: the dashboard inserts only the deployment row, and job
+    creation — with its accepted-device filter and from_version resolution — stays here
+    as the single source of truth. Returns (jobs_created, error); 0 with an error means
+    the group isn't deployable yet (no members / none accepted), which the poller leaves
+    scheduled to retry on a later tick.
+    """
+    accepted, err = await _resolve_accepted_devices(device_group_id)
+    if err:
+        return 0, err
+    return await _insert_jobs(deployment_id, target_version, accepted), None
 
 
 async def get_deployment_status(deployment_id: str) -> DeploymentStatusResult:
@@ -331,25 +375,112 @@ async def report_device_status(params: ReportDeviceStatusParams) -> DeploymentRe
     if params.status == "downloading":
         new_attempts += 1
 
+    await _apply_job_status(
+        job, params.status, params.deployment_id, params.device_id,
+        extra_update={"attempts": new_attempts},
+    )
+
+    dep_resp = await client.table("deployments").select("*").eq("id", params.deployment_id).execute()
+    return DeploymentResult(deployment=_dep_row_to_info(dep_resp.data[0]) if dep_resp.data else None)
+
+
+async def _apply_job_status(
+    job: dict,
+    new_status: str,
+    deployment_id: str,
+    device_id: str,
+    *,
+    extra_update: dict | None = None,
+) -> None:
+    """Write a new status onto an ota_jobs row and apply its side effects.
+
+    Shared by ``report_device_status`` (manual/explicit path, which validates the
+    step transition first) and ``finalize_ota_result`` (device-reported authoritative
+    outcome, which does NOT validate). On success-like states it stamps
+    progress/completed_at and advances ``devices.current_firmware_version``; it always
+    recomputes the parent deployment so it can roll up to ``finished``.
+    """
+    client = get_client()
     now = datetime.now(timezone.utc).isoformat()
-    update = {"status": params.status, "attempts": new_attempts, "last_updated": now}
-    if params.status in ("success", "already-installed"):
+    update = {"status": new_status, "last_updated": now}
+    if extra_update:
+        update.update(extra_update)
+    if new_status in ("success", "already-installed"):
         update["progress"] = 100
         update["completed_at"] = now
     await client.table("ota_jobs").update(update).eq("id", job["id"]).execute()
 
-    # On success, update the device's current firmware version
-    if params.status == "success":
-        dep_resp = await client.table("deployments").select("target_version").eq("id", params.deployment_id).execute()
+    if new_status == "success":
+        dep_resp = await client.table("deployments").select("target_version").eq("id", deployment_id).execute()
         if dep_resp.data:
-            target_version = dep_resp.data[0]["target_version"]
-            await client.table("devices").update({"current_firmware_version": target_version}).eq("id", params.device_id).execute()
+            await client.table("devices").update(
+                {"current_firmware_version": dep_resp.data[0]["target_version"]}
+            ).eq("id", device_id).execute()
 
-    # Recompute deployment aggregate status
-    await _recompute_deployment_status(params.deployment_id)
+    await _recompute_deployment_status(deployment_id)
 
-    dep_resp = await client.table("deployments").select("*").eq("id", params.deployment_id).execute()
-    return DeploymentResult(deployment=_dep_row_to_info(dep_resp.data[0]) if dep_resp.data else None)
+
+async def _resolve_device_id(reported_id: str) -> str | None:
+    """Map a device-reported id (its fleet MQTT identity) to the nff-ota devices.id.
+
+    Usually they're the same string (e.g. ``test-device-01``); fall back to matching
+    ``identity_attributes->>mqtt_id`` for devices keyed differently.
+    """
+    client = get_client()
+    direct = await client.table("devices").select("id").eq("id", reported_id).execute()
+    if direct.data:
+        return reported_id
+    by_mqtt = await client.table("devices").select("id").eq("identity_attributes->>mqtt_id", reported_id).execute()
+    if by_mqtt.data:
+        return by_mqtt.data[0]["id"]
+    return None
+
+
+async def finalize_ota_result(device_id: str, status: str, version: str) -> dict:
+    """Finalize an ota_jobs row from a device-reported ota_result.
+
+    ``status`` is the device's authoritative outcome: ``committed`` -> ``success``,
+    ``rolled_back`` -> ``failure``. ``device_id`` is what the device reported (its
+    fleet MQTT identity); ``version`` is the firmware version it ran.
+
+    Intentionally does NOT call ``validate_transition``: the job is parked in
+    ``downloading`` (set at dispatch) and ``downloading -> success`` is a deliberately
+    illegal *step* edge, but the device's reported terminal outcome is authoritative,
+    so we set the terminal state directly. Idempotent and never raises for the webhook:
+    a missing device or an already-terminal job returns ``{"finalized": False, ...}``.
+    """
+    client = get_client()
+    new_status = "success" if status == "committed" else "failure"
+
+    ota_device_id = await _resolve_device_id(device_id)
+    if ota_device_id is None:
+        logger.info("ota_result: no device matches %r — ignoring", device_id)
+        return {"finalized": False, "reason": "device-not-found", "device_id": device_id}
+
+    job_resp = (
+        await client.table("ota_jobs")
+        .select("*")
+        .eq("device_id", ota_device_id)
+        .eq("target_version", version)
+        .order("last_updated", desc=True)
+        .execute()
+    )
+    active = [j for j in (job_resp.data or []) if j["status"] not in _TERMINAL_DD]
+    if not active:
+        logger.info("ota_result: no active job for (%s, %s) — idempotent no-op", ota_device_id, version)
+        return {"finalized": False, "reason": "no-active-job", "device_id": ota_device_id, "version": version}
+
+    job = active[0]
+    await _apply_job_status(job, new_status, job["deployment_id"], ota_device_id)
+    logger.info("ota_result: device=%s version=%s -> %s (deployment=%s)",
+                ota_device_id, version, new_status, job["deployment_id"])
+    return {
+        "finalized": True,
+        "device_id": ota_device_id,
+        "deployment_id": job["deployment_id"],
+        "job_id": job["id"],
+        "status": new_status,
+    }
 
 
 async def _recompute_deployment_status(deployment_id: str) -> None:

@@ -22,8 +22,22 @@ class OtaSettings(BaseSettings):
     # nff-fleet is the command-delivery plane. nff-ota decides what to push and asks
     # fleet to deliver it over MQTT via fleet's POST /internal/command endpoint.
     fleet_url: str = ""          # e.g. http://nff-fleet:3001
-    fleet_secret: str = ""       # must match nff-fleet's NFF_FLEET_MCP_SECRET
+    fleet_secret: str = ""       # must match nff-fleet's NFF_FLEET_MCP_SECRET; also the
+                                 # shared secret for the inbound /internal/ota-result webhook
     fleet_timeout: float = 120.0  # seconds to await a device response for an OTA command
+
+    # Stuck-job reaper: a device that downloads but never reports an ota_result
+    # (bricked / never reconnects) would leave its ota_jobs row in 'downloading'
+    # forever. The reaper marks such jobs 'timed_out' so the deployment can finish.
+    download_timeout: float = 600.0  # seconds in 'downloading' before a job is timed out
+    reaper_interval: float = 60.0    # how often the reaper sweeps
+
+    # Deployment poller: the nff-dashboard writes a 'scheduled' deployment row directly
+    # to Supabase rather than calling start_deployment. This background sweep picks such
+    # rows up, materializes their pending ota_jobs from the device group, and runs the
+    # normal fleet-delivery path. Without it, dashboard-created deployments never start.
+    deployment_poller_enabled: bool = True
+    deployment_poller_interval: float = 15.0  # how often the poller sweeps
 
 
 settings = OtaSettings()

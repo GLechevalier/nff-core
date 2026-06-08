@@ -5,6 +5,7 @@ from typing import AsyncIterator
 
 from mcp.server.fastmcp import FastMCP
 
+from nff_ota import poller, reaper, webhooks
 from nff_ota.client import close_client, init_client
 from nff_ota.config import settings
 from nff_ota.prompts import register_prompts
@@ -18,9 +19,13 @@ from nff_ota.tools.devices import register as register_devices
 @asynccontextmanager
 async def lifespan(server: FastMCP) -> AsyncIterator[None]:
     await init_client()
+    reaper.start()
+    poller.start()
     try:
         yield
     finally:
+        await poller.stop()
+        await reaper.stop()
         await close_client()
 
 
@@ -45,6 +50,7 @@ register_deployments(mcp)
 register_groups(mcp)
 register_resources(mcp)
 register_prompts(mcp)
+webhooks.register(mcp)
 
 
 def main() -> None:
