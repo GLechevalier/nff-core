@@ -43,7 +43,9 @@ async def create_deployment(params: CreateDeploymentParams) -> DeploymentResult:
     if not grp_resp.data:
         return DeploymentResult(error=f"Device group {params.device_group_id!r} not found")
 
-    accepted, err = await _resolve_accepted_devices(params.device_group_id)
+    deployable, err = await _resolve_deployable_devices(
+        params.device_group_id, params.target_version
+    )
     if err:
         return DeploymentResult(error=err)
 
@@ -75,7 +77,7 @@ async def create_deployment(params: CreateDeploymentParams) -> DeploymentResult:
     dep_resp = await client.table("deployments").insert(dep_row).execute()
 
     # Create per-device job rows in ota_jobs
-    await _insert_jobs(deployment_id, params.target_version, accepted)
+    await _insert_jobs(deployment_id, params.target_version, deployable)
 
     inserted = (dep_resp.data or [dep_row])[0]
     return DeploymentResult(deployment=_dep_row_to_info(inserted))
@@ -102,7 +104,7 @@ async def _resolve_accepted_devices(device_group_id: str) -> tuple[list[dict], s
 
     accepted_resp = (
         await client.table("devices")
-        .select("id, current_firmware_version, firmware_version")
+        .select("id, current_firmware_version, firmware_version, device_type")
         .in_("id", member_ids)
         .eq("ota_status", "accepted")
         .execute()
@@ -111,6 +113,131 @@ async def _resolve_accepted_devices(device_group_id: str) -> tuple[list[dict], s
     if not accepted:
         return [], "Device group has no accepted devices"
     return accepted, None
+
+
+async def group_member_device_types(group_id: str) -> list[str]:
+    """Distinct self-attested device_types among a group's member devices.
+
+    Lets the build-deploy path derive a firmware's target device_types from the group
+    it ships to, instead of a caller-supplied list. Only members that have reported a
+    ``device_type`` contribute; members with none are omitted (the deploy gate treats
+    those as legacy/compatible regardless). Returns [] when the group is empty or no
+    member has attested its hardware yet. Membership is taken regardless of ota_status:
+    this answers "what hardware is in this group", not "what is deployable right now".
+    """
+    client = get_client()
+    members_resp = (
+        await client.table("device_group_members")
+        .select("device_id")
+        .eq("group_id", group_id)
+        .execute()
+    )
+    member_ids = [r["device_id"] for r in (members_resp.data or [])]
+    if not member_ids:
+        return []
+    devices_resp = (
+        await client.table("devices")
+        .select("device_type")
+        .in_("id", member_ids)
+        .execute()
+    )
+    # Dedup case-insensitively on the canonical vocabulary, preserving first-seen casing.
+    seen: dict[str, str] = {}
+    for row in devices_resp.data or []:
+        dt = (row.get("device_type") or "").strip()
+        if dt:
+            seen.setdefault(dt.lower(), dt)
+    return sorted(seen.values())
+
+
+async def _firmware_device_types(target_version: str) -> list[str]:
+    """The device_type allow-list an artifact declares it targets (may be empty).
+
+    These are the human-entered (or connector-supplied) ``device_types`` recorded on
+    the firmware_versions row. The deploy gate matches a device's self-attested
+    ``device_type`` against this list. An empty/absent list means "no declared target",
+    which the gate treats as ungated (deploy to all accepted).
+    """
+    client = get_client()
+    resp = (
+        await client.table("firmware_versions")
+        .select("device_types")
+        .eq("version", target_version)
+        .execute()
+    )
+    if not resp.data:
+        return []
+    raw = resp.data[0].get("device_types") or []
+    if isinstance(raw, str):
+        raw = json.loads(raw)
+    return [str(t) for t in raw]
+
+
+def _filter_compatible(
+    accepted: list[dict], artifact_device_types: list[str]
+) -> tuple[list[dict], list[dict]]:
+    """Split accepted devices into (compatible, skipped) against an artifact's targets.
+
+    The deploy-time safety gate: a device only receives a job if its self-attested
+    hardware ``device_type`` is compatible with the firmware. Rules:
+      * artifact declares no device_types  -> ungated, everything is compatible.
+      * device reports no device_type      -> compatible WITH a warning (legacy /
+        not-yet-reflashed firmware; don't brick fleets mid-migration).
+      * device_type in the allow-list      -> compatible.
+      * device_type set but not in list    -> skipped (excluded from the rollout).
+    Matching is case-insensitive on the canonical vocabulary (esp32, esp32s3, ...).
+    """
+    if not artifact_device_types:
+        return accepted, []
+    allowed = {t.strip().lower() for t in artifact_device_types if t and t.strip()}
+    if not allowed:
+        return accepted, []
+    compatible: list[dict] = []
+    skipped: list[dict] = []
+    for dev in accepted:
+        dt = (dev.get("device_type") or "").strip().lower()
+        if not dt:
+            logger.warning(
+                "ota gate: device %s reports no device_type — allowing (legacy firmware)",
+                dev.get("id"),
+            )
+            compatible.append(dev)
+        elif dt in allowed:
+            compatible.append(dev)
+        else:
+            skipped.append(dev)
+    return compatible, skipped
+
+
+async def _resolve_deployable_devices(
+    device_group_id: str, target_version: str
+) -> tuple[list[dict], str | None]:
+    """Resolve a group's accepted members, then gate them by the artifact's device_types.
+
+    The single source of truth for "who actually receives this firmware", shared by
+    ``create_deployment`` and the poller's ``_materialize_jobs``. Returns
+    (deployable_devices, error). An error means nothing deployable: either the group
+    has no accepted members, or every accepted device is hardware-incompatible with the
+    target firmware.
+    """
+    accepted, err = await _resolve_accepted_devices(device_group_id)
+    if err:
+        return [], err
+    artifact_types = await _firmware_device_types(target_version)
+    compatible, skipped = _filter_compatible(accepted, artifact_types)
+    if skipped:
+        logger.info(
+            "ota gate: %d of %d accepted device(s) skipped as incompatible with "
+            "firmware %s device_types %s",
+            len(skipped), len(accepted), target_version, artifact_types,
+        )
+    if not compatible:
+        group_types = sorted({(d.get("device_type") or "unknown") for d in accepted})
+        return [], (
+            f"No devices in the group are compatible with firmware device_types "
+            f"{artifact_types}; accepted devices report types {group_types}"
+        )
+    return compatible, None
 
 
 async def _insert_jobs(deployment_id: str, target_version: str, accepted: list[dict]) -> int:
@@ -146,12 +273,14 @@ async def _materialize_jobs(
     creation — with its accepted-device filter and from_version resolution — stays here
     as the single source of truth. Returns (jobs_created, error); 0 with an error means
     the group isn't deployable yet (no members / none accepted), which the poller leaves
-    scheduled to retry on a later tick.
+    scheduled to retry on a later tick. The same device_type compatibility gate that
+    ``create_deployment`` applies runs here too, so dashboard-created deployments can't
+    bypass it.
     """
-    accepted, err = await _resolve_accepted_devices(device_group_id)
+    deployable, err = await _resolve_deployable_devices(device_group_id, target_version)
     if err:
         return 0, err
-    return await _insert_jobs(deployment_id, target_version, accepted), None
+    return await _insert_jobs(deployment_id, target_version, deployable), None
 
 
 async def get_deployment_status(deployment_id: str) -> DeploymentStatusResult:
@@ -267,6 +396,13 @@ async def start_deployment(deployment_id: str) -> StartDeploymentResult:
     except Exception as e:
         return StartDeploymentResult(error=f"Failed to generate firmware URL: {e}")
 
+    # The version we put ON THE WIRE is the artifact's semver release_version, because the
+    # device's anti-downgrade gate parses it as major.minor.patch and rejects anything else.
+    # The catalog `version` (the firmware_versions PK, e.g. "repo-<sha7>") stays the job's
+    # target_version. Fall back to the catalog version for manual/legacy artifacts whose
+    # version is itself already a semver.
+    ota_version = fw.get("release_version") or version
+
     # Devices still waiting for this update.
     jobs_resp = (
         await client.table("ota_jobs")
@@ -312,7 +448,7 @@ async def start_deployment(deployment_id: str) -> StartDeploymentResult:
                 {"status": "downloading", "attempts": job["attempts"] + 1, "last_updated": now}
             ).eq("id", job["id"]).execute()
             try:
-                resp = await fleet.deliver_ota(mqtt_id, version, sha256, url)
+                resp = await fleet.deliver_ota(mqtt_id, ota_version, sha256, url)
                 results.append(
                     DeviceDeliveryResult(
                         device_id=device_id, mqtt_id=mqtt_id, outcome="delivered",
@@ -457,7 +593,12 @@ async def finalize_ota_result(device_id: str, status: str, version: str) -> dict
         logger.info("ota_result: no device matches %r — ignoring", device_id)
         return {"finalized": False, "reason": "device-not-found", "device_id": device_id}
 
-    job_resp = (
+    # The device reports the version it ran = the OTA command's wire version. For connector
+    # deploys that's the artifact's semver release_version, NOT the job's catalog
+    # target_version, so an exact target_version match won't find the job. Try the exact
+    # match first (manual/legacy deploys where they're the same string), then fall back to
+    # the device's single most-recent in-flight job — a device runs one OTA at a time.
+    exact = (
         await client.table("ota_jobs")
         .select("*")
         .eq("device_id", ota_device_id)
@@ -465,7 +606,16 @@ async def finalize_ota_result(device_id: str, status: str, version: str) -> dict
         .order("last_updated", desc=True)
         .execute()
     )
-    active = [j for j in (job_resp.data or []) if j["status"] not in _TERMINAL_DD]
+    active = [j for j in (exact.data or []) if j["status"] not in _TERMINAL_DD]
+    if not active:
+        any_resp = (
+            await client.table("ota_jobs")
+            .select("*")
+            .eq("device_id", ota_device_id)
+            .order("last_updated", desc=True)
+            .execute()
+        )
+        active = [j for j in (any_resp.data or []) if j["status"] not in _TERMINAL_DD]
     if not active:
         logger.info("ota_result: no active job for (%s, %s) — idempotent no-op", ota_device_id, version)
         return {"finalized": False, "reason": "no-active-job", "device_id": ota_device_id, "version": version}

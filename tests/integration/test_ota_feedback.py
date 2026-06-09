@@ -77,6 +77,21 @@ class TestFinalizeOtaResult:
         assert result["finalized"] is True
         assert result["status"] == "failure"
 
+    async def test_matches_via_fallback_when_reported_version_differs(self, mock_supabase):
+        # Connector case: the job's target_version is the catalog id ("repo-abc1234") but the
+        # device echoes the semver wire version ("3.0.13"). The exact target_version match
+        # misses; the most-recent-active-job fallback still finalizes it.
+        job = _job_row("downloading", version="repo-abc1234")
+        mock_supabase.table.side_effect = _named_tables({
+            "devices": [[{"id": "test-device-01"}], []],
+            # exact select (miss) -> fallback select (hit) -> update -> recompute select
+            "ota_jobs": [[], [job], [], [{"status": "success"}]],
+            "deployments": [[{"target_version": "repo-abc1234"}], [_dep_row()], []],
+        })
+        result = await finalize_ota_result("test-device-01", "committed", "3.0.13")
+        assert result["finalized"] is True
+        assert result["status"] == "success"
+
     async def test_already_terminal_is_noop(self, mock_supabase):
         mock_supabase.table.side_effect = _named_tables({
             "devices": [[{"id": "test-device-01"}]],

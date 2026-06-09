@@ -13,11 +13,14 @@ module adds the inbound endpoints that other trusted services call:
     POST /internal/build-deploy
         Header: X-Fleet-Secret: <shared secret>
         Body:   {version, name, device_types[], (artifact_b64 | file_path),
-                 (device_group_id | device_group_name), max_devices_in_flight?, retries?}
+                 (device_group_id | device_group_name), max_devices_in_flight?, retries?,
+                 build_id?, elf_b64?, branch_name?, author?, committed_at?, changelog?,
+                 parent_version?}
         One-call "ship this freshly built binary" entrypoint used by the nff-github
-        connector: uploads the artifact, then creates and starts a deployment to the
-        target group. Wraps the existing upload_artifact / create_deployment /
-        start_deployment ops so nff-ota stays the sole owner of deploy logic.
+        connector: uploads the artifact (+ optional debug ELF and git lineage), then
+        creates and starts a deployment to the target group. Wraps the existing
+        upload_artifact / create_deployment / start_deployment ops so nff-ota stays the
+        sole owner of deploy logic.
 
 Mirrors nff-fleet's ``control.py`` shared-secret pattern.
 """
@@ -33,14 +36,16 @@ from pathlib import Path
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
-from nff_ota.client import get_client
+from nff_ota.client import ensure_client, get_client
 from nff_ota.config import settings
 from nff_ota.models.artifact import UploadArtifactParams
+from nff_ota.storage import upload_elf
 from nff_ota.models.deployment import CreateDeploymentParams
 from nff_ota.tools.artifacts.ops import upload_artifact
 from nff_ota.tools.deployments.ops import (
     create_deployment,
     finalize_ota_result,
+    group_member_device_types,
     start_deployment,
 )
 
@@ -57,6 +62,10 @@ def _secret_ok(request: Request) -> bool:
 async def _ota_result(request: Request) -> JSONResponse:
     if not _secret_ok(request):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
+
+    # Webhook routes bypass the per-session MCP lifespan, so the Supabase client may not
+    # be initialised yet; ensure it before any downstream get_client() call.
+    await ensure_client()
 
     try:
         body = await request.json()
@@ -103,6 +112,10 @@ async def _build_deploy(request: Request) -> JSONResponse:
     if not _secret_ok(request):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
 
+    # Webhook routes bypass the per-session MCP lifespan, so the Supabase client may not
+    # be initialised yet; ensure it before any downstream get_client() call.
+    await ensure_client()
+
     try:
         body = await request.json()
     except Exception:
@@ -115,12 +128,24 @@ async def _build_deploy(request: Request) -> JSONResponse:
         return JSONResponse({"error": "version is required"}, status_code=400)
     if not isinstance(name, str) or not name:
         return JSONResponse({"error": "name is required"}, status_code=400)
-    if not isinstance(device_types, list) or not device_types:
-        return JSONResponse({"error": "device_types must be a non-empty list"}, status_code=400)
 
     group_id, group_err = await _resolve_group_id(body)
     if group_err:
         return JSONResponse({"error": group_err}, status_code=400)
+
+    # device_types is the firmware's target allow-list. A caller may pass it explicitly,
+    # but the target group is the source of truth for what hardware is actually in play:
+    # when the caller didn't supply a usable list, derive it from the self-attested
+    # device_type of the group's members instead of forcing static config.
+    if not (isinstance(device_types, list) and device_types):
+        device_types = await group_member_device_types(group_id)
+    if not device_types:
+        return JSONResponse(
+            {"error": "device_types must be a non-empty list, and none could be "
+                      "derived from the target group's devices (no member has "
+                      "reported a device_type yet)"},
+            status_code=400,
+        )
 
     # The binary arrives either inline (base64, host-agnostic) or as a path the caller
     # and nff-ota both see (co-located). Inline bytes are written to a temp file because
@@ -143,10 +168,35 @@ async def _build_deploy(request: Request) -> JSONResponse:
     elif not (isinstance(file_path, str) and file_path):
         return JSONResponse({"error": "artifact_b64 or file_path is required"}, status_code=400)
 
+    # Optional debug ELF (base64): stored alongside the .bin for crash symbolication and
+    # never delivered to a device. A bad base64 blob is non-fatal — the deploy proceeds
+    # without the ELF rather than failing the whole rollout over a diagnostics extra.
+    elf_path: str | None = None
+    elf_b64 = body.get("elf_b64")
+    if isinstance(elf_b64, str) and elf_b64:
+        try:
+            elf_path = await upload_elf(version, base64.b64decode(elf_b64, validate=True))
+        except (binascii.Error, ValueError) as e:
+            return JSONResponse({"error": f"elf_b64 is not valid base64: {e}"}, status_code=400)
+        except Exception:  # storage hiccup on the ELF must not abort the firmware rollout
+            elf_path = None
+
+    def _str(key: str) -> str | None:
+        val = body.get(key)
+        return val if isinstance(val, str) and val else None
+
     try:
         upload = await upload_artifact(
             UploadArtifactParams(
-                name=name, version=version, device_types=device_types, file_path=file_path
+                name=name, version=version, device_types=device_types, file_path=file_path,
+                build_id=_str("build_id"),
+                branch_name=_str("branch_name"),
+                author=_str("author"),
+                committed_at=_str("committed_at"),
+                changelog=body.get("changelog") if isinstance(body.get("changelog"), str) else None,
+                parent_version=_str("parent_version"),
+                elf_path=elf_path,
+                release_version=_str("release_version"),
             )
         )
     finally:

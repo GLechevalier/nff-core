@@ -8,7 +8,7 @@ from nff_ota.client import get_client
 from nff_ota.config import settings
 from nff_ota.crypto import sha256_bytes, sign_ed25519, verify_ed25519
 from nff_ota.models.artifact import ArtifactInfo, ArtifactResult, UploadArtifactParams
-from nff_ota.storage import create_signed_url as _create_signed_url, delete_artifact_file, storage_path, upload_artifact as _upload_file
+from nff_ota.storage import create_signed_url as _create_signed_url, delete_artifact_file, delete_elf, storage_path, upload_artifact as _upload_file
 
 # Deployable-image columns nff-ota owns on the shared firmware_versions table.
 _ARTIFACT_FIELDS = ("name", "device_types", "checksum_sha256", "size_bytes", "signature", "storage_path", "provides", "depends")
@@ -53,8 +53,10 @@ async def upload_artifact(params: UploadArtifactParams) -> ArtifactResult:
     except Exception as e:
         return ArtifactResult(error=f"Storage upload failed: {e}")
 
-    # Upsert by version: attach deployable fields without clobbering any existing
-    # git-lineage columns (build_id/changelog/...) the dashboard may have set.
+    # Upsert by version: always (re)attach the deployable fields. Git-lineage columns
+    # (build_id/branch_name/author/...) are written ONLY when the caller supplies them —
+    # the nff-github connector does, a bare OTA upload does not — so a lineage-less
+    # upload never nulls values a prior connector build wrote.
     row = {
         "version": params.version,
         "name": params.name,
@@ -67,8 +69,36 @@ async def upload_artifact(params: UploadArtifactParams) -> ArtifactResult:
         "depends": params.depends,
     }
 
+    client = get_client()
+
+    for column, value in (
+        ("build_id", params.build_id),
+        ("branch_name", params.branch_name),
+        ("author", params.author),
+        ("committed_at", params.committed_at),
+        ("changelog", params.changelog),
+        ("release_version", params.release_version),
+    ):
+        if value is not None:
+            row[column] = value
+    if params.elf_path is not None:
+        row["elf_path"] = params.elf_path
+        row["elf_stored"] = True
+
+    # parent_version is a FK to firmware_versions(version); only set it once that parent
+    # row actually exists, or the upsert fails. A parent commit that was never built has
+    # no row yet, so we drop the link rather than abort the upload.
+    if params.parent_version:
+        parent = (
+            await client.table("firmware_versions")
+            .select("version")
+            .eq("version", params.parent_version)
+            .execute()
+        )
+        if parent.data:
+            row["parent_version"] = params.parent_version
+
     try:
-        client = get_client()
         resp = await client.table("firmware_versions").upsert(row, on_conflict="version").execute()
         inserted = resp.data[0] if resp.data else row
     except Exception as e:
@@ -130,7 +160,18 @@ async def delete_artifact(version: str) -> ArtifactResult:
     except Exception as e:
         return ArtifactResult(error=f"Storage delete failed: {e}")
 
-    cleared = {"checksum_sha256": None, "signature": None, "storage_path": None, "size_bytes": 0}
+    # Drop the debug ELF too if one was stored. Best-effort: a missing ELF object must
+    # not block unregistering the artifact.
+    if art_resp.data[0].get("elf_stored"):
+        try:
+            await delete_elf(version)
+        except Exception:
+            pass
+
+    cleared = {
+        "checksum_sha256": None, "signature": None, "storage_path": None, "size_bytes": 0,
+        "elf_stored": False, "elf_path": None,
+    }
     await client.table("firmware_versions").update(cleared).eq("version", version).execute()
     return ArtifactResult(artifact=_row_to_info(art_resp.data[0]))
 
@@ -171,4 +212,13 @@ def _row_to_info(row: dict) -> ArtifactInfo:
         provides=provides,
         depends=depends,
         created_at=str(row.get("created_at") or ""),
+        build_id=row.get("build_id"),
+        branch_name=row.get("branch_name"),
+        author=row.get("author"),
+        committed_at=str(row["committed_at"]) if row.get("committed_at") else None,
+        changelog=row.get("changelog") or "",
+        parent_version=row.get("parent_version"),
+        elf_stored=bool(row.get("elf_stored")),
+        elf_path=row.get("elf_path"),
+        release_version=row.get("release_version"),
     )

@@ -5,14 +5,76 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from nff_ota import fleet
 from nff_ota.models.deployment import CreateDeploymentParams, ReportDeviceStatusParams
 from nff_ota.tools.deployments.ops import (
+    _filter_compatible,
+    _materialize_jobs,
     abort_deployment,
     create_deployment,
     get_deployment_status,
     list_deployments,
     report_device_status,
+    start_deployment,
 )
+
+
+def _named_tables(responses: dict[str, list[list[dict]]]):
+    """side_effect for client.table(name): per-table sequential awaited .execute() responses."""
+    counters: dict[str, int] = {}
+
+    def side_effect(name):
+        t = MagicMock()
+        for m in ("select", "insert", "upsert", "update", "delete", "eq", "in_", "neq", "order", "limit", "lt", "gt"):
+            getattr(t, m).return_value = t
+
+        async def execute():
+            seq = responses.get(name, [[]])
+            i = counters.get(name, 0)
+            counters[name] = i + 1
+            return MagicMock(data=(seq[i] if i < len(seq) else []), error=None)
+
+        t.execute = execute
+        return t
+
+    return side_effect
+
+
+class TestStartDeploymentWireVersion:
+    """start_deployment must send the artifact's semver release_version on the wire (the
+    device's anti-downgrade gate needs a semver), not the catalog target_version."""
+
+    def _run(self, mock_supabase, monkeypatch, fw_row):
+        dep = _dep_row(status="active")
+        dep["target_version"] = "repo-abc1234"
+        job = _job_row(status="pending")
+        job["target_version"] = "repo-abc1234"
+        mock_supabase.table.side_effect = _named_tables({
+            "deployments": [[dep], [dep], [dep]],         # initial, recompute, final
+            "firmware_versions": [[fw_row]],
+            "ota_jobs": [[job], [], [{"status": "downloading"}]],  # pending select, update, recompute
+            "devices": [[{"id": "dev-1", "identity_attributes": {"mqtt_id": "dev-1"}}]],
+        })
+        monkeypatch.setattr(
+            "nff_ota.storage.create_signed_url", AsyncMock(return_value="https://signed/fw.bin")
+        )
+        deliver = AsyncMock(return_value={"status": "ota_started"})
+        monkeypatch.setattr(fleet, "deliver_ota", deliver)
+        return deliver
+
+    async def test_sends_release_version_semver(self, mock_supabase, monkeypatch):
+        fw = {"version": "repo-abc1234", "checksum_sha256": "deadbeef", "release_version": "3.0.13"}
+        deliver = self._run(mock_supabase, monkeypatch, fw)
+        await start_deployment("dep-1")
+        deliver.assert_awaited_once()
+        # deliver_ota(mqtt_id, version, sha256, url) — version is the 2nd positional arg.
+        assert deliver.await_args.args[1] == "3.0.13"
+
+    async def test_falls_back_to_target_version_when_no_release(self, mock_supabase, monkeypatch):
+        fw = {"version": "repo-abc1234", "checksum_sha256": "deadbeef", "release_version": None}
+        deliver = self._run(mock_supabase, monkeypatch, fw)
+        await start_deployment("dep-1")
+        assert deliver.await_args.args[1] == "repo-abc1234"
 
 
 def _dep_row(dep_id: str = "dep-1", status: str = "active") -> dict:
@@ -132,6 +194,167 @@ class TestCreateDeployment:
         ))
         assert result.error is not None
         assert "no members" in result.error
+
+
+class TestFilterCompatible:
+    """Unit coverage of the pure device_type gate logic."""
+
+    def _dev(self, dev_id: str, device_type):
+        return {"id": dev_id, "device_type": device_type}
+
+    def test_no_artifact_types_is_ungated(self):
+        devs = [self._dev("a", "esp32"), self._dev("b", "esp32s3")]
+        compatible, skipped = _filter_compatible(devs, [])
+        assert compatible == devs
+        assert skipped == []
+
+    def test_matching_type_is_compatible(self):
+        devs = [self._dev("a", "esp32")]
+        compatible, skipped = _filter_compatible(devs, ["esp32"])
+        assert [d["id"] for d in compatible] == ["a"]
+        assert skipped == []
+
+    def test_mismatched_type_is_skipped(self):
+        devs = [self._dev("a", "esp32"), self._dev("b", "esp32s3")]
+        compatible, skipped = _filter_compatible(devs, ["esp32s3"])
+        assert [d["id"] for d in compatible] == ["b"]
+        assert [d["id"] for d in skipped] == ["a"]
+
+    def test_unknown_type_allowed_with_warning(self):
+        devs = [self._dev("legacy", None), self._dev("blank", "")]
+        compatible, skipped = _filter_compatible(devs, ["esp32"])
+        assert [d["id"] for d in compatible] == ["legacy", "blank"]
+        assert skipped == []
+
+    def test_match_is_case_insensitive(self):
+        devs = [self._dev("a", "ESP32")]
+        compatible, skipped = _filter_compatible(devs, ["esp32"])
+        assert [d["id"] for d in compatible] == ["a"]
+        assert skipped == []
+
+
+class TestDeployGate:
+    """The deploy-time gate as exercised through create_deployment / poller."""
+
+    def _setup(self, mock_supabase, *, fw_device_types, devices, members=None, for_materialize=False):
+        """Wire a mock client and capture inserted ota_jobs rows.
+
+        ``devices`` is a list of {id, device_type}. ``create_deployment`` queries
+        firmware_versions twice (storage_path, then device_types); the poller path
+        (``for_materialize``) queries it once (device_types only).
+        """
+        if members is None:
+            members = [d["id"] for d in devices]
+        captured: dict[str, list] = {"jobs": []}
+        fw_storage_row = {"version": "1.0.0", "storage_path": "firmware/1.0.0.bin"}
+        fw_types_row = {"device_types": fw_device_types}
+        fw_seq = [[fw_types_row]] if for_materialize else [[fw_storage_row], [fw_types_row]]
+        responses: dict[str, list[list]] = {
+            "firmware_versions": fw_seq,
+            "device_groups": [[{"id": "grp-1"}]],
+            "device_group_members": [[{"device_id": m} for m in members]],
+            "devices": [[
+                {
+                    "id": d["id"],
+                    "current_firmware_version": "0.9.0",
+                    "firmware_version": "0.9.0",
+                    "device_type": d.get("device_type"),
+                }
+                for d in devices
+            ]],
+            "deployments": [[_dep_row()]],
+            "ota_jobs": [[]],
+        }
+        counters: dict[str, int] = {}
+
+        def table_se(name):
+            t = MagicMock()
+            t.select.return_value = t
+            t.eq.return_value = t
+            t.in_.return_value = t
+            t.order.return_value = t
+
+            def _insert(rows):
+                if name == "ota_jobs":
+                    captured["jobs"].extend(rows)
+                return t
+            t.insert.side_effect = _insert
+
+            async def execute():
+                n = counters.get(name, 0)
+                counters[name] = n + 1
+                seq = responses.get(name, [[]])
+                data = seq[n] if n < len(seq) else []
+                return MagicMock(data=data, error=None)
+            t.execute = execute
+            return t
+        mock_supabase.table.side_effect = table_se
+        return captured
+
+    async def test_compatible_device_deploys(self, mock_supabase):
+        captured = self._setup(
+            mock_supabase, fw_device_types=["esp32"], devices=[{"id": "dev-1", "device_type": "esp32"}]
+        )
+        result = await create_deployment(CreateDeploymentParams(
+            name="d", target_version="1.0.0", device_group_id="grp-1"
+        ))
+        assert result.error is None
+        assert [j["device_id"] for j in captured["jobs"]] == ["dev-1"]
+
+    async def test_incompatible_device_excluded(self, mock_supabase):
+        captured = self._setup(
+            mock_supabase,
+            fw_device_types=["esp32s3"],
+            devices=[{"id": "dev-32", "device_type": "esp32"}, {"id": "dev-s3", "device_type": "esp32s3"}],
+        )
+        result = await create_deployment(CreateDeploymentParams(
+            name="d", target_version="1.0.0", device_group_id="grp-1"
+        ))
+        assert result.error is None
+        assert [j["device_id"] for j in captured["jobs"]] == ["dev-s3"]
+
+    async def test_unknown_device_type_allowed(self, mock_supabase):
+        captured = self._setup(
+            mock_supabase, fw_device_types=["esp32"], devices=[{"id": "legacy", "device_type": None}]
+        )
+        result = await create_deployment(CreateDeploymentParams(
+            name="d", target_version="1.0.0", device_group_id="grp-1"
+        ))
+        assert result.error is None
+        assert [j["device_id"] for j in captured["jobs"]] == ["legacy"]
+
+    async def test_zero_compatible_returns_error(self, mock_supabase):
+        captured = self._setup(
+            mock_supabase, fw_device_types=["esp32s3"], devices=[{"id": "dev-32", "device_type": "esp32"}]
+        )
+        result = await create_deployment(CreateDeploymentParams(
+            name="d", target_version="1.0.0", device_group_id="grp-1"
+        ))
+        assert result.error is not None
+        assert "compatible" in result.error
+        assert captured["jobs"] == []
+
+    async def test_empty_artifact_types_ungated(self, mock_supabase):
+        captured = self._setup(
+            mock_supabase, fw_device_types=[], devices=[{"id": "dev-s3", "device_type": "esp32s3"}]
+        )
+        result = await create_deployment(CreateDeploymentParams(
+            name="d", target_version="1.0.0", device_group_id="grp-1"
+        ))
+        assert result.error is None
+        assert [j["device_id"] for j in captured["jobs"]] == ["dev-s3"]
+
+    async def test_materialize_jobs_applies_gate(self, mock_supabase):
+        captured = self._setup(
+            mock_supabase,
+            fw_device_types=["esp32s3"],
+            devices=[{"id": "dev-32", "device_type": "esp32"}, {"id": "dev-s3", "device_type": "esp32s3"}],
+            for_materialize=True,
+        )
+        count, err = await _materialize_jobs("dep-1", "1.0.0", "grp-1")
+        assert err is None
+        assert count == 1
+        assert [j["device_id"] for j in captured["jobs"]] == ["dev-s3"]
 
 
 class TestGetDeploymentStatus:

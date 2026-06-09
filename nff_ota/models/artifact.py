@@ -10,6 +10,20 @@ class UploadArtifactParams(BaseModel):
     provides: dict[str, str] = Field(default_factory=dict)
     depends: dict[str, str] = Field(default_factory=dict)
 
+    # Optional git-lineage / debug metadata, supplied by the nff-github connector's
+    # build pipeline (a bare OTA upload leaves them unset). When present they are written
+    # onto the shared firmware_versions row so a device's heartbeat/crash build_id joins
+    # back to its source commit and stored ELF. build_id must equal the value baked into
+    # the firmware (NFF_BUILD_ID) — the connector guarantees this by injecting it at compile.
+    build_id: str | None = None
+    branch_name: str | None = None
+    author: str | None = None
+    committed_at: str | None = None
+    changelog: str | None = None
+    parent_version: str | None = None
+    elf_path: str | None = None  # bucket path of the stored debug ELF (set => elf_stored)
+    release_version: str | None = None  # semver sent as the OTA command version (anti-downgrade)
+
     @field_validator("device_types")
     @classmethod
     def device_types_not_empty(cls, v: list[str]) -> list[str]:
@@ -30,6 +44,15 @@ class ArtifactInfo(BaseModel):
     provides: dict[str, str]
     depends: dict[str, str]
     created_at: str
+    build_id: str | None = None
+    branch_name: str | None = None
+    author: str | None = None
+    committed_at: str | None = None
+    changelog: str = ""
+    parent_version: str | None = None
+    elf_stored: bool = False
+    elf_path: str | None = None
+    release_version: str | None = None
 
 
 class ArtifactResult(BaseModel):

@@ -5,8 +5,8 @@ from typing import AsyncIterator
 
 from mcp.server.fastmcp import FastMCP
 
-from nff_ota import heartbeat, poller, reaper, webhooks
-from nff_ota.client import close_client, init_client
+from nff_ota import background, heartbeat, webhooks
+from nff_ota.client import init_client
 from nff_ota.config import settings
 from nff_ota.prompts import register_prompts
 from nff_ota.resources import register_resources
@@ -18,15 +18,19 @@ from nff_ota.tools.devices import register as register_devices
 
 @asynccontextmanager
 async def lifespan(server: FastMCP) -> AsyncIterator[None]:
+    # The streamable-http transport enters this lifespan once per MCP session, not once
+    # per process. init_client() is idempotent so it creates this loop's Supabase client
+    # on first session and reuses it thereafter. We deliberately do NOT close_client() on
+    # session exit: the client is loop-scoped and shared with the app-level webhook
+    # routes (which never enter this lifespan), so tearing it down here would null a
+    # client other sessions and webhooks still depend on.
+    #
+    # The poller and reaper are NOT started here: this lifespan is entered/exited per
+    # request, so a sweep task started here would be cancelled the moment the request
+    # ends and never tick while idle. They run as process-level background sweeps on
+    # their own loop instead — started in main(). See nff_ota/background.py.
     await init_client()
-    reaper.start()
-    poller.start()
-    try:
-        yield
-    finally:
-        await poller.stop()
-        await reaper.stop()
-        await close_client()
+    yield
 
 
 mcp = FastMCP(
@@ -60,4 +64,9 @@ def main() -> None:
     # every call and never tick while idle. A process-level daemon thread beats
     # for the whole process lifetime instead, independent of the SDK's lifespan.
     heartbeat.start()
+    # Same reasoning for the deployment poller and stuck-job reaper: they must sweep on
+    # their interval while the server is idle, but a lifespan-scoped task is torn down
+    # per request. background.start() runs them on a dedicated daemon-thread event loop
+    # (with its own loop-bound Supabase client) for the whole process lifetime.
+    background.start()
     mcp.run(transport="streamable-http")

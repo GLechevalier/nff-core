@@ -61,6 +61,62 @@ class TestUploadArtifact:
         assert result.artifact.checksum_sha256 == expected_checksum
         assert result.artifact.size_bytes == len(sample_artifact_bytes)
 
+    async def test_upload_writes_lineage_when_provided(
+        self, mock_supabase, sample_artifact_bytes, tmp_path
+    ):
+        """build_id + git lineage land in the upserted row; parent_version is linked
+        only because the (mocked) parent row exists."""
+        fw_file = tmp_path / "fw.bin"
+        fw_file.write_bytes(sample_artifact_bytes)
+
+        row = _make_fw_row(version="hello-e20bdf5", name="Fix drift")
+        row["build_id"] = "e20bdf5000000000"
+        # Shared execute mock: the parent-existence SELECT and the upsert both see this,
+        # so the parent is treated as existing and the link is kept.
+        mock_supabase.table.return_value.execute = AsyncMock(
+            return_value=MagicMock(data=[row], error=None)
+        )
+
+        result = await upload_artifact(
+            UploadArtifactParams(
+                name="Fix drift", version="hello-e20bdf5", device_types=["esp32"],
+                file_path=str(fw_file),
+                build_id="e20bdf5000000000", branch_name="main", author="octocat",
+                committed_at="2026-06-09T07:26:55Z", changelog="Fix drift",
+                parent_version="hello-0000000", elf_path="firmware/hello-e20bdf5.elf",
+            )
+        )
+
+        assert result.error is None
+        written = mock_supabase.table.return_value.upsert.call_args.args[0]
+        assert written["build_id"] == "e20bdf5000000000"
+        assert written["branch_name"] == "main"
+        assert written["author"] == "octocat"
+        assert written["committed_at"] == "2026-06-09T07:26:55Z"
+        assert written["changelog"] == "Fix drift"
+        assert written["parent_version"] == "hello-0000000"
+        assert written["elf_path"] == "firmware/hello-e20bdf5.elf"
+        assert written["elf_stored"] is True
+
+    async def test_upload_omits_parent_version_when_parent_absent(
+        self, mock_supabase, sample_artifact_bytes, tmp_path
+    ):
+        """A parent_version whose row does not exist is dropped, not written (FK safety)."""
+        fw_file = tmp_path / "fw.bin"
+        fw_file.write_bytes(sample_artifact_bytes)
+        # Default mock: every execute() returns data=[] -> parent lookup finds nothing.
+        result = await upload_artifact(
+            UploadArtifactParams(
+                name="v", version="hello-e20bdf5", device_types=["esp32"],
+                file_path=str(fw_file), build_id="e20bdf5000000000",
+                parent_version="hello-0000000",
+            )
+        )
+        assert result.error is None
+        written = mock_supabase.table.return_value.upsert.call_args.args[0]
+        assert "parent_version" not in written
+        assert written["build_id"] == "e20bdf5000000000"
+
     async def test_upload_missing_file_returns_error(self, mock_supabase):
         result = await upload_artifact(
             UploadArtifactParams(
