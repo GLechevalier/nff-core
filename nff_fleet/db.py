@@ -63,17 +63,37 @@ async def _upsert_device_and_telemetry(device_id: str, payload: dict[str, Any]) 
 
 async def _upsert_device(device_id: str, payload: dict[str, Any]) -> None:
     now = _now()
+    # Device-attested hardware identity (see nff-sdk-c heartbeat). device_type is the
+    # canonical family used by nff-ota's OTA compatibility gate; hardware is the richer
+    # fingerprint kept for diagnostics. Both are omitted by older firmware, in which
+    # case the RPC preserves any previously-stored value.
+    hardware = {
+        k: payload[k]
+        for k in ("fqbn", "chip", "rev", "flash")
+        if payload.get(k) not in (None, "")
+    }
+    # The heartbeat (nff-sdk-c) sends "fw" and "uptime" (milliseconds); fall back to the
+    # DB-style keys so any non-device caller still works.
+    firmware_version = payload.get("fw") or payload.get("firmware_version") or "unknown"
+    uptime_seconds = payload.get("uptime_seconds")
+    if uptime_seconds is None and payload.get("uptime") is not None:
+        uptime_seconds = int(payload["uptime"]) // 1000
     await _client.rpc(
         "upsert_device_heartbeat",
         {
             "p_id": device_id,
             "p_status": payload.get("status", "online"),
-            "p_firmware_version": payload.get("firmware_version") or "unknown",
+            "p_firmware_version": firmware_version,
             "p_ip_address": payload.get("ip"),
             "p_rssi": payload.get("rssi"),
-            "p_uptime_seconds": payload.get("uptime_seconds") or 0,
+            "p_uptime_seconds": uptime_seconds or 0,
             "p_last_seen": now,
             "p_updated_at": now,
+            "p_device_type": payload.get("device_type") or None,
+            "p_hardware": hardware,
+            # The device-reported build_id (heartbeat "build"); the connector's post-deploy
+            # verification compares it against what it pushed. Omitted by older firmware.
+            "p_build_id": payload.get("build") or None,
         },
     ).execute()
 
@@ -94,7 +114,8 @@ async def _insert_telemetry(device_id: str, payload: dict[str, Any]) -> None:
             "device_id": device_id,
             "ts": _now(),
             "rssi": payload.get("rssi"),
-            "heap_free": payload.get("heap_free"),
+            # Heartbeat sends free heap as "heap"; fall back to the DB-style key.
+            "heap_free": payload.get("heap", payload.get("heap_free")),
             "packets_rx": payload.get("packets_rx"),
             "packets_tx": payload.get("packets_tx"),
             "temp_c": payload.get("temp_c"),
