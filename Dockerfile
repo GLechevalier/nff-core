@@ -16,6 +16,6 @@ COPY nff_fleet/ nff_fleet/
 
 ENV PATH="/venv/bin:$PATH"
 
-EXPOSE 8883 3000
+EXPOSE 8883 3001
 
 ENTRYPOINT ["nff-fleet", "start"]

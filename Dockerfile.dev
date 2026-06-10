@@ -1,0 +1,20 @@
+# nff-fleet — DEV image.
+# Single-stage editable install. docker-compose.dev.yml bind-mounts ./nff_fleet
+# over /app/nff_fleet, and `pip install -e .` makes Python import the package from
+# that live path — so you edit on the host and just `docker compose restart nff-fleet`
+# (the embedded broker/MCP loop has no hot-reload) to pick up the change. No rebuild.
+FROM python:3.12-slim
+
+WORKDIR /app
+
+COPY pyproject.toml README.md ./
+COPY nff_fleet/ nff_fleet/
+
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir -e .
+
+ENV PATH="/usr/local/bin:$PATH"
+
+EXPOSE 8883 3001
+
+ENTRYPOINT ["nff-fleet", "start"]

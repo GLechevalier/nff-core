@@ -31,3 +31,5 @@ sketches/**/credentials.h
 # OS
 .DS_Store
 Thumbs.db
+
+build_*/
