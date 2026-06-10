@@ -1,0 +1,20 @@
+# nff-ota — DEV image.
+# Single-stage editable install (with the [dev] extras: pytest/ruff/mypy).
+# docker-compose.dev.yml bind-mounts ./nff_ota over /app/nff_ota; `pip install -e .`
+# imports from that live path, so edit-on-host + `docker compose restart nff-ota`
+# applies changes with no rebuild (the streamable-http MCP loop has no hot-reload).
+FROM python:3.12-slim
+
+WORKDIR /app
+
+COPY pyproject.toml README.md ./
+COPY nff_ota/ nff_ota/
+
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir -e ".[dev]"
+
+ENV PATH="/usr/local/bin:$PATH"
+
+EXPOSE 3002
+
+ENTRYPOINT ["nff-ota"]
