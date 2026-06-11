@@ -16,6 +16,7 @@ env/
 
 # Environment
 .env
+.env*
 
 # Data volumes (runtime-generated, contain secrets)
 /data/

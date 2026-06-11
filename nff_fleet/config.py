@@ -3,7 +3,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class NffFleetSettings(BaseSettings):
-    model_config = SettingsConfigDict(env_prefix="NFF_FLEET_", env_file=".env", extra="ignore")
+    model_config = SettingsConfigDict(env_prefix="NFF_FLEET_", env_file=(".env", ".env.dev"), extra="ignore")
 
     mqtt_port: int = 8883
     mcp_port: int = 3001
