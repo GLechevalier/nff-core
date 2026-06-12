@@ -21,6 +21,7 @@ env/
 # Environment variables (may contain secrets)
 .env.local
 .env.*.local
+.env*
 
 # pytest
 .pytest_cache/
