@@ -21,7 +21,9 @@ ENV PATH="/venv/bin:$PATH" \
     NFF_DB_PATH=/data/crashes.db
 
 EXPOSE 8080
+EXPOSE 3005
 
 # The CLI defaults to 127.0.0.1; bind 0.0.0.0 so the port is reachable from
-# outside the container.
+# outside the container. The MCP server (port 3005) is the same image launched
+# with `entrypoint: ["nff-diag", "start"]` (see docker-compose service nff-diagnosis-mcp).
 ENTRYPOINT ["nff-diag", "server", "start", "--host", "0.0.0.0", "--port", "8080"]
