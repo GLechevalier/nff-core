@@ -6,6 +6,18 @@ from nff_diagnosis.schemas.diagnosis_output import (
     Candidate,
     DiagnosisOutput,
 )
+from nff_diagnosis.schemas.fleet import FleetDevice
+from nff_diagnosis.schemas.timeline import TimelineEntry
+from nff_diagnosis.schemas.correlation import (
+    Predicate,
+    PredicateOp,
+    HypothesisEvidence,
+    Hypothesis,
+    HypothesisStatus,
+    DeviceGroup,
+    TemporalCluster,
+    FleetCorrelationReport,
+)
 
 __all__ = [
     "ELFRecord",
@@ -14,4 +26,14 @@ __all__ = [
     "ResolvedFrame",
     "Candidate",
     "DiagnosisOutput",
+    "FleetDevice",
+    "TimelineEntry",
+    "Predicate",
+    "PredicateOp",
+    "HypothesisEvidence",
+    "Hypothesis",
+    "HypothesisStatus",
+    "DeviceGroup",
+    "TemporalCluster",
+    "FleetCorrelationReport",
 ]

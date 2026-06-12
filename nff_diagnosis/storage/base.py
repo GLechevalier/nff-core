@@ -19,3 +19,18 @@ class StorageBase(ABC):
 
     @abstractmethod
     def list_crashes(self, limit: int = 50, offset: int = 0) -> list[CrashRecord]: ...
+
+    def iter_all_crashes(self, batch: int = 500) -> list[CrashRecord]:
+        """Return every stored crash (paged under the hood). Default impl pages
+        list_crashes so existing backends get it for free."""
+        out: list[CrashRecord] = []
+        offset = 0
+        while True:
+            page = self.list_crashes(limit=batch, offset=offset)
+            if not page:
+                break
+            out.extend(page)
+            if len(page) < batch:
+                break
+            offset += batch
+        return out

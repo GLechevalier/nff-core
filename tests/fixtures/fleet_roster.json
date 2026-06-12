@@ -1,0 +1,7 @@
+[
+  {"device_id": "dev-34a", "firmware_version": "3.4", "build_id": "b34", "status": "offline", "device_type": "esp32"},
+  {"device_id": "dev-35a", "firmware_version": "3.5", "build_id": "b35", "status": "offline", "device_type": "esp32"},
+  {"device_id": "dev-35b", "firmware_version": "3.5", "build_id": "b35", "status": "online", "device_type": "esp32"},
+  {"device_id": "dev-36a", "firmware_version": "3.6", "build_id": "b36", "status": "online", "device_type": "esp32"},
+  {"device_id": "dev-36b", "firmware_version": "3.6", "build_id": "b36", "status": "offline", "device_type": "esp32"}
+]
