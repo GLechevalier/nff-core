@@ -3,6 +3,9 @@ from pathlib import Path
 import click
 from dotenv import load_dotenv
 
+# Prefer .env.dev (loaded first → wins), fall back to a plain .env. load_dotenv
+# never overrides an already-set var, so the first call takes precedence.
+load_dotenv(".env.dev")
 load_dotenv()
 
 from nff_diagnosis.cli.cmd_capture import capture_group
