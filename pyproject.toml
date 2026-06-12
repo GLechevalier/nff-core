@@ -34,6 +34,10 @@ dev = [
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+addopts = "-m 'not elf'"
+markers = [
+    "elf: needs a real ESP32 ELF + xtensa-esp32-elf-addr2line for true symbolication",
+]
 
 [tool.ruff]
 line-length = 100
