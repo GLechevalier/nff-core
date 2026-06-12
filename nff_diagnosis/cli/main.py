@@ -11,6 +11,7 @@ load_dotenv()
 from nff_diagnosis.cli.cmd_capture import capture_group
 from nff_diagnosis.cli.cmd_diagnose import diagnose_cmd
 from nff_diagnosis.cli.cmd_elf import elf_group
+from nff_diagnosis.cli.cmd_mcp import start_cmd
 from nff_diagnosis.cli.cmd_resolve import resolve_cmd
 from nff_diagnosis.cli.cmd_server import server_group
 from nff_diagnosis.cli.cmd_view import view_group
@@ -47,5 +48,6 @@ cli.add_command(elf_group)
 cli.add_command(capture_group)
 cli.add_command(resolve_cmd)
 cli.add_command(diagnose_cmd)
+cli.add_command(start_cmd)
 cli.add_command(server_group)
 cli.add_command(view_group)
