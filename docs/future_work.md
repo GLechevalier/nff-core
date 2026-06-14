@@ -9,7 +9,7 @@ Derived from first-principles security reasoning. Organized by layer, then by ar
 Snapshot of what exists today vs. what the vulnerability tree and a complete IoT assessment
 expect. The detailed forward-looking sections (§1, §5, §6) expand on each gap below.
 
-### Tool inventory (30 registered)
+### Tool inventory (42 registered)
 
 **Network/auth:** `port_scan`, `discover_devices` (nmap); `ssh_brute` (asyncssh),
 `telnet_brute` (asyncio); `lookup_default_creds` (bundled JSON).
@@ -17,13 +17,20 @@ expect. The detailed forward-looking sections (§1, §5, §6) expand on each gap
 `coap_put` (coap-client); `ble_scan`, `gatt_enum`, `gatt_write` (bleak, + demo fixtures);
 `zigbee_scan`, `zigbee_join_capture`, `zigbee_key_inject` (USB coordinator, + demo fixtures).
 **Firmware:** `extract_firmware`, `analyze_strings` (binwalk/strings); `scan_hardcoded_creds`
-(regex); `unsigned_update_check` (static HTTP-update / signature scan).
-**Web/app:** `test_default_creds_http`, `fuzz_web_paths`, `command_injection_tester` (httpx).
-**Components (I5):** `cve_lookup` (bundled `cve_db.json`).
+(regex over strings *and* a direct file-parsing mode); `unsigned_update_check` (static
+HTTP-update / signature scan); `parse_unix_users` (real `/etc/passwd`+`/etc/shadow` parser);
+`extract_firmware_urls` (hardcoded-URL / trust-relationship extractor).
+**Web/app:** `test_default_creds_http`, `fuzz_web_paths` (GET + POST/PUT/DELETE),
+`command_injection_tester`, `directory_traversal_tester`, `auth_bypass_tester`, `idor_tester`,
+`csrf_tester` (httpx).
+**Components (I5):** `cve_lookup` (bundled `cve_db.json`); `cve_db_sync` (optional upstream
+feed sync, off by default / refused in demo mode).
 **Outbound (Chain 8):** `outbound_analyzer`, `dns_hijack_simulator`, `tls_validation_tester`
 (demo fixtures; real mode needs a controlled gateway).
-**Physical (I10):** `debug_interface_scan` (pyserial; + demo fixture).
-**Analysis/ops:** `walk_vuln_tree` (tree correlator), `sandbox_status`.
+**Physical (I10):** `debug_interface_scan` (pyserial; + demo fixture); `zwave_scan`,
+`zwave_command_inject` (Z-Wave, demo-fixture-backed like Zigbee).
+**Analysis/ops:** `walk_vuln_tree` (tree correlator), `score_cvss` (CVSS v3.1 base-score),
+`generate_report` (markdown report), `delta_report` (before/after diff), `sandbox_status`.
 
 ### The core gap — RESOLVED ✅
 
@@ -42,33 +49,50 @@ hardware/lib outside demo mode and return a structured error if it is unavailabl
 ### Coverage by attack layer (per §1)
 
 - **Network + authentication** — strong ✅
-- **Firmware** — extract/strings/regex creds + unsigned-update detector ✅; still missing a real
-  `/etc/passwd`–`/etc/shadow` parser and a hardcoded-URL/trust-relationship extractor.
-- **Application** — path-fuzz, default creds, and command injection ✅; still missing directory
-  traversal, auth bypass, IDOR, CSRF.
-- **Physical / radio** — BLE now has GATT enum/write, Zigbee has join-capture/key-inject, and there
-  is a UART/JTAG `debug_interface_scan` ✅ (radio/serial paths are demo-fixture-backed offline; real
-  hardware paths gated on bleak / a USB coordinator / pyserial). Still missing Z-Wave.
+- **Firmware** — extract/strings/regex creds + unsigned-update detector ✅; real
+  `/etc/passwd`–`/etc/shadow` parser (`parse_unix_users`) and hardcoded-URL/trust-relationship
+  extractor (`extract_firmware_urls`) now built ✅.
+- **Application** — path-fuzz, default creds, and command injection ✅; directory traversal, auth
+  bypass, IDOR, and CSRF testers now built ✅ (`directory_traversal_tester`, `auth_bypass_tester`,
+  `idor_tester`, `csrf_tester`).
+- **Physical / radio** — BLE now has GATT enum/write, Zigbee has join-capture/key-inject, Z-Wave has
+  `zwave_scan`/`zwave_command_inject`, and there is a UART/JTAG `debug_interface_scan` ✅ (radio/serial
+  paths are demo-fixture-backed offline; real hardware paths gated on bleak / a USB coordinator /
+  pyserial).
 - **Outbound surface** — modeled ✅ (the full "no open ports ≠ safe" chain is built; real mode needs
   a controlled gateway, so it ships demo-fixture-backed).
 
-### Depth gaps in tools that already exist (per §5)
+### Depth gaps in tools that already exist (per §5) — RESOLVED ✅
 
-- `port_scan` — TCP only; no UDP (`-sU`), so misses CoAP/mDNS/SSDP/UPnP.
-- `fuzz_web_paths` — GET only; no POST/PUT/DELETE (note: `command_injection_tester` does both).
-- `scan_hardcoded_creds` — regex over `strings` output, not parsing extracted files directly.
-- All tools — no rate-limit / back-off detection.
+- `port_scan` — now supports UDP (`scan_type="udp"` → `-sU`) to catch CoAP/mDNS/SSDP/UPnP. ✅
+- `fuzz_web_paths` — now takes a `methods` list (GET/POST/PUT/DELETE). ✅
+- `scan_hardcoded_creds` — gained a `parse_files` mode that reads extracted files directly for
+  per-file/line attribution (the `strings` path remains the default). ✅
+- All networked tools — share a `RateLimitDetector` (`utils/ratelimit.py`) that backs off once and
+  surfaces a `rate_limited` flag when a target starts throttling (429/503/Retry-After or a run of
+  connection errors). ✅
 
-### Cross-cutting capabilities missing
+### Cross-cutting capabilities — RESOLVED ✅
 
-- **Reporting (§6)** — raw JSON only; no markdown/PDF report, no CVSS auto-scorer, no delta report.
-- **CVE data source** — `cve_lookup` ships a small bundled seed `cve_db.json`; no periodic sync from
-  an upstream CVE feed yet (offline by design for the demo).
+- **Reporting (§6)** — `generate_report` renders a markdown report (executive summary, active/partial
+  chains, tools run), `score_cvss` computes CVSS v3.1 base scores from the vectors the tree/CVE data
+  already carry, and `delta_report` diffs two assessment runs into fixed/new/persisting. ✅ (PDF
+  rendering intentionally skipped — markdown is dependency-free and portable for the demo kit.)
+- **CVE data source** — `cve_db_sync` can refresh the bundled `cve_db.json` from an upstream feed,
+  but is **off by default** and refuses in demo mode, so the offline posture is preserved. ✅
 
 ### Done since this section was first written
 
-- **Missing-chain tools** — all 13 implemented and registered (server exposes 30 tools); every tree
-  chain reaches *active*.
+- **Missing-chain tools** — all 13 implemented and registered; every tree chain reaches *active*.
+  The §0 gap-list tools (firmware passwd/URL parsers, the four app-layer testers, Z-Wave, the
+  reporting trio, and `cve_db_sync`) plus the depth-gap enhancements have since been added, taking the
+  server to 42 registered tools.
+- **Vulnerability tree expanded to v3** — `resources/vuln_tree.json` now has 14 roots / 18 terminal
+  chains. The web root branches into `web_dir_traversal`, `web_auth_bypass`, `web_idor`, and
+  `web_csrf`; new roots cover Z-Wave (`zwave_insecure_node` → `zwave_command_accepted`), a firmware
+  backdoor account (`firmware_backdoor_account` via `parse_unix_users`), and an insecure hardcoded
+  endpoint (`firmware_insecure_url` via `extract_firmware_urls`). `walk_vuln_tree` surfaces these as
+  active chains and as partial "run this next" leads, and they flow through `generate_report`.
 - **Safety sandbox** (`utils/sandbox.py`, `tools/safety/`) — allowlist guard wired into the
   networked tools; `sandbox_status` exposes the cage state.
 - **Transport** — `server.py` serves streamable HTTP on `127.0.0.1:3006/mcp` (stdio still available
@@ -76,11 +100,16 @@ hardware/lib outside demo mode and return a structured error if it is unavailabl
 
 ### Highest-leverage next steps
 
-With the correlator and all chain tools done, the remaining leverage is in **breadth and reporting**:
-the **report generator + CVSS auto-scorer** (§6), the remaining **application-layer** testers
-(directory traversal, auth bypass, IDOR, CSRF), UDP support in `port_scan`, and an upstream feed for
-`cve_lookup`. Building the `nff-mock` vulnerable targets (§8.B) is the gating item for an end-to-end
-live demo against real services.
+The breadth/reporting gap is now closed: the report generator, CVSS auto-scorer, delta report, the
+four application-layer testers, the firmware passwd/URL parsers, Z-Wave, UDP scanning, non-GET
+fuzzing, direct-file credential parsing, rate-limit detection, and an optional `cve_db_sync` are all
+built and tested — **and wired into the vulnerability tree** (v3): the web root now branches into
+directory-traversal, auth-bypass, IDOR, and CSRF terminals, and three new roots cover Z-Wave
+(`zwave_scan` → `zwave_command_inject`), a firmware backdoor account (`parse_unix_users`), and an
+insecure hardcoded trust relationship (`extract_firmware_urls`). The remaining leverage is in
+**realism and the adversarial loop**: the red/blue **adversarial agent loop** (§4), and building the
+`nff-mock` vulnerable targets (§8.B) — still the gating item for an end-to-end live demo against real
+services.
 
 ---
 

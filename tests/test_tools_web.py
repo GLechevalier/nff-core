@@ -4,14 +4,35 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 
+from nff_pentester.tools.web.auth_bypass import AuthBypassTesterInput, auth_bypass_tester
+from nff_pentester.tools.web.csrf import CsrfAction, CsrfTesterInput, csrf_tester
 from nff_pentester.tools.web.default_creds import (
     TestDefaultCredsHttpInput,
     test_default_creds_http as _test_default_creds_http,
 )
 from nff_pentester.tools.web.fuzzer import FuzzWebPathsInput, fuzz_web_paths
+from nff_pentester.tools.web.idor import IdorTesterInput, idor_tester
+from nff_pentester.tools.web.traversal import (
+    DirectoryTraversalTesterInput,
+    directory_traversal_tester,
+)
 
 _PATCH_FUZZER_CLIENT = "nff_pentester.tools.web.fuzzer.httpx.AsyncClient"
 _PATCH_CREDS_CLIENT = "nff_pentester.tools.web.default_creds.httpx.AsyncClient"
+_PATCH_TRAVERSAL_CLIENT = "nff_pentester.tools.web.traversal.httpx.AsyncClient"
+_PATCH_AUTHBYPASS_CLIENT = "nff_pentester.tools.web.auth_bypass.httpx.AsyncClient"
+_PATCH_IDOR_CLIENT = "nff_pentester.tools.web.idor.httpx.AsyncClient"
+_PATCH_CSRF_CLIENT = "nff_pentester.tools.web.csrf.httpx.AsyncClient"
+
+
+def _seq_get_client(responses):
+    """A mocked AsyncClient whose .get/.request return the given responses in sequence."""
+    client = AsyncMock()
+    client.__aenter__.return_value = client
+    client.__aexit__.return_value = False
+    client.get = AsyncMock(side_effect=list(responses))
+    client.request = AsyncMock(side_effect=list(responses))
+    return client
 
 
 def _make_http_client(get_response=None, post_response=None, get_side_effect=None, post_side_effect=None):
@@ -173,3 +194,168 @@ async def test_default_creds_http_multiple_credentials(mock_ctx):
         result = await _test_default_creds_http(params, mock_ctx)
     assert result.attempts == 3
     assert result.successful_credentials == [("admin", "correct")]
+
+
+# ── fuzz_web_paths methods (POST/PUT/DELETE) ────────────────────────────────────
+
+async def test_fuzz_web_paths_multiple_methods(mock_ctx):
+    client = AsyncMock()
+    client.__aenter__.return_value = client
+    client.__aexit__.return_value = False
+    client.get = AsyncMock(return_value=_make_response(200))
+    client.post = AsyncMock(return_value=_make_response(201))
+    with patch(_PATCH_FUZZER_CLIENT, return_value=client):
+        params = FuzzWebPathsInput(
+            base_url="http://192.168.1.1", wordlist=["/api"], methods=["GET", "POST"]
+        )
+        result = await fuzz_web_paths(params, mock_ctx)
+    methods = {h.method for h in result.hits}
+    assert methods == {"GET", "POST"}
+    client.post.assert_awaited()
+
+
+# ── directory_traversal_tester ──────────────────────────────────────────────────
+
+async def test_directory_traversal_detected(mock_ctx):
+    resp = _make_response(200, text="root:x:0:0:root:/root:/bin/sh\n")
+    client = _make_http_client(get_response=resp)
+    with patch(_PATCH_TRAVERSAL_CLIENT, return_value=client):
+        params = DirectoryTraversalTesterInput(
+            base_url="http://192.168.1.1", paths=["/download"],
+            param_fields=["file"], payloads=["../../etc/passwd"],
+        )
+        result = await directory_traversal_tester(params, mock_ctx)
+    assert result.vulnerable is True
+    assert result.evidence[0].marker.startswith("root:")
+
+
+async def test_directory_traversal_clean(mock_ctx):
+    resp = _make_response(200, text="<html>not found</html>")
+    client = _make_http_client(get_response=resp)
+    with patch(_PATCH_TRAVERSAL_CLIENT, return_value=client):
+        params = DirectoryTraversalTesterInput(
+            base_url="http://192.168.1.1", paths=["/download"],
+            param_fields=["file"], payloads=["../../etc/passwd"],
+        )
+        result = await directory_traversal_tester(params, mock_ctx)
+    assert result.vulnerable is False
+
+
+async def test_directory_traversal_connect_error_continues(mock_ctx):
+    client = _make_http_client(get_side_effect=httpx.ConnectError("refused"))
+    with patch(_PATCH_TRAVERSAL_CLIENT, return_value=client):
+        params = DirectoryTraversalTesterInput(
+            base_url="http://192.168.1.1", paths=["/download"],
+            param_fields=["file"], payloads=["../../etc/passwd"],
+        )
+        result = await directory_traversal_tester(params, mock_ctx)
+    assert result.vulnerable is False
+    assert result.error is None
+
+
+# ── auth_bypass_tester ──────────────────────────────────────────────────────────
+
+async def test_auth_bypass_direct_no_auth(mock_ctx):
+    # Baseline itself returns 200 → endpoint is open with no session.
+    client = _make_http_client(get_response=_make_response(200, text="admin panel"))
+    with patch(_PATCH_AUTHBYPASS_CLIENT, return_value=client):
+        params = AuthBypassTesterInput(base_url="http://192.168.1.1", paths=["/admin"])
+        result = await auth_bypass_tester(params, mock_ctx)
+    assert result.bypassed is True
+    assert result.evidence[0].technique == "direct-no-auth"
+
+
+async def test_auth_bypass_via_technique(mock_ctx):
+    # Baseline 403 (protected), then every technique returns 200.
+    responses = [_make_response(403)] + [_make_response(200) for _ in range(4)]
+    client = _seq_get_client(responses)
+    with patch(_PATCH_AUTHBYPASS_CLIENT, return_value=client):
+        params = AuthBypassTesterInput(base_url="http://192.168.1.1", paths=["/admin"])
+        result = await auth_bypass_tester(params, mock_ctx)
+    assert result.bypassed is True
+    techniques = {e.technique for e in result.evidence}
+    assert "jwt-alg-none" in techniques
+
+
+async def test_auth_bypass_properly_protected(mock_ctx):
+    responses = [_make_response(403) for _ in range(5)]
+    client = _seq_get_client(responses)
+    with patch(_PATCH_AUTHBYPASS_CLIENT, return_value=client):
+        params = AuthBypassTesterInput(base_url="http://192.168.1.1", paths=["/admin"])
+        result = await auth_bypass_tester(params, mock_ctx)
+    assert result.bypassed is False
+
+
+# ── idor_tester ─────────────────────────────────────────────────────────────────
+
+async def test_idor_detected(mock_ctx):
+    responses = [
+        _make_response(200, text="objA"),  # baseline
+        _make_response(200, text="objB"),  # probe distinct
+    ]
+    client = _seq_get_client(responses)
+    with patch(_PATCH_IDOR_CLIENT, return_value=client):
+        params = IdorTesterInput(
+            base_url="http://192.168.1.1",
+            endpoint_template="/api/device/{id}",
+            baseline_id="1",
+            probe_ids=["2"],
+        )
+        result = await idor_tester(params, mock_ctx)
+    assert result.idor_found is True
+    assert result.evidence[0].probe_id == "2"
+
+
+async def test_idor_not_found_when_blocked(mock_ctx):
+    responses = [
+        _make_response(200, text="objA"),  # baseline
+        _make_response(403, text="forbidden"),  # probe blocked
+    ]
+    client = _seq_get_client(responses)
+    with patch(_PATCH_IDOR_CLIENT, return_value=client):
+        params = IdorTesterInput(
+            base_url="http://192.168.1.1",
+            endpoint_template="/api/device/{id}",
+            baseline_id="1",
+            probe_ids=["2"],
+        )
+        result = await idor_tester(params, mock_ctx)
+    assert result.idor_found is False
+
+
+# ── csrf_tester ─────────────────────────────────────────────────────────────────
+
+def _csrf_client(page_text="<form></form>", action_status=200):
+    client = AsyncMock()
+    client.__aenter__.return_value = client
+    client.__aexit__.return_value = False
+    client.get = AsyncMock(return_value=_make_response(200, text=page_text))
+    client.request = AsyncMock(return_value=_make_response(action_status, text="ok"))
+    return client
+
+
+async def test_csrf_vulnerable_no_token(mock_ctx):
+    client = _csrf_client(page_text="<form><input name='x'></form>", action_status=200)
+    with patch(_PATCH_CSRF_CLIENT, return_value=client):
+        params = CsrfTesterInput(
+            base_url="http://192.168.1.1",
+            actions=[CsrfAction(method="POST", path="/reboot")],
+        )
+        result = await csrf_tester(params, mock_ctx)
+    assert result.csrf_vulnerable is True
+    assert result.evidence[0].accepted is True
+    assert result.evidence[0].token_seen is False
+
+
+async def test_csrf_protected_by_token(mock_ctx):
+    client = _csrf_client(
+        page_text="<form><input name='csrf_token' value='abc'></form>", action_status=200
+    )
+    with patch(_PATCH_CSRF_CLIENT, return_value=client):
+        params = CsrfTesterInput(
+            base_url="http://192.168.1.1",
+            actions=[CsrfAction(method="POST", path="/reboot")],
+        )
+        result = await csrf_tester(params, mock_ctx)
+    assert result.csrf_vulnerable is False
+    assert result.evidence[0].token_seen is True

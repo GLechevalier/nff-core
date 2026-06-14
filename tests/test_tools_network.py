@@ -54,6 +54,24 @@ async def test_port_scan_parses_xml_output(mock_ctx):
     assert "nginx" in (port.version or "")
 
 
+async def test_port_scan_udp_adds_su_flag(mock_ctx):
+    mock_run = AsyncMock(return_value=make_cmd(stdout=NMAP_XML_ONE_HOST))
+    with patch(_PATCH_RUN, new=mock_run):
+        params = PortScanInput(target="192.168.1.1", ports="5683", scan_type="udp")
+        await port_scan(params, mock_ctx)
+    args = mock_run.call_args.args[0]
+    assert "-sU" in args
+
+
+async def test_port_scan_tcp_omits_su_flag(mock_ctx):
+    mock_run = AsyncMock(return_value=make_cmd(stdout=NMAP_XML_ONE_HOST))
+    with patch(_PATCH_RUN, new=mock_run):
+        params = PortScanInput(target="192.168.1.1", ports="80")
+        await port_scan(params, mock_ctx)
+    args = mock_run.call_args.args[0]
+    assert "-sU" not in args
+
+
 async def test_port_scan_no_hosts_in_output(mock_ctx):
     empty_xml = '<?xml version="1.0"?><nmaprun><runstats><finished elapsed="0.1"/></runstats></nmaprun>'
     with patch(_PATCH_RUN, new=AsyncMock(return_value=make_cmd(stdout=empty_xml))):

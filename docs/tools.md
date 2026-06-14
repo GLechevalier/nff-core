@@ -17,14 +17,29 @@ Complete reference for every MCP tool: input parameters, output fields, example 
 | `coap_discover` | CoAP | Unauthenticated resource exposure | I3 |
 | `ble_scan` | BLE | Unprotected BLE attack surface | I2 |
 | `zigbee_scan` | Zigbee | Unprotected Zigbee network | I3, I7 |
+| `zwave_scan` | Z-Wave | Unprotected Z-Wave network (no S0/S2) | I3, I7 |
+| `zwave_command_inject` | Z-Wave | Unauthenticated Z-Wave actuation | I3 |
 | `extract_firmware` | Firmware | Hidden components / insecure update | I4 |
 | `analyze_strings` | Firmware | Sensitive data embedded in binaries | I4, I1 |
 | `scan_hardcoded_creds` | Firmware | Hardcoded credentials and keys | I1 |
-| `fuzz_web_paths` | Web | Exposed admin interfaces | I2, I3 |
+| `parse_unix_users` | Firmware | Backdoor/extra-root accounts, crackable hashes | I1 |
+| `extract_firmware_urls` | Firmware | Insecure hardcoded trust relationships | I4, I7 |
+| `fuzz_web_paths` | Web | Exposed admin interfaces (GET/POST/PUT/DELETE) | I2, I3 |
 | `test_default_creds_http` | Web | Default / weak web credentials | I1, I9 |
+| `command_injection_tester` | Web | OS command injection | I3 |
+| `directory_traversal_tester` | Web | Path traversal / arbitrary file read | I3 |
+| `auth_bypass_tester` | Web | Authentication bypass (cookies, JWT alg:none, headers) | I1, I3 |
+| `idor_tester` | Web | Insecure Direct Object Reference | I3 |
+| `csrf_tester` | Web | Missing CSRF protection on state-changing actions | I3 |
 | `lookup_default_creds` | Credentials | Known vendor default credentials | I1 |
 | `ssh_brute` | Credentials | Weak SSH authentication | I1, I2 |
 | `telnet_brute` | Credentials | Telnet exposure + weak credentials | I1, I2 |
+| `cve_lookup` | Components | Known-vulnerable shipped components | I5 |
+| `cve_db_sync` | Components | CVE DB upstream sync (opt-in, offline by default) | — |
+| `score_cvss` | Analysis | CVSS v3.1 base-score computation | — |
+| `walk_vuln_tree` | Analysis | Chained attack-path correlation | — |
+| `generate_report` | Analysis | Markdown assessment report | — |
+| `delta_report` | Analysis | Before/after assessment diff | — |
 
 ### OWASP IoT Top 10 (2018)
 
@@ -34,6 +49,7 @@ Complete reference for every MCP tool: input parameters, output fields, example 
 | I2 | Insecure Network Services |
 | I3 | Insecure Ecosystem Interfaces |
 | I4 | Lack of Secure Update Mechanism / Insecure Firmware |
+| I5 | Use of Insecure or Outdated Components |
 | I6 | Insufficient Privacy Protection |
 | I7 | Insecure Data Transfer and Storage |
 | I8 | Lack of Device Management |

@@ -15,6 +15,12 @@ from nff_pentester.tools.protocols.mqtt import (
     mqtt_topic_enum,
 )
 from nff_pentester.tools.protocols.zigbee import ZigbeeScanInput, zigbee_scan
+from nff_pentester.tools.protocols.zwave import (
+    ZwaveCommandInjectInput,
+    ZwaveScanInput,
+    zwave_command_inject,
+    zwave_scan,
+)
 
 _PATCH_COAP_RUN = "nff_pentester.tools.protocols.coap.run_command"
 
@@ -245,4 +251,45 @@ async def test_zigbee_scan_specific_channel(mock_ctx):
     params = ZigbeeScanInput(channel=15, scan_seconds=2)
     result = await zigbee_scan(params, mock_ctx)
     assert result.networks_found == 0
+    assert result.error is not None
+
+
+# ── zwave_scan / zwave_command_inject ───────────────────────────────────────────
+
+async def test_zwave_scan_hardware_error_off_demo(mock_ctx):
+    # Sandbox/demo off by default (autouse fixture) → real path returns hardware error.
+    result = await zwave_scan(ZwaveScanInput(), mock_ctx)
+    assert result.networks_found == 0
+    assert result.error is not None
+    assert "Z-Wave" in result.error
+
+
+async def test_zwave_scan_demo_fixture(mock_ctx, monkeypatch):
+    from nff_pentester.config import settings
+
+    monkeypatch.setattr(settings, "demo_mode", True)
+    result = await zwave_scan(ZwaveScanInput(), mock_ctx)
+    assert result.error is None
+    assert result.networks_found == 1
+    assert any(not n.secure for n in result.nodes)
+
+
+async def test_zwave_command_inject_demo_accepts_insecure_node(mock_ctx, monkeypatch):
+    from nff_pentester.config import settings
+
+    monkeypatch.setattr(settings, "demo_mode", True)
+    scan = await zwave_scan(ZwaveScanInput(), mock_ctx)
+    insecure = next(n for n in scan.nodes if not n.secure)
+    result = await zwave_command_inject(
+        ZwaveCommandInjectInput(home_id=scan.home_id, node_id=insecure.node_id), mock_ctx
+    )
+    assert result.accepted is True
+    assert result.error is None
+
+
+async def test_zwave_command_inject_hardware_error_off_demo(mock_ctx):
+    result = await zwave_command_inject(
+        ZwaveCommandInjectInput(home_id="0xC0FFEE01", node_id=2), mock_ctx
+    )
+    assert result.accepted is False
     assert result.error is not None

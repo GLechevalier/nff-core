@@ -19,6 +19,13 @@ from nff_pentester.tools.analysis.visualizer import (
     _count_nodes,
     render_vuln_tree,
 )
+from nff_pentester.tools.analysis.cvss import ScoreCvssInput, score_cvss, score_vector
+from nff_pentester.tools.analysis.report import (
+    DeltaReportInput,
+    GenerateReportInput,
+    delta_report,
+    generate_report,
+)
 
 
 # ── Synthetic tool outputs mirroring the real result models ──────────────────
@@ -253,9 +260,9 @@ async def test_target_interpolated_in_partial_hint(mock_ctx):
 
 def test_tree_parses_and_is_well_formed():
     tree = _load_tree()
-    assert tree["version"] == 2
+    assert tree["version"] == 3
     roots = tree["roots"]
-    assert len(roots) == 11
+    assert len(roots) == 14
 
     def check(node):
         assert "id" in node and "label" in node and "severity_alone" in node
@@ -285,7 +292,7 @@ def _check_condition(cond):
 
 def test_resource_file_present():
     raw = (files("nff_pentester.resources") / "vuln_tree.json").read_text()
-    assert json.loads(raw)["version"] == 2
+    assert json.loads(raw)["version"] == 3
 
 
 # ── visualizer (dev-only) ────────────────────────────────────────────────────
@@ -326,3 +333,145 @@ def test_render_vuln_tree_registered_only_in_dev_mode():
     assert "walk_vuln_tree" in prod_names
     assert "render_vuln_tree" not in prod_names
     assert "render_vuln_tree" in dev_names
+
+
+# ── CVSS scorer ────────────────────────────────────────────────────────────────
+
+
+def test_score_vector_critical_example():
+    out = score_vector("AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H")
+    assert out["base_score"] == 9.8
+    assert out["severity"] == "Critical"
+
+
+def test_score_vector_scope_changed():
+    # Scope-changed vector exercises the alternate impact/exploitability path.
+    out = score_vector("AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:H")
+    assert out["base_score"] == 10.0
+    assert out["severity"] == "Critical"
+
+
+def test_score_vector_with_prefix_and_medium():
+    out = score_vector("CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:L/I:N/A:N")
+    assert out["severity"] in {"Low", "Medium"}
+    assert 0.0 < out["base_score"] < 7.0
+
+
+def test_score_vector_invalid_raises():
+    import pytest
+
+    with pytest.raises(ValueError):
+        score_vector("AV:N/AC:L")  # missing metrics
+
+
+async def test_score_cvss_tool_ok(mock_ctx):
+    res = await score_cvss(ScoreCvssInput(vector="AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"), mock_ctx)
+    assert res.base_score == 9.8
+    assert res.severity == "Critical"
+    assert res.error is None
+
+
+async def test_score_cvss_tool_malformed(mock_ctx):
+    res = await score_cvss(ScoreCvssInput(vector="garbage"), mock_ctx)
+    assert res.base_score is None
+    assert res.error is not None
+
+
+# ── report generation ──────────────────────────────────────────────────────────
+
+
+def _telnet_active_session():
+    return {
+        "port_scan": _port_scan((23, "open")),
+        "telnet_brute": {"valid_credentials": [["root", "root"]], "error": None},
+    }
+
+
+async def test_generate_report_contains_summary_and_chain(mock_ctx):
+    res = await generate_report(
+        GenerateReportInput(session_outputs=_telnet_active_session(), target="192.168.1.50"),
+        mock_ctx,
+    )
+    assert res.error is None
+    assert res.active_chain_count >= 1
+    assert "Executive summary" in res.markdown
+    assert "telnet_default_cred" in res.markdown
+    # CVSS vector should be scored to a numeric value in the report.
+    assert "9.8" in res.markdown
+
+
+async def test_delta_report_marks_fixed(mock_ctx):
+    before = _telnet_active_session()
+    after = {
+        "port_scan": _port_scan((23, "open")),
+        "telnet_brute": {"valid_credentials": [], "error": None},
+    }
+    res = await delta_report(DeltaReportInput(before=before, after=after), mock_ctx)
+    assert res.error is None
+    assert "telnet_default_cred" in res.fixed
+    assert "telnet_default_cred" not in res.persisting
+
+
+# ── new chains (v3 tree expansion) ──────────────────────────────────────────────
+
+
+async def test_zwave_chain_activates(mock_ctx):
+    session = {
+        "zwave_scan": {
+            "home_id": "0xC0FFEE01", "networks_found": 1,
+            "nodes": [{"node_id": 2, "device_type": "door_lock", "secure": False}],
+            "error": None,
+        },
+        "zwave_command_inject": {"accepted": True, "error": None},
+    }
+    res = await walk_vuln_tree(WalkVulnTreeInput(session_outputs=session), mock_ctx)
+    chains = [c for c in res.active_chains if c.chain_id == "zwave_command_accepted"]
+    assert len(chains) == 1
+    assert chains[0].severity == "critical"
+
+
+async def test_firmware_backdoor_account_chain_activates(mock_ctx):
+    session = {
+        "extract_firmware": {"extracted": True, "signature_count": 1, "signatures": [], "error": None},
+        "parse_unix_users": {
+            "extra_uid0_accounts": ["backdoor"], "accounts_with_hash": 1, "error": None
+        },
+    }
+    res = await walk_vuln_tree(WalkVulnTreeInput(session_outputs=session), mock_ctx)
+    assert any(c.chain_id == "firmware_backdoor_account" for c in res.active_chains)
+
+
+async def test_firmware_insecure_url_chain_activates(mock_ctx):
+    session = {
+        "extract_firmware": {"extracted": True, "signature_count": 1, "signatures": [], "error": None},
+        "extract_firmware_urls": {
+            "insecure_count": 1,
+            "urls": [{"url": "http://u/fw.bin", "scheme": "http", "category": "update", "insecure": True}],
+            "error": None,
+        },
+    }
+    res = await walk_vuln_tree(WalkVulnTreeInput(session_outputs=session), mock_ctx)
+    assert any(c.chain_id == "firmware_insecure_url" for c in res.active_chains)
+
+
+async def test_web_open_lists_new_testers_as_partial_leads(mock_ctx):
+    session = {"port_scan": _port_scan((80, "open"))}  # web open, no web testers run yet
+    res = await walk_vuln_tree(
+        WalkVulnTreeInput(session_outputs=session, target="10.0.0.7"), mock_ctx
+    )
+    partial_tools = {p.next_check.tool for p in res.partial_chains}
+    assert {
+        "directory_traversal_tester",
+        "auth_bypass_tester",
+        "idor_tester",
+        "csrf_tester",
+    } <= partial_tools
+
+
+async def test_web_traversal_chain_activates(mock_ctx):
+    session = {
+        "port_scan": _port_scan((80, "open")),
+        "directory_traversal_tester": {"vulnerable": True, "error": None},
+    }
+    res = await walk_vuln_tree(WalkVulnTreeInput(session_outputs=session), mock_ctx)
+    assert any(c.chain_id == "web_dir_traversal" for c in res.active_chains)

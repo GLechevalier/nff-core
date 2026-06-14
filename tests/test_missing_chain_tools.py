@@ -270,6 +270,10 @@ def _full_vulnerable_session() -> dict:
         },
         "test_default_creds_http": {"successful_credentials": [["admin", "admin"]], "error": None},
         "command_injection_tester": {"injected": True, "error": None},
+        "directory_traversal_tester": {"vulnerable": True, "error": None},
+        "auth_bypass_tester": {"bypassed": True, "error": None},
+        "idor_tester": {"idor_found": True, "error": None},
+        "csrf_tester": {"csrf_vulnerable": True, "error": None},
         "ble_scan": {"device_count": 1, "devices": [], "scan_seconds": 10, "error": None},
         "gatt_enum": {"writable_no_auth": [{"uuid": "fe25", "handle": 18, "properties": ["write"]}],
                       "error": None},
@@ -288,22 +292,44 @@ def _full_vulnerable_session() -> dict:
         "cve_lookup": {"matched_cves": [{"id": "CVE-2016-7406", "cvss": "", "summary": ""}],
                        "error": None},
         "debug_interface_scan": {"console_accessible": True, "error": None},
+        "zwave_scan": {
+            "home_id": "0xC0FFEE01", "networks_found": 1,
+            "nodes": [{"node_id": 2, "device_type": "door_lock", "secure": False}],
+            "error": None,
+        },
+        "zwave_command_inject": {"accepted": True, "error": None},
+        "parse_unix_users": {"extra_uid0_accounts": ["backdoor"], "accounts_with_hash": 1,
+                             "error": None},
+        "extract_firmware_urls": {
+            "insecure_count": 1,
+            "urls": [{"url": "http://updates.example/fw.bin", "scheme": "http",
+                      "category": "update", "insecure": True}],
+            "error": None,
+        },
     }
 
 
-# Every root's terminal (leaf-with-outcome) node id.
+# Every terminal (leaf-with-outcome) node id in the tree. Most roots are a single
+# linear chain with one terminal; the web root branches into several terminals.
 _TERMINAL_CHAIN_IDS = {
     "telnet_default_cred",
     "mqtt_publish_accepted",
     "firmware_unsigned_http_update",
     "firmware_ssh_cred_works",
     "web_command_injection",
+    "web_dir_traversal",
+    "web_auth_bypass",
+    "web_idor",
+    "web_csrf",
     "ble_write_accepted",
     "coap_put_accepted",
     "tls_accepts_selfsigned",
     "zigbee_key_injected",
     "component_known_cve",
     "debug_interface_exposed",
+    "zwave_command_accepted",
+    "firmware_backdoor_account",
+    "firmware_insecure_url",
 }
 
 
@@ -321,7 +347,18 @@ async def test_all_chains_go_active_with_full_session(mock_ctx):
     assert not (_TERMINAL_CHAIN_IDS & partial_ids)
 
 
-def test_terminal_set_matches_tree_roots():
-    """Guard: the expected terminal set has exactly one entry per tree root."""
+def _collect_terminals(node: dict, acc: set) -> None:
+    children = node.get("children") or []
+    if not children and node.get("outcome"):
+        acc.add(node["id"])
+    for child in children:
+        _collect_terminals(child, acc)
+
+
+def test_terminal_set_matches_tree_terminals():
+    """Guard: the expected terminal set is exactly the tree's leaf-with-outcome ids."""
     tree = _load_tree()
-    assert len(tree["roots"]) == len(_TERMINAL_CHAIN_IDS)
+    actual: set = set()
+    for root in tree["roots"]:
+        _collect_terminals(root, actual)
+    assert actual == _TERMINAL_CHAIN_IDS
