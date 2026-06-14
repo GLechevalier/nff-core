@@ -53,7 +53,7 @@ class TestStartDeploymentWireVersion:
             "deployments": [[dep], [dep], [dep]],         # initial, recompute, final
             "firmware_versions": [[fw_row]],
             "ota_jobs": [[job], [], [{"status": "downloading"}]],  # pending select, update, recompute
-            "devices": [[{"id": "dev-1", "identity_attributes": {"mqtt_id": "dev-1"}}]],
+            "devices": [[{"id": "dev-1", "identity_attributes": {"mqtt_id": "dev-1"}, "project_id": "proj-1"}]],
         })
         monkeypatch.setattr(
             "nff_ota.storage.create_signed_url", AsyncMock(return_value="https://signed/fw.bin")

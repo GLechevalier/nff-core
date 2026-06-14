@@ -1,5 +1,6 @@
 # Environment
 .env
+.env*
 
 # Runtime data
 data/*.db

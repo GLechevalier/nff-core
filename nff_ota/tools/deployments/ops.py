@@ -402,6 +402,9 @@ async def start_deployment(deployment_id: str) -> StartDeploymentResult:
     # target_version. Fall back to the catalog version for manual/legacy artifacts whose
     # version is itself already a semver.
     ota_version = fw.get("release_version") or version
+    # Sent alongside the OTA command (unsigned) so a software mock can adopt it and report
+    # a matching heartbeat build_id; real firmware ignores it. None for legacy artifacts.
+    ota_build_id = fw.get("build_id")
 
     # Devices still waiting for this update.
     jobs_resp = (
@@ -417,14 +420,15 @@ async def start_deployment(deployment_id: str) -> StartDeploymentResult:
             deployment=_dep_row_to_info(dep), error="No pending devices to deliver to"
         )
 
-    # Map device id -> fleet MQTT identity (cert CN).
+    # Map device id -> fleet MQTT identity (cert CN) and tenant scope (project_id).
     device_ids = [j["device_id"] for j in pending]
     dev_resp = (
-        await client.table("devices").select("id, identity_attributes").in_("id", device_ids).execute()
+        await client.table("devices").select("id, identity_attributes, project_id").in_("id", device_ids).execute()
     )
     mqtt_by_device = {
         d["id"]: _identity_attributes(d).get("mqtt_id") for d in (dev_resp.data or [])
     }
+    project_by_device = {d["id"]: d.get("project_id") for d in (dev_resp.data or [])}
 
     sem = asyncio.Semaphore(max(1, dep["max_devices_in_flight"]))
     results: list[DeviceDeliveryResult] = []
@@ -441,6 +445,16 @@ async def start_deployment(deployment_id: str) -> StartDeploymentResult:
                 )
             )
             return
+        project_id = project_by_device.get(device_id)
+        if not project_id:
+            results.append(
+                DeviceDeliveryResult(
+                    device_id=device_id,
+                    outcome="skipped",
+                    detail="device has no project_id (tenant scope) — re-provision it",
+                )
+            )
+            return
         async with sem:
             # Dispatch: pending -> downloading (counts as an attempt).
             now = datetime.now(timezone.utc).isoformat()
@@ -448,7 +462,9 @@ async def start_deployment(deployment_id: str) -> StartDeploymentResult:
                 {"status": "downloading", "attempts": job["attempts"] + 1, "last_updated": now}
             ).eq("id", job["id"]).execute()
             try:
-                resp = await fleet.deliver_ota(mqtt_id, ota_version, sha256, url)
+                resp = await fleet.deliver_ota(
+                    mqtt_id, ota_version, sha256, url, project_id, build_id=ota_build_id
+                )
                 results.append(
                     DeviceDeliveryResult(
                         device_id=device_id, mqtt_id=mqtt_id, outcome="delivered",

@@ -87,8 +87,8 @@ async def test_start_deployment_delivers_ota_per_device(mock_supabase, monkeypat
              _job_row("job-2", "device-2", "downloading")],                  # recompute select
         ],
         "devices": [[
-            {"id": "device-1", "identity_attributes": {"mqtt_id": "device-1"}},
-            {"id": "device-2", "identity_attributes": {"mqtt_id": "device-2"}},
+            {"id": "device-1", "identity_attributes": {"mqtt_id": "device-1"}, "project_id": "proj-1"},
+            {"id": "device-2", "identity_attributes": {"mqtt_id": "device-2"}, "project_id": "proj-1"},
         ]],
     }
     mock_supabase.table.side_effect = _table_se(responses)

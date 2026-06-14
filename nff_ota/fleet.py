@@ -7,7 +7,7 @@ HTTP endpoint:
 
     POST {fleet_url}/internal/command
         Header: X-Fleet-Secret: <shared secret>
-        Body:   {"device_id": "<mqtt identity>", "payload": {...}, "timeout": <float>}
+        Body:   {"device_id": "<mqtt id>", "project_id": "<id>", "payload": {...}, "timeout": <float>}
 
 Fleet signs the payload (its signing key + the device's OTA to-be-signed format live
 there), publishes it over MQTT, awaits the device's response, and returns it.
@@ -36,17 +36,25 @@ def _require_config() -> None:
 async def send_command(
     mqtt_id: str,
     payload: dict[str, Any],
+    project_id: str,
     timeout: float | None = None,
 ) -> dict[str, Any]:
     """Ask nff-fleet to sign + deliver `payload` to the device identified by `mqtt_id`.
 
-    Returns the device's response JSON. Raises FleetError on auth/transport/device
+    `project_id` scopes the command: fleet signs with the device's project key and publishes
+    to the project-namespaced topic, so a command for the wrong project won't verify on the
+    device. Returns the device's response JSON. Raises FleetError on auth/transport/device
     failure (including a device timeout, which fleet reports as HTTP 504).
     """
     _require_config()
     request_timeout = timeout if timeout is not None else settings.fleet_timeout
     url = settings.fleet_url.rstrip("/") + "/internal/command"
-    body = {"device_id": mqtt_id, "payload": payload, "timeout": request_timeout}
+    body = {
+        "device_id": mqtt_id,
+        "project_id": project_id,
+        "payload": payload,
+        "timeout": request_timeout,
+    }
 
     # Allow extra wall-clock beyond the device timeout for the round trip itself.
     async with httpx.AsyncClient(timeout=request_timeout + 30.0) as client:
@@ -74,12 +82,22 @@ async def deliver_ota(
     version: str,
     sha256: str,
     url: str,
+    project_id: str,
     timeout: float | None = None,
+    build_id: str | None = None,
 ) -> dict[str, Any]:
     """Deliver an OTA command for one device through nff-fleet.
 
-    `version`/`sha256`/`url` come from nff-ota's own artifact record. Fleet builds the
-    `ota|version|sha256|nonce|timestamp` signature and pushes it over MQTT.
+    `version`/`sha256`/`url` come from nff-ota's own artifact record; `project_id` is the
+    device's tenant scope. Fleet builds the `ota|version|sha256|nonce|timestamp` signature
+    with the project's key and pushes it over MQTT.
+
+    `build_id` (the per-commit id baked into the binary) is sent as an unsigned extra
+    field — it is NOT part of the OTA signature TBS. Real firmware ignores it (it reports
+    its own compiled-in build id); a software mock, which can't run the binary, adopts it
+    so its heartbeat build_id matches what was deployed and post-deploy verification passes.
     """
     payload = {"action": "ota", "version": version, "sha256": sha256, "url": url}
-    return await send_command(mqtt_id, payload, timeout=timeout)
+    if build_id:
+        payload["build_id"] = build_id
+    return await send_command(mqtt_id, payload, project_id, timeout=timeout)

@@ -4,7 +4,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class OtaSettings(BaseSettings):
-    model_config = SettingsConfigDict(env_prefix="OTA_", env_file=".env", extra="ignore")
+    model_config = SettingsConfigDict(env_prefix="OTA_", env_file=(".env", ".env.dev"), extra="ignore")
 
     supabase_url: str = ""
     supabase_key: str = ""
