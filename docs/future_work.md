@@ -4,6 +4,81 @@ Derived from first-principles security reasoning. Organized by layer, then by ar
 
 ---
 
+## 0. Implementation status & gap analysis
+
+Snapshot of what exists today vs. what the vulnerability tree and a complete IoT assessment
+expect. The detailed forward-looking sections (§1, §5, §6) expand on each gap below.
+
+### Tool inventory (13 registered)
+
+**Real implementations (12):** `port_scan`, `discover_devices` (nmap); `mqtt_probe`,
+`mqtt_topic_enum` (aiomqtt); `coap_discover` (coap-client); `ble_scan` (bleak, + demo fixture);
+`extract_firmware`, `analyze_strings` (binwalk/strings); `scan_hardcoded_creds` (regex);
+`test_default_creds_http`, `fuzz_web_paths` (httpx); `lookup_default_creds` (bundled JSON);
+`ssh_brute` (asyncssh), `telnet_brute` (asyncio); `walk_vuln_tree` (tree correlator).
+
+**Stub (1):** `zigbee_scan` — returns an error; needs a USB coordinator + KillerBee/zigpy.
+
+### The core gap: chains that dead-end at an unimplemented tool
+
+The tree defines 9 attack chains, but **7 of them stop one step short** because their
+`next_check.tool` is not implemented. Only **Chain 1** (telnet → root) and **Chain 4**
+(firmware cred → SSH) can currently reach a confirmed *active* outcome; all others surface
+only as *partial* chains.
+
+| Layer | Missing tool | Blocks chain |
+|-------|-------------|--------------|
+| Web/app | `command_injection_tester` | Chain 5 — web → RCE |
+| Protocol | `mqtt_publish` | Chain 2 — MQTT control-topic takeover |
+| Protocol | `coap_put` | Chain 7 — CoAP actuation |
+| Radio | `gatt_enum`, `gatt_write` | Chain 6 — BLE physical control |
+| Radio | `zigbee_join_capture`, `zigbee_key_inject` | Chain 9 — Zigbee fleet (`zigbee_scan` also a stub) |
+| Outbound | `outbound_analyzer`, `dns_hijack_simulator`, `tls_validation_tester` | Chain 8 — "no open ports" MitM |
+| Firmware | `unsigned_update_check` | Chain 3 — unsigned-update backdoor |
+| Components (I5) | `cve_lookup` | `service_version_fingerprinted → component_known_cve` |
+| Physical (I10) | `debug_interface_scan` | `boot_console_signature → debug_interface_exposed` |
+
+### Coverage by attack layer (per §1)
+
+- **Network + authentication** — strong ✅
+- **Firmware** — partial: extract/strings/regex creds, but no real `/etc/passwd`–`/etc/shadow`
+  parser, no binary CVE matcher, no hardcoded-URL/trust-relationship extractor.
+- **Application** — minimal: only path-fuzz + default creds. Missing command injection, directory
+  traversal, auth bypass, IDOR, CSRF.
+- **Physical / radio** — minimal real capability: BLE is discovery-only (+ demo fixture), Zigbee is
+  a stub, no Z-Wave, no UART/JTAG helper.
+- **Outbound surface** — not modeled at all (the entire "no open ports ≠ safe" thesis is unbuilt).
+
+### Depth gaps in tools that already exist (per §5)
+
+- `port_scan` — TCP only; no UDP (`-sU`), so misses CoAP/mDNS/SSDP/UPnP.
+- `fuzz_web_paths` — GET only; no POST/PUT/DELETE.
+- `scan_hardcoded_creds` — regex over `strings` output, not parsing extracted files directly.
+- `ble_scan` — discovery only; no GATT enumeration.
+- All tools — no rate-limit / back-off detection.
+
+### Cross-cutting capabilities missing
+
+- **Reporting (§6)** — raw JSON only; no markdown/PDF report, no CVSS auto-scorer, no delta report.
+- **CVE data source** — `cve_lookup` has no backing database yet (needed by the new I5 chain).
+
+### Work-in-progress (uncommitted)
+
+- **Safety sandbox** (`utils/sandbox.py`, `tools/safety/`) — allowlist guard wired into the 7
+  networked tools; not yet committed. Gating requirement for running safely at events (§8.A).
+- **Transport** — `server.py` still calls `mcp.run("stdio")`; the deployment design (§8) needs
+  localhost HTTP (`127.0.0.1:3006/mcp`) to be driven by `nff-agent-worker`. Not done.
+- **Targets** — `nff-mock` vulnerable apps (esp32/linux) don't exist yet, so there is nothing safe
+  to demo against (§8.B).
+
+### Highest-leverage next steps
+
+Per the §"Priority order" list, with the correlator (`walk_vuln_tree`) already done: implementing
+**`cve_lookup`** and **`command_injection_tester`** converts the most chains from partial → active
+for the least effort, followed by the **outbound-analysis** trio and the **report generator**.
+
+---
+
 ## 1. Security layers not yet covered
 
 Our conversation established that a device has 5 attack layers. The current tool covers **network** and **authentication** well, **firmware** partially, and **application** and **physical** barely at all.

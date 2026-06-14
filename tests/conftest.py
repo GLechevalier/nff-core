@@ -15,6 +15,21 @@ def mock_ctx():
     return ctx
 
 
+@pytest.fixture(autouse=True)
+def _sandbox_off_by_default(monkeypatch):
+    """Keep the event-safety sandbox disabled during tests unless a test opts in.
+
+    The config loads .env / .env.dev, so a developer running the demo preset
+    (PENTESTER_DEMO_MODE=true) would otherwise have the sandbox block every tool
+    test that targets an off-allowlist host. The sandbox tests enable demo mode
+    themselves (the demo_on fixture, which runs after this autouse one), so they
+    are unaffected.
+    """
+    from nff_pentester.config import settings
+
+    monkeypatch.setattr(settings, "demo_mode", False)
+
+
 def make_cmd(
     stdout: str = "",
     stderr: str = "",

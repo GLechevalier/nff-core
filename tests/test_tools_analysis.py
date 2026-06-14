@@ -253,9 +253,9 @@ async def test_target_interpolated_in_partial_hint(mock_ctx):
 
 def test_tree_parses_and_is_well_formed():
     tree = _load_tree()
-    assert tree["version"] == 1
+    assert tree["version"] == 2
     roots = tree["roots"]
-    assert len(roots) == 9
+    assert len(roots) == 11
 
     def check(node):
         assert "id" in node and "label" in node and "severity_alone" in node
@@ -285,7 +285,7 @@ def _check_condition(cond):
 
 def test_resource_file_present():
     raw = (files("nff_pentester.resources") / "vuln_tree.json").read_text()
-    assert json.loads(raw)["version"] == 1
+    assert json.loads(raw)["version"] == 2
 
 
 # ── visualizer (dev-only) ────────────────────────────────────────────────────

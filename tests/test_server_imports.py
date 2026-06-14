@@ -19,11 +19,17 @@ def test_tools_registered() -> None:
 
     expected = {
         "port_scan", "discover_devices",
-        "mqtt_probe", "mqtt_topic_enum",
-        "coap_discover", "ble_scan", "zigbee_scan",
-        "extract_firmware", "analyze_strings", "scan_hardcoded_creds",
-        "fuzz_web_paths", "test_default_creds_http",
+        "mqtt_probe", "mqtt_topic_enum", "mqtt_publish",
+        "coap_discover", "coap_put",
+        "ble_scan", "gatt_enum", "gatt_write",
+        "zigbee_scan", "zigbee_join_capture", "zigbee_key_inject",
+        "extract_firmware", "analyze_strings", "scan_hardcoded_creds", "unsigned_update_check",
+        "fuzz_web_paths", "test_default_creds_http", "command_injection_tester",
         "lookup_default_creds", "ssh_brute", "telnet_brute",
+        "walk_vuln_tree", "sandbox_status",
+        "cve_lookup",
+        "outbound_analyzer", "dns_hijack_simulator", "tls_validation_tester",
+        "debug_interface_scan",
     }
     assert expected <= names, f"Missing tools: {expected - names}"
 
@@ -50,24 +56,25 @@ def test_prompts_registered() -> None:
 
 
 def test_config_defaults() -> None:
-    """PentesterSettings loads with correct defaults."""
-    from nff_pentester.config import settings
-    assert settings.tool_timeout_seconds == 120
-    assert settings.max_brute_attempts == 200
-    assert settings.mqtt_port == 1883
+    """The code defaults are correct, independent of any local .env / .env.dev."""
+    from nff_pentester.config import PentesterSettings
+    # _env_file=None ignores a developer's local dotenv (e.g. the demo preset that
+    # overrides timeouts) so this asserts the in-code defaults, not the dev's env.
+    s = PentesterSettings(_env_file=None)
+    assert s.tool_timeout_seconds == 120
+    assert s.max_brute_attempts == 200
+    assert s.mqtt_port == 1883
 
 
 def test_http_transport_defaults() -> None:
-    """Server is configured for streamable-HTTP on loopback:3006 like the siblings."""
-    from nff_pentester.config import settings
-    from nff_pentester.server import mcp
+    """Server defaults to streamable-HTTP on loopback:3006 like the siblings."""
+    from nff_pentester.config import PentesterSettings
 
-    assert settings.mcp_transport == "streamable-http"
-    assert settings.mcp_host == "127.0.0.1"
-    assert settings.mcp_port == 3006
-    # The FastMCP instance reflects the configured bind host/port.
-    assert mcp.settings.host == "127.0.0.1"
-    assert mcp.settings.port == 3006
+    # Code defaults, independent of any local dotenv override.
+    s = PentesterSettings(_env_file=None)
+    assert s.mcp_transport == "streamable-http"
+    assert s.mcp_host == "127.0.0.1"
+    assert s.mcp_port == 3006
 
 
 def test_run_command_not_found() -> None:
