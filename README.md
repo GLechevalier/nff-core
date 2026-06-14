@@ -30,12 +30,14 @@ Guided workflow prompts orchestrate these tools in the right order for common sc
 # Install into the parent venv
 pip install -e ".[dev]"
 
-# Start the MCP server (stdio transport)
+# Start the MCP server (streamable-HTTP on http://localhost:3006/mcp)
 nff-pentester
 
 # Or run as a module
 python -m nff_pentester
 ```
+
+Like the sibling nff servers (`nff-ota:3002`, `nff-github:3003`, `nff-diagnosis:3005`), nff-pentester serves **streamable-HTTP** — by default on `http://localhost:3006/mcp`. It binds to loopback (`127.0.0.1`); the bundled `Dockerfile` overrides the host to `0.0.0.0` so it is reachable on the container network.
 
 **Wire into Claude Code** by adding to your MCP config:
 
@@ -43,11 +45,17 @@ python -m nff_pentester
 {
   "mcpServers": {
     "nff-pentester": {
-      "command": "nff-pentester",
-      "transport": "stdio"
+      "type": "http",
+      "url": "http://localhost:3006/mcp"
     }
   }
 }
+```
+
+stdio transport is still available for local single-process use:
+
+```bash
+PENTESTER_MCP_TRANSPORT=stdio nff-pentester
 ```
 
 Then in Claude Code, use a guided prompt to start:
@@ -72,6 +80,9 @@ PENTESTER_TELNET_PORT=23
 PENTESTER_COAP_PORT=5683
 PENTESTER_HTTP_TIMEOUT_SECONDS=10.0
 PENTESTER_LOG_LEVEL=INFO
+PENTESTER_MCP_HOST=127.0.0.1              # MCP bind host (container uses 0.0.0.0)
+PENTESTER_MCP_PORT=3006                   # MCP port — http://localhost:3006/mcp
+PENTESTER_MCP_TRANSPORT=streamable-http   # or 'stdio' for local single-process use
 ```
 
 ---

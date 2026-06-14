@@ -57,6 +57,9 @@ reports/
 *.report.json
 *.report.md
 
+# Generated vuln-tree visualizations (render_vuln_tree, dev-only)
+vuln_tree.html
+
 # nmap output files (if saved to disk)
 *.nmap
 *.xml

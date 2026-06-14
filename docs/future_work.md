@@ -381,3 +381,218 @@ The `walk_vuln_tree` MCP tool takes a session's worth of tool outputs as input a
 4. **Binary CVE matcher** — high value, relatively straightforward to implement against an existing CVE database API
 5. **Report generator** — needed before this tool is useful in a real engagement
 6. **Adversarial agent loop** — highest potential, most complex, build after the individual tool coverage is solid
+
+---
+
+## 8. Portable, event-safe demonstration mode (nff-pentester ⇄ nff-mock)
+
+### Context
+
+The tool's near-term purpose is to **demonstrate its power at public events** (expo booths) — never
+to weaponize it, and never to be capable of harming the venue network or other exhibitors' devices
+on a crowded shared LAN/RF. Two problems must be solved together:
+
+1. **Safety + portability (nff-pentester).** Today every networked tool will scan/brute-force *any*
+   host it is handed, so running it at an event is unsafe. It needs a hard target-allowlist sandbox
+   confining it to loopback + the presenter's own isolated travel-router subnet (`192.168.8.0/24`).
+2. **A target to point it at (nff-mock).** `nff-mock` is a *secure-by-design* virtual ESP32 (mTLS
+   MQTT, ECDSA-signed commands, OTA) — it deliberately exposes nothing the pentester can assess. We
+   need deliberately-vulnerable **target apps** the pentester can actually find and break into.
+
+Design decisions:
+- Physical target when possible, simulated fallback — **same report either way**.
+- Network: the presenter's **isolated travel router** (`192.168.8.0/24`), no venue uplink.
+- The vulnerable target lives in **nff-mock only** (no duplicate mock inside nff-pentester).
+- Build **two distinct target apps**: `nff-mock-esp32` and `nff-mock-linux`, each its own image.
+- nff-mock's existing secure `device/` and `controller/` packages stay **untouched** (the targets
+  are additive, separate apps), so there is no regression risk to the real fleet simulator.
+
+---
+
+### Workstream A — nff-pentester: event-safety sandbox + demo wiring
+
+**A1. Sandbox (core safety property).**
+- `config.py` — add `demo_mode: bool = False` and
+  `target_allowlist: list[str] = ["127.0.0.0/8", "::1/128"]`, with a `field_validator(mode="before")`
+  accepting a comma-separated `.env` string as well as a JSON list.
+- New `nff_pentester/utils/sandbox.py` — `assert_target_allowed(target) -> None`:
+  - No-op when `demo_mode` is off (authorised/production use unchanged).
+  - Extracts host from IP / hostname / CIDR / URL (`urllib.parse.urlparse`).
+  - CIDR → must be `subnet_of` an allowed network; IP/hostname → resolve via `socket.getaddrinfo`,
+    **every** resolved address must be inside the allowlist (un-resolvable public names → refused).
+  - Raises `SandboxViolation(ValueError)` so existing `except ValueError` paths surface it cleanly.
+
+**A2. Wire the guard into every networked tool.** Pattern: call `assert_target_allowed(...)` at the
+top of the tool body; on `SandboxViolation`/`ValueError` return the tool's own error model with
+`error=str(exc)`.
+- `tools/network/scanner.py` (`port_scan`, `discover_devices` — fold into existing `try/except`),
+  `tools/protocols/mqtt.py`, `tools/protocols/coap.py`, `tools/credentials/brute.py`,
+  `tools/web/fuzzer.py`, `tools/web/default_creds.py`.
+- `tools/protocols/ble.py` — **special case:** BLE is radio, not IP; the allowlist can't bound it and
+  a real scan at an event would sniff bystanders. In `demo_mode`, short-circuit `ble_scan` to a
+  canned vulnerable smart-lock fixture (no real radio). Unchanged outside demo mode.
+- `zigbee_scan` already a stub → no change.
+
+**A3. Demo assets (point at nff-mock; no internal mock).**
+- `.env.demo` preset: `PENTESTER_DEMO_MODE=true`,
+  `PENTESTER_TARGET_ALLOWLIST=127.0.0.0/8,192.168.8.0/24`, faster timeouts/timing for a live crowd.
+- `.env.example` — document the two new vars.
+- *(Optional, low cost)* a tiny `sandbox_status` MCP tool returning `demo_mode` + `target_allowlist`,
+  so the presenter can visibly prove on screen that the tool is caged before scanning.
+
+**A4. Transport — switch from stdio to localhost HTTP (required for the RasPi topology).**
+`server.py` currently calls `mcp.run("stdio")`. To be driven by `nff-agent-worker` like the other nff
+MCP servers, it must serve **streamable HTTP on a localhost port** (e.g. `http://127.0.0.1:3006/mcp`),
+with a matching entry added to the worker's `AGENT_MCP_SERVERS` config (mirroring the existing
+`.mcp.json` `type: http` / `url: http://127.0.0.1:300X/mcp` entries). Keep `stdio` available for local
+single-process use. See "Deployment topology" below for why the link stays on loopback.
+
+---
+
+### Workstream B — nff-mock: two vulnerable target apps
+
+Additive new tree `nff-mock/targets/`, leaving `device/` and `controller/` alone:
+
+```
+nff-mock/targets/
+├── common/            # shared, pure-asyncio service library (no heavy deps)
+│   ├── http_panel.py      # fake admin panel: /, /admin, /cgi-bin/, login form w/ weak creds;
+│   │                      #   serves /firmware.bin → exercises fuzz_web_paths + test_default_creds_http
+│   ├── mqtt_broker.py     # minimal anonymous MQTT 3.1.1 broker (CONNECT/SUBSCRIBE/PUBLISH),
+│   │                      #   publishes a device/cmd control topic → mqtt_probe + mqtt_topic_enum
+│   ├── telnet_server.py   # weak-cred telnet → fake busybox shell (#) → telnet_brute
+│   ├── firmware_image.py  # builds a fake firmware blob with planted secrets (password=,
+│   │                      #   /etc/passwd root line, BEGIN OPENSSH PRIVATE KEY) → extract/strings/creds
+│   └── banners.py         # service banners + weak-cred sets per flavor
+├── esp32/             # app: nff-mock-esp32  (image: nff-mock-esp32)
+│   ├── nff_target_esp32/  (config.py, cli.py → `nff-mock-esp32`, app.py composes services)
+│   ├── Dockerfile
+│   └── pyproject.toml      # base deps only (stdlib services); console script
+└── linux/             # app: nff-mock-linux  (image: nff-mock-linux)
+    ├── nff_target_linux/  (config.py, cli.py → `nff-mock-linux`, app.py composes services)
+    ├── Dockerfile
+    └── pyproject.toml      # + optional [insecure] extra: asyncssh (SSH), aiocoap (CoAP)
+```
+
+**B1. Service composition per app (the ESP32 vs Linux distinction).**
+- `nff-mock-esp32` — what a misconfigured ESP32 web-config device exposes: HTTP config portal (weak
+  default creds), plain (non-TLS) MQTT broker with a `device/cmd` topic, and an ESP32-themed firmware
+  image (embeds device_id/fw_version + planted secrets). Real BLE/radio is **physical-only** (a host
+  can't transmit BLE) → covered by a real ESP32 flashed via the existing `nff` tooling at the event;
+  the software target documents the BLE chain but doesn't fake radio. Lights up Chains 2 (MQTT
+  anon+control) and 5 (web path + default cred).
+- `nff-mock-linux` — classic embedded-Linux target: telnet **and** SSH (asyncssh) with weak creds →
+  busybox-style root shell, `/etc/passwd` + `/etc/shadow` content, optional CoAP actuator, and a
+  Linux firmware image. Lights up Chains 1 (telnet+cred→root), 4 (firmware hardcoded cred + SSH), and
+  optionally 7 (CoAP). SSH/CoAP behind an optional `[insecure]` extra; the telnet path works with
+  base deps so the app degrades gracefully if extras aren't installed.
+
+**B2. Config + safety defaults (both apps).**
+- Pydantic-settings configs, env prefixes `NFF_TARGET_ESP32_*` / `NFF_TARGET_LINUX_*`.
+- `bind: str = "127.0.0.1"` by **default** (offline/loopback) — set to the device IP or `0.0.0.0`
+  only for the physical-subnet demo. Per-service port settings; weak-cred sets from `banners.py`.
+- Identity (device_id, fw_version) reused for realistic banners/firmware, but **no cert/broker
+  dependency** — the targets run standalone on a laptop with zero fleet infrastructure.
+
+**B3. Bring-up.**
+- Console scripts `nff-mock-esp32` / `nff-mock-linux` for laptop/Pi runs.
+- Two Dockerfiles + a `docker-compose.demo.yml` to launch either/both on an isolated demo network for
+  repeatable setup.
+
+---
+
+### Files
+
+**nff-pentester** — modify: `config.py`; the 7 networked tool modules under `tools/**` (guard wiring;
+BLE demo short-circuit); `.env.example`. Create: `utils/sandbox.py`, `.env.demo`,
+`tests/test_sandbox.py`, `docs/demo_runbook.md`.
+
+**nff-mock** — create only (no edits to `device/`/`controller/`): `targets/common/*`,
+`targets/esp32/*`, `targets/linux/*`, two `Dockerfile`s, `docker-compose.demo.yml`, and per-app
+`tests/` for the vulnerable surfaces.
+
+**`docs/demo_runbook.md`** (in nff-pentester) — portable kit (laptop, battery/USB travel router,
+cables/power bank, optional physical ESP32 + Pi); pre-event checklist; run modes: (1) **offline** —
+`nff-mock-esp32` and/or `nff-mock-linux` on loopback, allowlist `127.0.0.0/8`; (2) **physical** —
+targets on the travel-router subnet (Pi runs `nff-mock-linux`; real ESP32 flashed via `nff` tooling
+for radio chains), allowlist `192.168.8.0/24`. Includes the exact prompts/targets per mode, a 3–5 min
+talk track mapped to the vuln chains, "pick your target on the day" guidance, and a "sandbox is
+active" proof step.
+
+### Verification
+
+1. **Sandbox unit (`tests/test_sandbox.py`):** demo_mode on, allowlist `[127.0.0.0/8,192.168.8.0/24]`
+   → permits `127.0.0.1`, `192.168.8.50`, `http://192.168.8.1/login`, `192.168.8.0/24`; raises for
+   `192.168.1.1`, `8.8.8.8`, `192.168.0.0/16`, `example.com`. demo_mode off → all pass through.
+2. **Pentester regression:** `pytest tests/ -v` — existing 8 smoke tests still pass.
+3. **nff-mock regression:** existing `device/` selftest and any controller tests still pass (targets
+   are separate apps; nothing in `device/`/`controller/` changes).
+4. **Target self-tests:** start `nff-mock-linux` on loopback → `telnet_brute` finds the weak cred
+   (root shell), `extract_firmware`/`scan_hardcoded_creds` surface planted secrets, optional
+   `ssh_brute` succeeds. Start `nff-mock-esp32` → `fuzz_web_paths` + `test_default_creds_http` find the
+   panel and `admin/admin`, `mqtt_probe` reports anonymous access, `mqtt_topic_enum` sees `device/cmd`.
+5. **End-to-end offline:** load `.env.demo`, run `full_iot_assessment` against a running target on
+   `127.0.0.1`; confirm a full multi-chain report with **no external network traffic**.
+6. **Sandbox refusal:** with `.env.demo`, point any tool at an off-allowlist IP (`8.8.8.8`) → clean
+   structured `error`, no process/connection spawned. On the subnet, the same target on `192.168.8.x`
+   is allowed.
+
+### Suggested phasing
+
+1. nff-pentester sandbox (A1–A2) — unblocks safe running first.
+2. `nff-mock-linux` target (telnet + firmware + HTTP) — fastest path to a full offline demo.
+3. `nff-mock-esp32` target (HTTP panel + plain MQTT broker).
+4. `.env.demo`, runbook, Docker bring-up, optional SSH/CoAP extras, `sandbox_status` tool.
+
+---
+
+### Deployment topology (finalized): RasPi appliance + phone, no VPS
+
+The live demo runs as a self-contained **Raspberry Pi appliance** driven from a phone. No VPS and
+no port-forwarding are required — this falls out of how `nff-agent-worker` already works.
+
+**Key fact that removes the VPS.** `nff-agent-worker` (the Claude agent that calls the MCP tools) is
+a headless process with **no inbound port** — it only makes **outbound** connections, watching a
+**Supabase** table for messages from the dashboard and streaming results back. The phone dashboard
+and the worker rendezvous *in* Supabase (cloud); they never connect to each other directly. Because
+the worker is outbound-only, it works behind the phone-hotspot NAT with nothing exposed. The other
+nff MCP servers are already wired as **localhost HTTP** (`.mcp.json`: `http://127.0.0.1:300X/mcp`).
+
+```
+        [ phone ]
+   hotspot ───────────────┐   (a) internet uplink for the Pi (Supabase Realtime + Anthropic API)
+   dashboard UI ──▶ Supabase (cloud) ◀── outbound only
+                          │
+   ┌──────────────────────┴───────────────────────────────┐
+   │  RASPI (the "local server")                            │
+   │   nff-agent-worker ──localhost HTTP──▶ nff-pentester (MCP)
+   │                                       └─▶ nff-mock targets (127.0.0.1)
+   └────────────────────────────────────────────────────────┘
+```
+
+**Placement rules:**
+- Everything that touches a target runs **on the Pi**: `nff-agent-worker`, `nff-pentester`, and the
+  `nff-mock` targets. The agent ↔ pentester link is **localhost**, *not* over Wi-Fi — this matches the
+  existing `127.0.0.1:300X/mcp` pattern and keeps the pentesting tools off the LAN entirely.
+- The **phone** has two jobs only: give the Pi internet via hotspot, and run the dashboard UI (which
+  talks to Supabase). It is the trigger/screen — the "run it from my phone" surface.
+- **No VPS / no tunnel / no inbound exposure** anywhere.
+
+**Two required adjustments captured here:**
+1. **Pentester transport.** `server.py` currently calls `mcp.run("stdio")`. To be reachable by the
+   agent-worker like the other nff servers, it must serve **streamable HTTP on a localhost port**
+   (e.g. `http://127.0.0.1:3006/mcp`) and get a matching entry in the worker's `AGENT_MCP_SERVERS`
+   config. Small change, but required for this wiring.
+2. **Sandbox allowlist for this design (no travel router).**
+   - Mock targets run on the Pi → allowlist **`127.0.0.0/8`** covers the entire offline demo.
+   - A **real ESP32** must join the phone hotspot; only then add the hotspot subnet (iOS is usually
+     `172.20.10.0/28`, Android often `192.168.43.0/24`). ⚠️ Many phone hotspots enable **client
+     isolation**, which blocks the Pi from reaching the ESP32 — test beforehand; if it isolates, keep
+     the live demo on Pi-local mocks and use a small dedicated router only when a real device is
+     needed. (This is why `.env.demo` defaults to loopback and the travel-router subnet is opt-in.)
+
+**Engine choice.** On a headless Pi, run `nff-agent-worker` with the **`sdk` engine +
+`ANTHROPIC_API_KEY`** (the README's headless/cloud option), not the interactive `claude`-CLI login.
+
+**Kit:** RasPi 4/5 + SD card, USB-C power (or power bank), the phone (hotspot + dashboard), and
+optionally a real ESP32 (flashed via the existing `nff` tooling) for the radio/BLE chains.

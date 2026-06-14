@@ -57,6 +57,19 @@ def test_config_defaults() -> None:
     assert settings.mqtt_port == 1883
 
 
+def test_http_transport_defaults() -> None:
+    """Server is configured for streamable-HTTP on loopback:3006 like the siblings."""
+    from nff_pentester.config import settings
+    from nff_pentester.server import mcp
+
+    assert settings.mcp_transport == "streamable-http"
+    assert settings.mcp_host == "127.0.0.1"
+    assert settings.mcp_port == 3006
+    # The FastMCP instance reflects the configured bind host/port.
+    assert mcp.settings.host == "127.0.0.1"
+    assert mcp.settings.port == 3006
+
+
 def test_run_command_not_found() -> None:
     """run_command handles a missing binary gracefully."""
     import asyncio
