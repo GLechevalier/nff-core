@@ -9,73 +9,78 @@ Derived from first-principles security reasoning. Organized by layer, then by ar
 Snapshot of what exists today vs. what the vulnerability tree and a complete IoT assessment
 expect. The detailed forward-looking sections (§1, §5, §6) expand on each gap below.
 
-### Tool inventory (13 registered)
+### Tool inventory (30 registered)
 
-**Real implementations (12):** `port_scan`, `discover_devices` (nmap); `mqtt_probe`,
-`mqtt_topic_enum` (aiomqtt); `coap_discover` (coap-client); `ble_scan` (bleak, + demo fixture);
-`extract_firmware`, `analyze_strings` (binwalk/strings); `scan_hardcoded_creds` (regex);
-`test_default_creds_http`, `fuzz_web_paths` (httpx); `lookup_default_creds` (bundled JSON);
-`ssh_brute` (asyncssh), `telnet_brute` (asyncio); `walk_vuln_tree` (tree correlator).
+**Network/auth:** `port_scan`, `discover_devices` (nmap); `ssh_brute` (asyncssh),
+`telnet_brute` (asyncio); `lookup_default_creds` (bundled JSON).
+**Protocol:** `mqtt_probe`, `mqtt_topic_enum`, `mqtt_publish` (aiomqtt); `coap_discover`,
+`coap_put` (coap-client); `ble_scan`, `gatt_enum`, `gatt_write` (bleak, + demo fixtures);
+`zigbee_scan`, `zigbee_join_capture`, `zigbee_key_inject` (USB coordinator, + demo fixtures).
+**Firmware:** `extract_firmware`, `analyze_strings` (binwalk/strings); `scan_hardcoded_creds`
+(regex); `unsigned_update_check` (static HTTP-update / signature scan).
+**Web/app:** `test_default_creds_http`, `fuzz_web_paths`, `command_injection_tester` (httpx).
+**Components (I5):** `cve_lookup` (bundled `cve_db.json`).
+**Outbound (Chain 8):** `outbound_analyzer`, `dns_hijack_simulator`, `tls_validation_tester`
+(demo fixtures; real mode needs a controlled gateway).
+**Physical (I10):** `debug_interface_scan` (pyserial; + demo fixture).
+**Analysis/ops:** `walk_vuln_tree` (tree correlator), `sandbox_status`.
 
-**Stub (1):** `zigbee_scan` — returns an error; needs a USB coordinator + KillerBee/zigpy.
+### The core gap — RESOLVED ✅
 
-### The core gap: chains that dead-end at an unimplemented tool
+Every one of the tree's 11 roots can now reach a confirmed *active* outcome. The 13 tools the
+tree referenced but did not implement have all been built, so no chain dead-ends as *partial* for
+lack of a tool. Verified by `tests/test_missing_chain_tools.py::test_all_chains_go_active_with_full_session`,
+which feeds a synthetic vulnerable output for every tree `tool` and asserts all 11 terminal chains
+activate.
 
-The tree defines 9 attack chains, but **7 of them stop one step short** because their
-`next_check.tool` is not implemented. Only **Chain 1** (telnet → root) and **Chain 4**
-(firmware cred → SSH) can currently reach a confirmed *active* outcome; all others surface
-only as *partial* chains.
-
-| Layer | Missing tool | Blocks chain |
-|-------|-------------|--------------|
-| Web/app | `command_injection_tester` | Chain 5 — web → RCE |
-| Protocol | `mqtt_publish` | Chain 2 — MQTT control-topic takeover |
-| Protocol | `coap_put` | Chain 7 — CoAP actuation |
-| Radio | `gatt_enum`, `gatt_write` | Chain 6 — BLE physical control |
-| Radio | `zigbee_join_capture`, `zigbee_key_inject` | Chain 9 — Zigbee fleet (`zigbee_scan` also a stub) |
-| Outbound | `outbound_analyzer`, `dns_hijack_simulator`, `tls_validation_tester` | Chain 8 — "no open ports" MitM |
-| Firmware | `unsigned_update_check` | Chain 3 — unsigned-update backdoor |
-| Components (I5) | `cve_lookup` | `service_version_fingerprinted → component_known_cve` |
-| Physical (I10) | `debug_interface_scan` | `boot_console_signature → debug_interface_exposed` |
+Design split for capabilities that cannot run over loopback IP (matching the `ble_scan` pattern):
+real implementations where IP-reachable (`command_injection_tester`, `mqtt_publish`, `coap_put`,
+`unsigned_update_check`, `cve_lookup`); **`demo_mode` fixtures** for radio/outbound/physical
+(`gatt_*`, `zigbee_*`, the outbound trio, `debug_interface_scan`) that attempt the real
+hardware/lib outside demo mode and return a structured error if it is unavailable.
 
 ### Coverage by attack layer (per §1)
 
 - **Network + authentication** — strong ✅
-- **Firmware** — partial: extract/strings/regex creds, but no real `/etc/passwd`–`/etc/shadow`
-  parser, no binary CVE matcher, no hardcoded-URL/trust-relationship extractor.
-- **Application** — minimal: only path-fuzz + default creds. Missing command injection, directory
+- **Firmware** — extract/strings/regex creds + unsigned-update detector ✅; still missing a real
+  `/etc/passwd`–`/etc/shadow` parser and a hardcoded-URL/trust-relationship extractor.
+- **Application** — path-fuzz, default creds, and command injection ✅; still missing directory
   traversal, auth bypass, IDOR, CSRF.
-- **Physical / radio** — minimal real capability: BLE is discovery-only (+ demo fixture), Zigbee is
-  a stub, no Z-Wave, no UART/JTAG helper.
-- **Outbound surface** — not modeled at all (the entire "no open ports ≠ safe" thesis is unbuilt).
+- **Physical / radio** — BLE now has GATT enum/write, Zigbee has join-capture/key-inject, and there
+  is a UART/JTAG `debug_interface_scan` ✅ (radio/serial paths are demo-fixture-backed offline; real
+  hardware paths gated on bleak / a USB coordinator / pyserial). Still missing Z-Wave.
+- **Outbound surface** — modeled ✅ (the full "no open ports ≠ safe" chain is built; real mode needs
+  a controlled gateway, so it ships demo-fixture-backed).
 
 ### Depth gaps in tools that already exist (per §5)
 
 - `port_scan` — TCP only; no UDP (`-sU`), so misses CoAP/mDNS/SSDP/UPnP.
-- `fuzz_web_paths` — GET only; no POST/PUT/DELETE.
+- `fuzz_web_paths` — GET only; no POST/PUT/DELETE (note: `command_injection_tester` does both).
 - `scan_hardcoded_creds` — regex over `strings` output, not parsing extracted files directly.
-- `ble_scan` — discovery only; no GATT enumeration.
 - All tools — no rate-limit / back-off detection.
 
 ### Cross-cutting capabilities missing
 
 - **Reporting (§6)** — raw JSON only; no markdown/PDF report, no CVSS auto-scorer, no delta report.
-- **CVE data source** — `cve_lookup` has no backing database yet (needed by the new I5 chain).
+- **CVE data source** — `cve_lookup` ships a small bundled seed `cve_db.json`; no periodic sync from
+  an upstream CVE feed yet (offline by design for the demo).
 
-### Work-in-progress (uncommitted)
+### Done since this section was first written
 
-- **Safety sandbox** (`utils/sandbox.py`, `tools/safety/`) — allowlist guard wired into the 7
-  networked tools; not yet committed. Gating requirement for running safely at events (§8.A).
-- **Transport** — `server.py` still calls `mcp.run("stdio")`; the deployment design (§8) needs
-  localhost HTTP (`127.0.0.1:3006/mcp`) to be driven by `nff-agent-worker`. Not done.
-- **Targets** — `nff-mock` vulnerable apps (esp32/linux) don't exist yet, so there is nothing safe
-  to demo against (§8.B).
+- **Missing-chain tools** — all 13 implemented and registered (server exposes 30 tools); every tree
+  chain reaches *active*.
+- **Safety sandbox** (`utils/sandbox.py`, `tools/safety/`) — allowlist guard wired into the
+  networked tools; `sandbox_status` exposes the cage state.
+- **Transport** — `server.py` serves streamable HTTP on `127.0.0.1:3006/mcp` (stdio still available
+  for local single-process use).
 
 ### Highest-leverage next steps
 
-Per the §"Priority order" list, with the correlator (`walk_vuln_tree`) already done: implementing
-**`cve_lookup`** and **`command_injection_tester`** converts the most chains from partial → active
-for the least effort, followed by the **outbound-analysis** trio and the **report generator**.
+With the correlator and all chain tools done, the remaining leverage is in **breadth and reporting**:
+the **report generator + CVSS auto-scorer** (§6), the remaining **application-layer** testers
+(directory traversal, auth bypass, IDOR, CSRF), UDP support in `port_scan`, and an upstream feed for
+`cve_lookup`. Building the `nff-mock` vulnerable targets (§8.B) is the gating item for an end-to-end
+live demo against real services.
 
 ---
 
