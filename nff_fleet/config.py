@@ -21,6 +21,11 @@ class NffFleetSettings(BaseSettings):
     heartbeat_timeout: float = 90.0   # device marked offline after this many seconds of silence
     reaper_interval: float = 30.0     # how often the reaper sweeps for stale devices
 
+    # Claim-enrollment fulfillment worker: how often it scans for accepted-but-unfulfilled
+    # enrollments and how many it issues per sweep (rate limit for 100k-scale accept-all).
+    enroll_worker_interval: float = 5.0
+    enroll_worker_batch: int = 50
+
     audit_log: Path = Path("/data/audit/commands.jsonl")
 
     mcp_secret: str = "change-me-in-production"
@@ -44,6 +49,11 @@ class NffFleetSettings(BaseSettings):
     @property
     def keys_dir(self) -> Path:
         return self.data_dir / "keys"
+
+    @property
+    def project_keys_dir(self) -> Path:
+        """Per-project command-signing keys: {project_keys_dir}/{project_id}/cmd_sign.pem."""
+        return self.data_dir / "keys" / "projects"
 
     @property
     def audit_dir(self) -> Path:

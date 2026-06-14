@@ -27,10 +27,11 @@ def provision():
 @provision.command("init")
 @click.option("--broker-ip", default="172.20.10.3", show_default=True, help="Broker IP for server cert SAN")
 def provision_init(broker_ip: str):
-    """Generate CA, server cert, and command signing key from scratch."""
-    import secrets
-    from cryptography.hazmat.primitives.asymmetric import ec as _ec
-    from cryptography.hazmat.primitives import serialization as _ser
+    """Generate the CA and server cert from scratch.
+
+    Command-signing keys are per-project now (created on first `provision new-device --project`),
+    so there is no global signing key to generate here.
+    """
     from nff_fleet.provisioning.ca import generate_ca, issue_server_cert
 
     settings.certs_dir.mkdir(parents=True, exist_ok=True)
@@ -43,31 +44,22 @@ def provision_init(broker_ip: str):
     click.echo(f"Server cert        : {cert_path}")
     click.echo(f"Server key         : {key_path}")
 
-    if not settings.cmd_sign_key.exists():
-        cmd_key = _ec.generate_private_key(_ec.SECP256R1())
-        settings.cmd_sign_key.write_bytes(
-            cmd_key.private_bytes(
-                _ser.Encoding.PEM,
-                _ser.PrivateFormat.TraditionalOpenSSL,
-                _ser.NoEncryption(),
-            )
-        )
-        click.echo(f"Command sign key   : {settings.cmd_sign_key}")
-    else:
-        click.echo(f"Command sign key   : {settings.cmd_sign_key} (kept existing)")
-
 
 @provision.command("new-device")
 @click.option("--id", "device_id", required=True, help="Device identifier (e.g. device-42)")
+@click.option("--project", "project_id", required=True, help="Project/tenant the device is bound to")
 @click.option("--sketch-dir", "sketch_dir", default=None, help="Copy credentials.h to this sketch directory")
-def new_device(device_id: str, sketch_dir: str | None):
-    """Generate TLS client credentials and credentials.h for a new device."""
+def new_device(device_id: str, project_id: str, sketch_dir: str | None):
+    """Generate TLS client credentials and credentials.h for a new device, bound to a project."""
+    from nff_fleet import signing
     from nff_fleet.provisioning.ca import issue_device_cert
     from nff_fleet.provisioning.credentials import write_credentials_h
 
-    cert_path, key_path = issue_device_cert(device_id)
+    signing.ensure_project_key(project_id)
+    cert_path, key_path = issue_device_cert(device_id, project_id)
     h_path = write_credentials_h(device_id)
     click.echo(f"Issued certificate : {cert_path}")
+    click.echo(f"Project            : {project_id}")
     click.echo(f"Private key        : {key_path}")
     click.echo(f"credentials.h      : {h_path}")
     if sketch_dir:
@@ -91,8 +83,8 @@ def export_ca():
 
 
 @provision.command("export-cmd-key")
-def export_cmd_key():
-    """Print the command signing public key in PEM format."""
+@click.option("--project", "project_id", required=True, help="Project whose command key to export")
+def export_cmd_key(project_id: str):
+    """Print a project's command signing public key in PEM format."""
     from nff_fleet import signing
-    signing.load_key(settings.cmd_sign_key)
-    click.echo(signing.public_key_pem())
+    click.echo(signing.public_key_pem(project_id))

@@ -94,6 +94,10 @@ async def _upsert_device(device_id: str, payload: dict[str, Any]) -> None:
             # The device-reported build_id (heartbeat "build"); the connector's post-deploy
             # verification compares it against what it pushed. Omitted by older firmware.
             "p_build_id": payload.get("build") or None,
+            # Tenancy: mocks echo their project_id in the heartbeat so they land in the
+            # right project (real ESP32s omit it; the RPC COALESCE-preserves any known
+            # value). See nff-db migration 0029.
+            "p_project_id": payload.get("project_id") or None,
         },
     ).execute()
 
@@ -119,8 +123,122 @@ async def _insert_telemetry(device_id: str, payload: dict[str, Any]) -> None:
             "packets_rx": payload.get("packets_rx"),
             "packets_tx": payload.get("packets_tx"),
             "temp_c": payload.get("temp_c"),
+            # Denormalized tenant scope (nullable since 0029): mocks echo project_id,
+            # real/projectless devices send none and the row stays NULL (RLS-hidden).
+            "project_id": payload.get("project_id") or None,
         }
     ).execute()
+
+
+# ---------------------------------------------------------------------------
+# Mock cleanup (controller calls fleet /internal/deprovision, which calls this)
+# ---------------------------------------------------------------------------
+
+async def delete_mock_device(device_id: str) -> None:
+    """Drop a torn-down mock's device row (telemetry/crash/jobs cascade). The RPC
+    is constrained to 'mock-'-prefixed ids, so a real device can never be removed.
+    No-op when persistence is disabled."""
+    if not _enabled:
+        return
+    await _client.rpc("delete_mock_device", {"p_id": device_id}).execute()
+
+
+# ---------------------------------------------------------------------------
+# Batch claim enrollment (DEVICE_OWNERSHIP_DESIGN.md §8; nff-db migration 0030)
+# ---------------------------------------------------------------------------
+
+async def create_enrollment_batch(
+    project_id: str, max_devices: int | None, bootstrap_serial: str | None
+) -> str | None:
+    """Create a batch (24h window via the RPC default). Returns the batch_id, or None if
+    persistence is disabled."""
+    if not _enabled:
+        return None
+    resp = await _client.rpc(
+        "create_enrollment_batch",
+        {
+            "p_project_id": project_id,
+            "p_max_devices": max_devices,
+            "p_bootstrap_serial": bootstrap_serial,
+        },
+    ).execute()
+    return resp.data
+
+
+async def record_enrollment(batch_id: str, device_hwid: str, hardware: dict[str, Any]) -> str:
+    """Record a device announcing under a batch. Returns the resulting state string
+    ('pending'|'accepted'|'rejected:expired'|'rejected:quota'). Quota + 24h TTL are
+    enforced inside the RPC."""
+    if not _enabled:
+        return "rejected:disabled"
+    resp = await _client.rpc(
+        "record_enrollment",
+        {"p_batch_id": batch_id, "p_device_hwid": device_hwid, "p_hardware": hardware or {}},
+    ).execute()
+    return resp.data
+
+
+async def get_accepted_unfulfilled(limit: int = 100) -> list[dict[str, Any]]:
+    """Accepted enrollments still awaiting cert issuance (the fulfillment worker's work list)."""
+    if not _enabled:
+        return []
+    resp = await (
+        _client.table("device_enrollments")
+        .select("id, batch_id, project_id, device_hwid")
+        .eq("state", "accepted")
+        .eq("cert_issued", False)
+        .limit(limit)
+        .execute()
+    )
+    return resp.data or []
+
+
+async def provision_claimed_device(device_id: str, project_id: str) -> None:
+    """Write the devices row at claim time (ota_status='pending'). Ownership is recorded here,
+    not lazily on heartbeat."""
+    if not _enabled:
+        return
+    await _client.rpc(
+        "provision_claimed_device",
+        {"p_device_id": device_id, "p_project_id": project_id},
+    ).execute()
+
+
+async def mark_enrollment_claimed(enrollment_id: str, device_id: str) -> None:
+    """Flag an enrollment claimed once the device acks rollover."""
+    if not _enabled:
+        return
+    await _client.rpc(
+        "mark_enrollment_claimed",
+        {"p_enrollment_id": enrollment_id, "p_device_id": device_id},
+    ).execute()
+
+
+async def mark_enrollment_cert_issued(enrollment_id: str, device_id: str) -> None:
+    """Set cert_issued=true (+ device_id) WITHOUT claiming, so the fulfillment worker stops
+    re-issuing a cert for a device that didn't ack rollover within the window. The enrollment is
+    reconciled to 'claimed' when the device next connects operationally (or via a manual re-push)."""
+    if not _enabled:
+        return
+    await (
+        _client.table("device_enrollments")
+        .update({"cert_issued": True, "device_id": device_id})
+        .eq("id", enrollment_id)
+        .execute()
+    )
+
+
+async def expire_stale_batches() -> list[str]:
+    """Flip active→expired for batches past their 24h window; returns affected batch ids."""
+    if not _enabled:
+        return []
+    resp = await _client.rpc("expire_stale_batches", {}).execute()
+    data = resp.data or []
+    # setof uuid comes back as a list of scalars or {"expire_stale_batches": uuid} rows.
+    out: list[str] = []
+    for row in data:
+        out.append(row if isinstance(row, str) else row.get("expire_stale_batches") or row.get("id"))
+    return [x for x in out if x]
 
 
 # ---------------------------------------------------------------------------
@@ -188,11 +306,12 @@ def append_audit(
     action: str,
     nonce: str,
     session_id: str,
+    project_id: str,
     payload: dict[str, Any] | None = None,
 ) -> None:
     if not _enabled:
         return
-    _fire(_append_audit(device_id, action, nonce, session_id, payload))
+    _fire(_append_audit(device_id, action, nonce, session_id, project_id, payload))
 
 
 async def _append_audit(
@@ -200,12 +319,14 @@ async def _append_audit(
     action: str,
     nonce: str,
     session_id: str,
+    project_id: str,
     payload: dict[str, Any] | None,
 ) -> None:
     await _client.table("audit_log").insert(
         {
             "ts": _now(),
             "device_id": device_id,
+            "project_id": project_id,   # NOT NULL in audit_log — every command is project-scoped
             "action": action,
             "nonce": nonce,
             "payload": {"session_id": session_id, **(payload or {})},

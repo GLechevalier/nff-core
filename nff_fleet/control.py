@@ -8,32 +8,65 @@ response.
 
 POST /internal/command
     Header: X-Fleet-Secret: <shared secret>   (settings.mcp_secret)
-    Body:   {"device_id": "<mqtt identity>", "payload": {...}, "timeout": <float?>}
+    Body:   {"device_id": "<id>", "project_id": "<id>", "payload": {...}, "timeout": <float?>}
     -> 200  {"device_id": ..., "response": <device json>}
        401  bad/missing secret
        400  malformed body
        504  device did not respond in time
        500  delivery error
 
-The payload's "action" drives signing generically (see signing.sign / _build_tbs),
-so no OTA-specific code lives here.
+The payload's "action" drives signing generically (see signing.sign / _build_tbs); the
+command is signed with the device's *project* key, so the caller must pass project_id.
+
+POST /internal/provision
+    Header: X-Fleet-Secret: <shared secret>
+    Body:   {"device_id": "<id>", "project_id": "<id>"}
+    Mint a per-device mTLS client cert bound to project_id (signed cert extension) and
+    ensure the project's command-signing key exists.
+POST /internal/deprovision
+    Header: X-Fleet-Secret: <shared secret>
+    Body:   {"device_id": "<id>"}
+    Remove a device's credentials. The CA *signing key* never leaves fleet — public-facing
+    callers (nff-mock-controller) ask fleet to issue certs rather than holding the CA key
+    themselves. deprovision is constrained to mock-prefixed ids so it can never delete a
+    real device's credentials.
 """
 
 from __future__ import annotations
 
 import hmac
+import logging
+import shutil
 from typing import Any
 
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
+from nff_fleet import db
 from nff_fleet.commands import send_command
 from nff_fleet.config import settings
+
+logger = logging.getLogger(__name__)
+
+# The mock controller spawns ids like "mock-<project8>-<rand6>"; only these may be
+# deprovisioned over HTTP, so a bug/abuse can never wipe a real device's certs.
+_MOCK_ID_PREFIX = "mock-"
 
 
 def _secret_ok(request: Request) -> bool:
     provided = request.headers.get("x-fleet-secret", "")
     return bool(provided) and hmac.compare_digest(provided, settings.mcp_secret)
+
+
+def _valid_device_id(device_id: Any) -> bool:
+    """A device_id must be a non-empty str usable as a single path segment."""
+    return (
+        isinstance(device_id, str)
+        and bool(device_id)
+        and "/" not in device_id
+        and "\\" not in device_id
+        and device_id not in (".", "..")
+    )
 
 
 async def _deliver_command(request: Request) -> JSONResponse:
@@ -47,8 +80,11 @@ async def _deliver_command(request: Request) -> JSONResponse:
 
     device_id = body.get("device_id")
     payload = body.get("payload")
+    project_id = body.get("project_id")
     if not isinstance(device_id, str) or not device_id:
         return JSONResponse({"error": "device_id is required"}, status_code=400)
+    if not _valid_device_id(project_id):
+        return JSONResponse({"error": "valid project_id is required"}, status_code=400)
     if not isinstance(payload, dict) or "action" not in payload:
         return JSONResponse(
             {"error": "payload must be an object containing 'action'"}, status_code=400
@@ -62,6 +98,7 @@ async def _deliver_command(request: Request) -> JSONResponse:
         resp = await send_command(
             device_id,
             payload,
+            project_id,
             timeout=float(timeout) if timeout is not None else None,
             session_id="nff-ota",
         )
@@ -77,6 +114,140 @@ async def _deliver_command(request: Request) -> JSONResponse:
     return JSONResponse({"device_id": device_id, "response": resp})
 
 
+async def _provision_device(request: Request) -> JSONResponse:
+    if not _secret_ok(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+
+    try:
+        body: dict[str, Any] = await request.json()
+    except Exception:
+        return JSONResponse({"error": "invalid JSON body"}, status_code=400)
+
+    device_id = body.get("device_id")
+    project_id = body.get("project_id")
+    if not _valid_device_id(device_id):
+        return JSONResponse({"error": "valid device_id is required"}, status_code=400)
+    if not _valid_device_id(project_id):
+        return JSONResponse({"error": "valid project_id is required"}, status_code=400)
+
+    try:
+        from nff_fleet.provisioning.ca import issue_device_cert
+        from nff_fleet import signing
+
+        # Ownership is recorded at issue time: the cert binds device → project, and the
+        # project's command-signing key is created on first provision into it.
+        signing.ensure_project_key(project_id)
+        cert_path, key_path = issue_device_cert(device_id, project_id)
+    except Exception as exc:  # CA not initialised, write error, etc.
+        return JSONResponse(
+            {"device_id": device_id, "error": str(exc)}, status_code=500
+        )
+
+    return JSONResponse(
+        {
+            "device_id": device_id,
+            "cert_path": str(cert_path),
+            "key_path": str(key_path),
+        }
+    )
+
+
+async def _provision_batch(request: Request) -> JSONResponse:
+    """Create an enrollment batch + its shared bootstrap credential (DEVICE_OWNERSHIP_DESIGN.md §8).
+
+    POST /internal/provision-batch
+        Header: X-Fleet-Secret
+        Body:   {"project_id": "<uuid>", "count": <int?>}
+        -> 200  {"batch_id", "project_id", "expires_in_hours", "bootstrap_header_path"}
+    Called by `nff provision batch`. Mints ONE shared cert for the whole batch and records the
+    batch (with its 24h window + optional quota) so devices can announce + be claimed.
+    """
+    if not _secret_ok(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    try:
+        body: dict[str, Any] = await request.json()
+    except Exception:
+        return JSONResponse({"error": "invalid JSON body"}, status_code=400)
+
+    project_id = body.get("project_id")
+    count = body.get("count")
+    if not _valid_device_id(project_id):
+        return JSONResponse({"error": "valid project_id is required"}, status_code=400)
+    if count is not None and (not isinstance(count, int) or count <= 0):
+        return JSONResponse({"error": "count must be a positive integer"}, status_code=400)
+
+    try:
+        from nff_fleet.provisioning import batch as batch_mod
+        from nff_fleet.provisioning.credentials import render_batch_bootstrap_h, write_batch_bootstrap_h
+        from nff_fleet import signing
+
+        # The project must have its intermediate CA + signing key before any device claims into it.
+        signing.ensure_project_key(project_id)
+        batch_id = await db.create_enrollment_batch(project_id, count, None)
+        if not batch_id:
+            return JSONResponse(
+                {"error": "persistence disabled — cannot create batch"}, status_code=503
+            )
+        batch_mod.issue_batch_cert(project_id, batch_id)
+        header_path = write_batch_bootstrap_h(project_id, batch_id)
+        # Return the rendered header inline so a remote `nff provision batch` can write it locally
+        # (the path is only meaningful on a co-located deployment sharing /data).
+        header_content = render_batch_bootstrap_h(project_id, batch_id)
+    except Exception as exc:
+        return JSONResponse({"error": str(exc)}, status_code=500)
+
+    return JSONResponse(
+        {
+            "batch_id": batch_id,
+            "project_id": project_id,
+            "expires_in_hours": 24,
+            "bootstrap_header_path": str(header_path),
+            "bootstrap_header": header_content,
+        }
+    )
+
+
+async def _deprovision_device(request: Request) -> JSONResponse:
+    if not _secret_ok(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+
+    try:
+        body: dict[str, Any] = await request.json()
+    except Exception:
+        return JSONResponse({"error": "invalid JSON body"}, status_code=400)
+
+    device_id = body.get("device_id")
+    if not _valid_device_id(device_id):
+        return JSONResponse({"error": "valid device_id is required"}, status_code=400)
+    if not device_id.startswith(_MOCK_ID_PREFIX):
+        # Refuse to touch anything but mock-spawned identities.
+        return JSONResponse(
+            {"error": f"deprovision is restricted to '{_MOCK_ID_PREFIX}' ids"},
+            status_code=403,
+        )
+
+    device_dir = settings.certs_dir / device_id
+    try:
+        shutil.rmtree(device_dir, ignore_errors=True)
+    except Exception as exc:
+        return JSONResponse(
+            {"device_id": device_id, "error": str(exc)}, status_code=500
+        )
+
+    # Also drop the dashboard device row (telemetry/crash cascade) so a reaped mock
+    # disappears instead of lingering as an offline ghost. Best-effort: cert removal
+    # is the contract; a leftover row just shows offline. RPC is mock-id-guarded.
+    try:
+        await db.delete_mock_device(device_id)
+    except Exception as exc:
+        logger.warning("deprovision %s: device-row cleanup failed: %s", device_id, exc)
+
+    return JSONResponse({"device_id": device_id, "removed": True})
+
+
 def register(mcp) -> None:
     """Register the internal control routes on the FastMCP HTTP app."""
     mcp.custom_route("/internal/command", methods=["POST"])(_deliver_command)
+    mcp.custom_route("/internal/provision", methods=["POST"])(_provision_device)
+    mcp.custom_route("/internal/provision-batch", methods=["POST"])(_provision_batch)
+    mcp.custom_route("/internal/deprovision", methods=["POST"])(_deprovision_device)

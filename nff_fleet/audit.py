@@ -16,10 +16,12 @@ async def log_command(
     action: str,
     nonce: str,
     session_id: str,
+    project_id: str,
 ) -> None:
     entry = {
         "timestamp": int(time.time()),
         "device_id": device_id,
+        "project_id": project_id,
         "action": action,
         "nonce": nonce,
         "session_id": session_id,
@@ -29,4 +31,4 @@ async def log_command(
     async with _lock:
         async with aiofiles.open(log_path, "a") as f:
             await f.write(json.dumps(entry) + "\n")
-    db.append_audit(device_id, action, nonce, session_id)
+    db.append_audit(device_id, action, nonce, session_id, project_id)

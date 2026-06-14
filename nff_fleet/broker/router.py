@@ -18,12 +18,30 @@ _crash_cache: dict[str, dict] = {}
 # Pending command futures keyed by device_id — one in-flight command per device
 _pending: dict[str, asyncio.Future] = {}
 
+# Pending rollover-ack futures keyed by hwid — the fulfillment worker awaits the device's
+# `rollover_cert` ack on nff/_bootstrap/{batch}/{hwid}/response.
+_bootstrap_pending: dict[str, asyncio.Future] = {}
+
 _router_client: MQTTClient | None = None
 _router_task: asyncio.Task | None = None
 
 
 def resolve_response(device_id: str, payload: dict[str, Any]) -> None:
     if fut := _pending.get(device_id):
+        if not fut.done():
+            fut.set_result(payload)
+
+
+def register_bootstrap_pending(hwid: str, fut: asyncio.Future) -> None:
+    _bootstrap_pending[hwid] = fut
+
+
+def unregister_bootstrap_pending(hwid: str) -> None:
+    _bootstrap_pending.pop(hwid, None)
+
+
+def resolve_bootstrap_response(hwid: str, payload: dict[str, Any]) -> None:
+    if fut := _bootstrap_pending.get(hwid):
         if not fut.done():
             fut.set_result(payload)
 
@@ -48,21 +66,41 @@ async def _handle_message(topic: str, payload_bytes: bytes) -> None:
         return
 
     parts = topic.split("/")
-    # nff/devices/{id}/{type}
-    if len(parts) < 4 or parts[0] != "nff" or parts[1] != "devices":
+
+    # nff/_bootstrap/{batch_id}/{hwid}/{type} — claim enrollment channel (shared batch creds).
+    if len(parts) >= 5 and parts[0] == "nff" and parts[1] == "_bootstrap":
+        batch_id, hwid, msg_type = parts[2], parts[3], parts[4]
+        if msg_type == "announce":
+            hardware = {
+                k: payload[k]
+                for k in ("device_type", "fqbn", "chip", "rev", "flash", "fw", "build")
+                if payload.get(k) not in (None, "")
+            }
+            state = await db.record_enrollment(batch_id, hwid, hardware)
+            logger.info("Enrollment announce: hwid=%s batch=%s -> %s", hwid, batch_id, state)
+        elif msg_type == "response":
+            resolve_bootstrap_response(hwid, payload)
         return
 
-    device_id = parts[2]
-    msg_type = parts[3]
+    # nff/{project_id}/devices/{id}/{type}
+    if len(parts) < 5 or parts[0] != "nff" or parts[2] != "devices":
+        return
+
+    project_id = parts[1]
+    device_id = parts[3]
+    msg_type = parts[4]
 
     if msg_type == "heartbeat":
-        registry.update_heartbeat(device_id, payload)
+        registry.update_heartbeat(device_id, payload, project_id)
+        # project_id is authoritative from the cert-scoped topic, not from the device payload.
+        payload = {**payload, "project_id": project_id}
         if payload.get("status") == "offline":
             registry.set_offline(device_id)
-            db.upsert_device(device_id, {"status": "offline"})
+            db.upsert_device(device_id, {"status": "offline", "project_id": project_id})
         else:
             db.upsert_device(device_id, payload, with_telemetry=True)
-        logger.debug("Heartbeat from %s: %s", device_id, payload.get("status"))
+        logger.debug("Heartbeat from %s (project %s): %s", device_id, project_id,
+                     payload.get("status"))
 
     elif msg_type == "response":
         # An ota_result is published to the same response topic but arrives long after
@@ -83,9 +121,10 @@ async def _router_loop(client: MQTTClient) -> None:
     broker_url = "mqtt://server:@127.0.0.1:11883/"
     try:
         await client.connect(broker_url, cleansession=True)
-        # QoS 0: broker delivers device messages to router without waiting for PUBACK
-        await client.subscribe([("nff/devices/#", 0)])
-        logger.info("Router subscribed to nff/devices/#")
+        # QoS 0: broker delivers device messages to router without waiting for PUBACK.
+        # Wildcard over the project segment: nff/{project_id}/devices/{id}/{type}
+        await client.subscribe([("nff/+/devices/#", 0), ("nff/_bootstrap/#", 0)])
+        logger.info("Router subscribed to nff/+/devices/# and nff/_bootstrap/#")
         while True:
             message = await client.deliver_message()
             topic = message.publish_packet.variable_header.topic_name

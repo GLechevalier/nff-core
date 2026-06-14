@@ -89,7 +89,7 @@ def test_router_routes_ota_result_to_forwarder(monkeypatch):
 
     payload = json.dumps({"type": "ota_result", "status": "committed", "version": "2.0.0",
                           "id": "test-device-01"}).encode()
-    asyncio.run(router._handle_message("nff/devices/test-device-01/response", payload))
+    asyncio.run(router._handle_message("nff/project-a/devices/test-device-01/response", payload))
 
     assert "fwd" in calls and "resolve" not in calls
     assert calls["fwd"][0] == "test-device-01"
@@ -103,6 +103,6 @@ def test_router_routes_normal_response_to_resolve(monkeypatch):
                         lambda did, pl: calls.__setitem__("resolve", True))
 
     payload = json.dumps({"type": "pong", "id": "test-device-01"}).encode()
-    asyncio.run(router._handle_message("nff/devices/test-device-01/response", payload))
+    asyncio.run(router._handle_message("nff/project-a/devices/test-device-01/response", payload))
 
     assert "resolve" in calls and "fwd" not in calls
