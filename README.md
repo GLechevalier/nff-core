@@ -64,11 +64,32 @@ Then in Claude Code, use a guided prompt to start:
 Use the full_iot_assessment prompt on 192.168.1.42
 ```
 
+**No real device to test?** The sibling [`nff-mock/targets/`](../nff-mock/targets) ships two
+deliberately-vulnerable demo targets (`nff-mock-linux`, `nff-mock-esp32`) built specifically for
+this tool. Boot one, load `.env.demo` (sandbox on, allowlist `127.0.0.0/8`), and run
+`full_iot_assessment` on `127.0.0.1` / `127.0.0.2` for a full multi-chain report with no external
+traffic.
+
 ---
 
 ## Configuration
 
-Copy `.env.example` to `.env` and adjust as needed. All values are optional — defaults are shown below.
+Copy `.env.example` to `.env` and adjust as needed. Most values are optional — but the
+**Supabase vars are required**: the vulnerability tree and tool inventory are sourced from Supabase
+(the single source of truth), so the server seeds + reads them at startup and **refuses to boot
+without a reachable Supabase**. Point it at the nff-dashboard project with a service-role key:
+
+```bash
+PENTESTER_SUPABASE_URL=https://<project-ref>.supabase.co
+PENTESTER_SUPABASE_SERVICE_ROLE_KEY=<service_role secret>   # required — global tables are deny-all RLS
+```
+
+The tree lives in global tables (migration `nff-db/migrations/0043`); on boot the server seeds its
+baseline from the bundled `vuln_tree.json`, syncs its live tool set into `pentester_tools`, then
+reads the tree from the DB at runtime so it updates itself as new chains/tools land. The bundled
+JSON remains the seed source and offline test fixture.
+
+Other (optional) values default as shown:
 
 ```bash
 PENTESTER_TOOL_TIMEOUT_SECONDS=120   # max runtime for nmap, binwalk, etc.
@@ -244,11 +265,17 @@ pytest tests/ -v
 
 ## Roadmap summary
 
-The full roadmap is in `docs/future_work.md`. The six priorities in order:
+The full roadmap is in `docs/future_work.md`. The server is now at **42 tools** and most of the
+original roadmap is shipped:
 
-1. **Vulnerability tree** — a directed graph of chained findings that tells you *"if A and B are confirmed, run C next, and if C confirms, this specific system is exploitable"*. Replaces the flat finding list with an active attack path guide.
-2. **Finding correlator** — automatically escalates combinations of low-severity findings that form critical chains (e.g. HTTP firmware update + unsigned firmware + same-VLAN attacker).
-3. **Outbound connection analysis** — tests the attack surface created by connections the device *initiates*, not just ports it exposes. A device with no open ports can still be compromised through its cloud connection.
-4. **Application layer tools** — command injection, directory traversal, auth bypass, IDOR for IoT web interfaces. Currently the tool finds the panel and tests default passwords; it does not test what the application does with input.
-5. **Binary CVE matcher** — extract version strings from firmware binaries (BusyBox, OpenSSH, OpenSSL) and cross-reference against a CVE database. Surfaces known vulnerabilities without needing a zero-day.
-6. **Adversarial agent loop** — a red agent (attacker) and blue agent (defender) that iterate against the same device until no new findings are produced. Long-term research direction.
+**Done ✅** — the **vulnerability tree** (v3: 14 roots / 18 chains) with the `walk_vuln_tree`
+correlator; **application-layer** testers (command injection, directory traversal, auth bypass,
+IDOR, CSRF); **outbound** analysis (`outbound_analyzer`, `dns_hijack_simulator`,
+`tls_validation_tester`); the **CVE matcher** (`cve_lookup` + optional `cve_db_sync`); firmware
+passwd/URL parsers; Z-Wave; **reporting** (`generate_report`, `score_cvss`, `delta_report`); the
+**event-safety sandbox**; and the **`nff-mock` vulnerable demo targets** (`nff-mock/targets/`,
+shipped 2026-06-15) you point the tools at for a live end-to-end demo.
+
+**Next 🔜** — the **adversarial agent loop**: a red agent (attacker) and blue agent (defender) that
+iterate against the same device until no new findings are produced. This is the single biggest open
+item and now has live targets to harden against.

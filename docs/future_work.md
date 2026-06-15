@@ -106,10 +106,11 @@ fuzzing, direct-file credential parsing, rate-limit detection, and an optional `
 built and tested — **and wired into the vulnerability tree** (v3): the web root now branches into
 directory-traversal, auth-bypass, IDOR, and CSRF terminals, and three new roots cover Z-Wave
 (`zwave_scan` → `zwave_command_inject`), a firmware backdoor account (`parse_unix_users`), and an
-insecure hardcoded trust relationship (`extract_firmware_urls`). The remaining leverage is in
-**realism and the adversarial loop**: the red/blue **adversarial agent loop** (§4), and building the
-`nff-mock` vulnerable targets (§8.B) — still the gating item for an end-to-end live demo against real
-services.
+insecure hardcoded trust relationship (`extract_firmware_urls`).
+
+The **`nff-mock` vulnerable targets (§8.B) shipped 2026-06-15** — the gating item for an
+end-to-end live demo against real services is resolved. The remaining leverage is now the single
+biggest open item: the red/blue **adversarial agent loop** (§4).
 
 ---
 
@@ -480,6 +481,29 @@ No code changes needed — the walker reads the tree at runtime. This means new 
 
 The `walk_vuln_tree` MCP tool takes a session's worth of tool outputs as input and returns the full chain analysis. It becomes the last step of every guided workflow prompt.
 
+### Supabase single source of truth — SHIPPED ✅ (2026-06-15)
+
+The tree and tool inventory are now sourced from **Supabase**, not the static JSON, so the tree
+"updates itself" as it grows and newly-added tools register themselves in the DB:
+
+- **Global platform tables** (migration `nff-db/migrations/0043_pentester_global_vuln_tree.sql`):
+  `pentester_vuln_tree_nodes` (flat parent/child + `ordinal`, `origin` seed/user/agent),
+  `pentester_vuln_tree_meta` (version), `pentester_tools` (synced inventory). All deny-all RLS;
+  the pentester connects with the **service-role key** (like `platform_admins`/`admin_config`).
+  Distinct from the project-scoped `vuln_tree_nodes` (0035), which still backs the dashboard.
+- **`nff_pentester/db.py`** — per-loop `AsyncClient` (nff-ota pattern). On startup
+  (`server.py::main`, **hard dependency** — the server refuses to boot without Supabase):
+  `seed_tree()` upserts the bundled baseline as `origin='seed'` (never clobbering agent/user
+  nodes), `sync_tools()` upserts the live `mcp.list_tools()` set, then `fetch_tree()` warms a cache.
+- **Runtime reads** — `walk_vuln_tree`, `render_vuln_tree`, and the `pentester://trees/vuln-tree`
+  resource read the live tree from the DB each call (fresh → "updates itself"), falling back to the
+  warmed cache then the bundled JSON on a transient blip. The bundled `vuln_tree.json` is retained
+  as the seed source and the offline unit-test fixture (`flatten`/`reconstruct` round-trip it
+  exactly).
+- **Consequence:** the air-gapped §8 startup posture now needs Supabase reachable (consistent with
+  the RasPi topology, which has hotspot internet). `render_vuln_tree`'s "planned" badge now derives
+  from the synced `pentester_tools` registry (then the live MCP registry as fallback).
+
 ---
 
 ## Priority order (suggested)
@@ -558,7 +582,40 @@ single-process use. See "Deployment topology" below for why the link stays on lo
 
 ---
 
-### Workstream B — nff-mock: two vulnerable target apps
+### Workstream B — nff-mock: two vulnerable target apps — SHIPPED ✅ (2026-06-15)
+
+Built additively under `nff-mock/targets/` (`device/`/`controller/` untouched). Lights vuln-tree
+Chains 1, 2, 4, 5, and 7. 15 pytest pass (binwalk + a Windows-only live-CoAP-UDP case skip);
+both apps verified booting live (telnet→`$`, web 200/login/injection, firmware served, MQTT
+anonymous connect + `device/cmd`).
+
+**As-built deviations from the spec below (all deliberate):**
+- **One installable package** `nff-mock-targets` exposing **two console scripts**
+  (`nff-mock-esp32`, `nff-mock-linux`) + **two Dockerfiles** (`Dockerfile.esp32`,
+  `Dockerfile.linux`) — instead of three separate `pyproject.toml`s (common/esp32/linux). This
+  honors "each its own image" while avoiding cross-package path-dependency pain in Docker. Layout:
+  `nff_mock_targets/{common,esp32,linux}/`.
+- **HTTP panel is stdlib asyncio** (`asyncio.start_server` + minimal HTTP/1.1), no aiohttp — keeps
+  the "no heavy deps" promise.
+- **`docker-compose.demo.yml` maps esp32 → `127.0.0.2`, linux → `127.0.0.1`** (both inside the
+  `127.0.0.0/8` allowlist) so each target keeps the *standard* ports the vuln-tree keys on
+  (`port_scan` checks 22/23/5683) without host-port collisions on :80. The demo net is
+  `internal: true` (no uplink).
+- **Standard low ports need privilege on bare metal** — the containers force `BIND=0.0.0.0` and run
+  as root so 22/23/80 bind cleanly; for a bare laptop, run with privilege or override both the
+  target port and the matching `PENTESTER_*_PORT`.
+- **BLE (Chain 6) is not faked** — physical-only; the live demo uses a real ESP32 + the pentester's
+  `ble_scan` demo fixture.
+- **Firmware blob:** `scan_hardcoded_creds` (default `strings` mode) is satisfied by the blob's
+  plaintext header; for `extract_firmware`(binwalk)+`parse_unix_users`, a stdlib-built gzip-tar
+  rootfs (uid-0 backdoor `nffsvc`) is appended. The binwalk leg runs on the Linux Pi/Docker target
+  (binwalk need not be present on the dev box; the rootfs is validated directly in tests).
+
+The original design (kept below for reference) specified three packages and `.env.demo`/runbook
+assets — the runbook (`docs/demo_runbook.md`) remains to be written; `.env.demo.example` ships in
+`nff-mock/targets/`.
+
+---
 
 Additive new tree `nff-mock/targets/`, leaving `device/` and `controller/` alone:
 
