@@ -4,10 +4,12 @@ import asyncio
 import json
 import logging
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from typing import Literal
 
 from nff_ota import fleet
 from nff_ota.client import get_client
+from nff_ota.config import settings
 from nff_ota.models.deployment import (
     CreateDeploymentParams,
     DeploymentInfo,
@@ -22,9 +24,74 @@ from nff_ota.storage import create_signed_url
 from nff_ota.transitions import validate_transition
 
 _TERMINAL_DD = {"success", "already-installed", "aborted", "decommissioned", "failure", "timed_out"}
+_FAILED_DD = {"failure", "timed_out"}
 _TERMINAL_DEP = {"finished", "aborted"}
+# A deployment the supervisor must not auto-finish: paused is a deliberate hold (auto-halt or
+# manual), with later-wave jobs intentionally left pending.
+_NO_FINISH_DEP = _TERMINAL_DEP | {"paused"}
 
 logger = logging.getLogger(__name__)
+
+
+# --------------------------------------------------------------------------- #
+# Pure phased-rollout helpers (no I/O — unit-tested directly)                  #
+# --------------------------------------------------------------------------- #
+
+def _parse_phases(raw: str | None) -> list[int] | None:
+    """Parse the stored CSV phases column ("5,25,100") into [5, 25, 100], or None."""
+    if not raw:
+        return None
+    try:
+        phases = [int(p) for p in str(raw).split(",") if p.strip() != ""]
+    except ValueError:
+        return None
+    return phases or None
+
+
+def _assign_waves(device_ids: list[str], phases: list[int] | None) -> dict[str, int]:
+    """Bucket devices into wave indices by cumulative phase percentage.
+
+    Devices are sorted by id so the canary cohort is deterministic across re-materializations.
+    phases is cumulative ("5,25,100"): the first 5% land in wave 0, the next 20% in wave 1, the
+    rest in wave 2. phases=None ⇒ every device is wave 0 (single-shot, historical behavior).
+    The last wave always absorbs any rounding remainder so every device gets a wave.
+    """
+    if not phases:
+        return {d: 0 for d in device_ids}
+    ordered = sorted(device_ids)
+    n = len(ordered)
+    waves: dict[str, int] = {}
+    last_wave = len(phases) - 1
+    for idx, dev in enumerate(ordered):
+        # cumulative fraction covered up to (and including) this device
+        covered = (idx + 1) / n * 100.0
+        wave = next((w for w, pct in enumerate(phases) if covered <= pct), last_wave)
+        waves[dev] = wave
+    return waves
+
+
+def _phase_decision(
+    *,
+    released_total: int,
+    failures: int,
+    non_terminal: int,
+    soak_elapsed: bool,
+    is_last_phase: bool,
+    failure_threshold: float,
+) -> Literal["halt", "advance", "wait"]:
+    """Decide what the supervisor should do for one phased deployment's current wave.
+
+    - halt    : the released cohort's failure rate exceeds the threshold → pause the rollout.
+    - advance : the released cohort is fully terminal, under threshold, and soaked → next wave.
+    - wait    : still soaking, or jobs still in flight, or already on the last phase.
+    """
+    if released_total <= 0:
+        return "wait"
+    if failures / released_total > failure_threshold:
+        return "halt"
+    if non_terminal == 0 and soak_elapsed and not is_last_phase:
+        return "advance"
+    return "wait"
 
 
 async def create_deployment(params: CreateDeploymentParams) -> DeploymentResult:
@@ -38,16 +105,32 @@ async def create_deployment(params: CreateDeploymentParams) -> DeploymentResult:
     if not fw_resp.data[0].get("storage_path"):
         return DeploymentResult(error=f"Firmware version {params.target_version!r} has no uploaded artifact")
 
-    # Validate group exists and has accepted devices
-    grp_resp = await client.table("device_groups").select("id").eq("id", params.device_group_id).execute()
+    # Validate group exists and has accepted devices. The group is the deployment's
+    # tenant anchor: project_id (NOT NULL on deployments/ota_jobs since migration 0018)
+    # is inherited from the targeted device_group.
+    grp_resp = await client.table("device_groups").select("id, project_id").eq("id", params.device_group_id).execute()
     if not grp_resp.data:
         return DeploymentResult(error=f"Device group {params.device_group_id!r} not found")
+    project_id = grp_resp.data[0].get("project_id")
+    if not project_id:
+        return DeploymentResult(error=f"Device group {params.device_group_id!r} has no project_id (tenant)")
 
     deployable, err = await _resolve_deployable_devices(
         params.device_group_id, params.target_version
     )
     if err:
         return DeploymentResult(error=err)
+
+    # Blast-radius confirmation (IOT_BRIDGE.md §3 gap #3): a large target needs explicit
+    # confirm=true so a fleet-wide push can't happen by accident.
+    if not params.confirm and len(deployable) > settings.confirm_threshold_devices:
+        return DeploymentResult(
+            error=(
+                f"deployment targets {len(deployable)} devices "
+                f"(> confirm threshold {settings.confirm_threshold_devices}); "
+                f"pass confirm=true to proceed"
+            )
+        )
 
     # Determine initial deployment status
     now = datetime.now(timezone.utc)
@@ -63,21 +146,28 @@ async def create_deployment(params: CreateDeploymentParams) -> DeploymentResult:
             return DeploymentResult(error=f"Invalid start_time format: {params.start_time!r}")
 
     deployment_id = str(uuid.uuid4())
+    phases_csv = ",".join(str(p) for p in params.phases) if params.phases else None
     dep_row = {
         "id": deployment_id,
         "name": params.name,
         "target_version": params.target_version,
         "device_group_id": params.device_group_id,
+        "project_id": project_id,
         "status": initial_status,
         "max_devices_in_flight": params.max_devices_in_flight,
         "retries": params.retries,
         "created_at": now.isoformat(),
         "start_time": params.start_time,
+        "phases": phases_csv,
+        "current_phase": 0,
+        "phase_entered_at": now.isoformat(),
+        "failure_threshold": params.failure_threshold,
+        "soak_seconds": params.soak_seconds,
     }
     dep_resp = await client.table("deployments").insert(dep_row).execute()
 
-    # Create per-device job rows in ota_jobs
-    await _insert_jobs(deployment_id, params.target_version, deployable)
+    # Create per-device job rows in ota_jobs (bucketed into waves when phased).
+    await _insert_jobs(deployment_id, params.target_version, deployable, project_id, params.phases)
 
     inserted = (dep_resp.data or [dep_row])[0]
     return DeploymentResult(deployment=_dep_row_to_info(inserted))
@@ -240,20 +330,34 @@ async def _resolve_deployable_devices(
     return compatible, None
 
 
-async def _insert_jobs(deployment_id: str, target_version: str, accepted: list[dict]) -> int:
-    """Insert pending ota_jobs rows for the given accepted devices. Returns the count."""
+async def _insert_jobs(
+    deployment_id: str,
+    target_version: str,
+    accepted: list[dict],
+    project_id: str | None = None,
+    phases: list[int] | None = None,
+) -> int:
+    """Insert pending ota_jobs rows for the given accepted devices. Returns the count.
+
+    ``project_id`` (NOT NULL on ota_jobs since migration 0018) is the deployment's tenant,
+    inherited from the targeted device_group by the callers. ``phases`` (cumulative cohort
+    percentages, or None for single-shot) buckets each device into a delivery ``wave``.
+    """
     client = get_client()
     now = datetime.now(timezone.utc).isoformat()
+    waves = _assign_waves([dev["id"] for dev in accepted], phases)
     job_rows = [
         {
             "id": str(uuid.uuid4()),
             "deployment_id": deployment_id,
             "device_id": dev["id"],
+            "project_id": project_id,
             "from_version": dev.get("current_firmware_version") or dev.get("firmware_version") or "unknown",
             "target_version": target_version,
             "status": "pending",
             "progress": 0,
             "attempts": 0,
+            "wave": waves.get(dev["id"], 0),
             "started_at": now,
             "last_updated": now,
         }
@@ -280,7 +384,13 @@ async def _materialize_jobs(
     deployable, err = await _resolve_deployable_devices(device_group_id, target_version)
     if err:
         return 0, err
-    return await _insert_jobs(deployment_id, target_version, deployable), None
+    client = get_client()
+    grp = await client.table("device_groups").select("project_id").eq("id", device_group_id).execute()
+    project_id = grp.data[0].get("project_id") if grp.data else None
+    # Honor the deployment's phased rollout (dashboard-created rows carry phases too).
+    dep = await client.table("deployments").select("phases").eq("id", deployment_id).execute()
+    phases = _parse_phases(dep.data[0].get("phases")) if dep.data else None
+    return await _insert_jobs(deployment_id, target_version, deployable, project_id, phases), None
 
 
 async def get_deployment_status(deployment_id: str) -> DeploymentStatusResult:
@@ -334,6 +444,35 @@ async def abort_deployment(deployment_id: str) -> DeploymentResult:
     return DeploymentResult(deployment=_dep_row_to_info(dep))
 
 
+async def resume_deployment(deployment_id: str) -> DeploymentResult:
+    """Resume a paused (auto-halted or manually paused) deployment.
+
+    Flips ``paused → active``, clears ``halted_reason``, and restarts the soak clock so the
+    supervisor re-evaluates the current wave before promoting. Undelivered later-wave jobs are
+    still ``pending`` (they were never cancelled), so the rollout simply continues from where it
+    halted. Use this after investigating a halt and deciding the firmware is in fact healthy.
+    """
+    client = get_client()
+    dep_resp = await client.table("deployments").select("*").eq("id", deployment_id).execute()
+    if not dep_resp.data:
+        return DeploymentResult(error=f"Deployment {deployment_id!r} not found")
+    dep = dep_resp.data[0]
+    try:
+        validate_transition("deployment", dep["status"], "active")
+    except ValueError as e:
+        return DeploymentResult(error=str(e))
+
+    now = datetime.now(timezone.utc).isoformat()
+    await client.table("deployments").update(
+        {"status": "active", "halted_reason": None, "phase_entered_at": now}
+    ).eq("id", deployment_id).execute()
+
+    dep["status"] = "active"
+    dep["halted_reason"] = None
+    dep["phase_entered_at"] = now
+    return DeploymentResult(deployment=_dep_row_to_info(dep))
+
+
 async def list_deployments(status: str | None = None) -> list[DeploymentInfo]:
     """List deployments, optionally filtered by status."""
     client = get_client()
@@ -351,6 +490,37 @@ def _identity_attributes(row: dict) -> dict:
     return attrs
 
 
+async def _rate_limited_devices(device_ids: list[str], exclude_deployment: str) -> set[str]:
+    """Devices that received an OTA from a *different* deployment within the rate-limit window.
+
+    Blast-radius control (IOT_BRIDGE.md §3 gap #3): "max 1 OTA / device / hour". Returns the set
+    of device ids to skip. Disabled when OTA_RATE_LIMIT_SECONDS <= 0. A device's jobs from THIS
+    deployment never rate-limit it (re-delivery of a later wave is expected).
+    """
+    if settings.rate_limit_seconds <= 0 or not device_ids:
+        return set()
+    client = get_client()
+    cutoff = (datetime.now(timezone.utc) - timedelta(seconds=settings.rate_limit_seconds)).isoformat()
+    resp = (
+        await client.table("ota_jobs")
+        .select("device_id, deployment_id, status, last_updated")
+        .in_("device_id", device_ids)
+        .gt("last_updated", cutoff)
+        .execute()
+    )
+    requested = set(device_ids)
+    limited: set[str] = set()
+    for r in (resp.data or []):
+        did = r.get("device_id")
+        if did not in requested:
+            continue
+        if r.get("deployment_id") == exclude_deployment:
+            continue  # this deployment's own jobs don't rate-limit it
+        if r.get("status") != "pending":  # a real OTA was dispatched to this device recently
+            limited.add(did)
+    return limited
+
+
 async def start_deployment(deployment_id: str) -> StartDeploymentResult:
     """Push the deployment's firmware to its devices via nff-fleet.
 
@@ -363,6 +533,10 @@ async def start_deployment(deployment_id: str) -> StartDeploymentResult:
     Per-device state moves ``pending → downloading`` on dispatch; a delivery failure
     moves ``downloading → failure``. Final ``installing/rebooting/success`` and
     rollback handling arrive via the deferred ota_result feedback loop — not here.
+
+    For a phased rollout only the current wave is delivered (wave <= current_phase, which
+    is 0 on first start); the supervisor releases later waves. Non-phased deployments have
+    every job at wave 0, so this delivers them all — the historical behavior.
     """
     client = get_client()
 
@@ -381,6 +555,14 @@ async def start_deployment(deployment_id: str) -> StartDeploymentResult:
         validate_transition("deployment", "scheduled", "active")
         await client.table("deployments").update({"status": "active"}).eq("id", deployment_id).execute()
         dep["status"] = "active"
+
+    return await _deliver_wave(dep, deployment_id, int(dep.get("current_phase") or 0))
+
+
+async def _deliver_wave(dep: dict, deployment_id: str, max_wave: int) -> StartDeploymentResult:
+    """Deliver pending jobs whose wave <= max_wave. Shared by start_deployment (wave 0) and the
+    rollout supervisor (each promoted wave)."""
+    client = get_client()
 
     # Resolve the firmware this deployment ships.
     version = dep["target_version"]
@@ -406,12 +588,13 @@ async def start_deployment(deployment_id: str) -> StartDeploymentResult:
     # a matching heartbeat build_id; real firmware ignores it. None for legacy artifacts.
     ota_build_id = fw.get("build_id")
 
-    # Devices still waiting for this update.
+    # Devices still waiting for this update, limited to the released wave(s).
     jobs_resp = (
         await client.table("ota_jobs")
         .select("*")
         .eq("deployment_id", deployment_id)
         .eq("status", "pending")
+        .lte("wave", max_wave)
         .execute()
     )
     pending = jobs_resp.data or []
@@ -430,21 +613,29 @@ async def start_deployment(deployment_id: str) -> StartDeploymentResult:
     }
     project_by_device = {d["id"]: d.get("project_id") for d in (dev_resp.data or [])}
 
+    # Blast-radius rate limit: devices that got an OTA from another deployment too recently.
+    rate_limited = await _rate_limited_devices(device_ids, deployment_id)
+
     sem = asyncio.Semaphore(max(1, dep["max_devices_in_flight"]))
     results: list[DeviceDeliveryResult] = []
 
     async def _deliver_one(job: dict) -> None:
         device_id = job["device_id"]
-        mqtt_id = mqtt_by_device.get(device_id)
-        if not mqtt_id:
+        if device_id in rate_limited:
             results.append(
                 DeviceDeliveryResult(
                     device_id=device_id,
                     outcome="skipped",
-                    detail="device has no identity_attributes.mqtt_id (fleet identity)",
+                    detail=f"rate-limited (another OTA < {int(settings.rate_limit_seconds)}s ago)",
                 )
             )
             return
+        # The fleet identifies a device by its device_id (== nff-ota devices.id, the cert CN it
+        # heartbeats under). identity_attributes['mqtt_id'] is only an override for devices keyed
+        # differently in the broker; when absent — the common case, since enrollment doesn't
+        # populate it — the MQTT identity IS the device_id. Falling back here is what lets
+        # connector/dashboard OTAs actually deliver instead of skipping every device.
+        mqtt_id = mqtt_by_device.get(device_id) or device_id
         project_id = project_by_device.get(device_id)
         if not project_id:
             results.append(
@@ -655,7 +846,9 @@ async def _recompute_deployment_status(deployment_id: str) -> None:
     if not dep_resp.data:
         return
     dep = dep_resp.data[0]
-    if dep["status"] in _TERMINAL_DEP:
+    # Don't finish a terminal deployment, nor a paused (halted/held) one — a paused rollout
+    # deliberately leaves later-wave jobs pending and must wait for resume_deployment.
+    if dep["status"] in _NO_FINISH_DEP:
         return
 
     jobs_resp = await client.table("ota_jobs").select("status").eq("deployment_id", deployment_id).execute()
@@ -680,4 +873,8 @@ def _dep_row_to_info(row: dict) -> DeploymentInfo:
         retries=row["retries"],
         created_at=str(row["created_at"]),
         start_time=str(row["start_time"]) if row.get("start_time") else None,
+        phases=_parse_phases(row.get("phases")),
+        current_phase=int(row.get("current_phase") or 0),
+        phase_entered_at=str(row["phase_entered_at"]) if row.get("phase_entered_at") else None,
+        halted_reason=row.get("halted_reason"),
     )

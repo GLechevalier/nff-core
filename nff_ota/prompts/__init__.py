@@ -34,31 +34,42 @@ Step 5 – Confirm completion:
 
     @root.prompt(name="fleet_rollout_plan", description="Design a phased rollout plan for a large IoT fleet")
     def fleet_rollout_plan(total_devices: int, risk_tolerance: str = "medium") -> str:
-        canary_pct = 2 if risk_tolerance == "low" else 5
-        phase2_pct = 20 if risk_tolerance == "low" else 25
-        canary_count = max(1, total_devices * canary_pct // 100)
-        phase2_count = max(canary_count + 1, total_devices * phase2_pct // 100)
+        # Lower risk → smaller canary, tighter halt threshold, longer soak.
+        phases = "2,20,100" if risk_tolerance == "low" else "5,25,100"
+        threshold = 0.01 if risk_tolerance == "low" else 0.05
+        soak_hours = 24 if risk_tolerance == "low" else 12
+        canary_pct = phases.split(",")[0]
 
         return f"""Fleet Rollout Plan — {total_devices} devices, risk={risk_tolerance}
 
-Phase 1 – Canary (~{canary_pct}%, ≈{canary_count} devices):
-  1. Create group 'canary' with {canary_count} representative devices (different hardware revisions).
-  2. Deploy to canary. Wait minimum 24h or until all report success.
-  3. Gate: 0 failures. Any failure → abort + rollback investigation.
+Phased rollout is now AUTOMATIC: one deployment spans the whole rollout. Pass `phases` to
+create_deployment and the nff-ota supervisor advances each cohort once it proves healthy, or
+auto-halts (pauses) the whole deployment if a cohort's failure rate crosses the threshold. You do
+NOT create a separate group/deployment per phase anymore.
 
-Phase 2 – Early adopters (~{phase2_pct}%, ≈{phase2_count} devices):
-  1. Create group 'early-adopters'. Exclude canary devices.
-  2. Deploy with max_devices_in_flight=50.
-  3. Monitor for 12h. Gate: failure_rate < 1%.
+Single call:
+  create_deployment(
+      name="...", target_version="<version>", device_group_id="<group with ALL devices>",
+      phases=[{phases.replace(",", ", ")}],          # canary {canary_pct}% → 25% → 100%
+      failure_threshold={threshold},                 # auto-halt (pause) if a cohort exceeds this
+      soak_seconds={soak_hours * 3600},              # watch each cohort this long before advancing
+      max_devices_in_flight=50,                      # concurrency cap within a cohort
+      retries=3,
+      confirm=true,                                  # required when targeting a large fleet
+  )
+  then start_deployment(deployment_id).
 
-Phase 3 – Broad rollout (remaining devices):
-  1. Create group 'remaining' with all non-updated devices.
-  2. Deploy with max_devices_in_flight=100.
-  3. Monitor until deployment.status == 'finished'.
+What the supervisor does automatically:
+  - Delivers cohort 1 (the canary) only; the rest of the fleet stays `pending` (not yet sent).
+  - After all canary devices report AND the soak elapses AND failure_rate <= {threshold}, it
+    promotes to the next cohort and delivers it. Repeats to 100%.
+  - If any cohort's failure_rate exceeds {threshold}, it sets the deployment to `paused` with a
+    `halted_reason` and stops releasing further cohorts — undelivered devices never get the bad
+    image (blast radius capped). Per-device automatic rollback still heals the ones that did get it.
 
-Safety controls:
-  - Set retries=3 on all deployments (automatic retry on transient failures).
-  - Keep the previous artifact registered until Phase 3 is complete.
-  - Use abort_deployment immediately if failure_count / total_count > 5%.
-  - After each phase, read deployments://v1/{{deployment_id}} for a full breakdown.
+Operating a rollout:
+  - Poll get_deployment_status(deployment_id): watch `current_phase` climb and per-status counts.
+  - If it goes `paused`: read `halted_reason`, investigate. Then either resume_deployment(id) to
+    continue, or abort_deployment(id) to end it and ship a fixed artifact as a new deployment.
+  - Keep the previous artifact registered until the rollout reaches 100%.
 """

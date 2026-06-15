@@ -39,5 +39,18 @@ class OtaSettings(BaseSettings):
     deployment_poller_enabled: bool = True
     deployment_poller_interval: float = 15.0  # how often the poller sweeps
 
+    # Phased / canary rollout supervisor (IOT_BRIDGE.md §3 gap #2). Watches each active
+    # phased deployment: auto-advances a healthy, soaked wave to the next cohort, or pauses
+    # the deployment when a wave's failure rate exceeds its failure_threshold (auto-halt).
+    supervisor_enabled: bool = True
+    supervisor_interval: float = 30.0          # how often the supervisor sweeps
+    default_failure_threshold: float = 0.05    # default per-deployment auto-halt threshold (5%)
+
+    # Blast-radius controls (gap #3).
+    confirm_threshold_devices: int = 50  # creating a deployment targeting more than this many
+                                         # devices requires confirm=true
+    rate_limit_seconds: float = 3600.0   # min seconds between OTAs to the same device across
+                                         # different deployments (0 disables the rate limit)
+
 
 settings = OtaSettings()

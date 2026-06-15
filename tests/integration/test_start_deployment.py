@@ -53,7 +53,7 @@ def _table_se(responses: dict[str, list[list]]):
 
     def table_se(name):
         t = MagicMock()
-        for chain in ("select", "insert", "update", "eq", "in_", "order"):
+        for chain in ("select", "insert", "update", "eq", "in_", "order", "limit", "lt", "lte", "gt"):
             getattr(t, chain).return_value = t
 
         async def execute():

@@ -20,7 +20,7 @@ import asyncio
 import logging
 import threading
 
-from nff_ota import poller, reaper
+from nff_ota import poller, reaper, supervisor
 from nff_ota.client import init_client
 from nff_ota.config import settings
 
@@ -38,6 +38,10 @@ async def _run() -> None:
         tasks.append(asyncio.create_task(poller._loop()))
     else:
         logger.info("poller disabled (OTA_DEPLOYMENT_POLLER_ENABLED=false)")
+    if settings.supervisor_enabled:
+        tasks.append(asyncio.create_task(supervisor._loop()))
+    else:
+        logger.info("supervisor disabled (OTA_SUPERVISOR_ENABLED=false)")
     await asyncio.gather(*tasks)
 
 
@@ -63,8 +67,8 @@ def start() -> None:
     _thread = threading.Thread(target=_thread_main, name="nff-ota-sweeps", daemon=True)
     _thread.start()
     logger.info(
-        "background sweeps started (poller_interval=%ss reaper_interval=%ss)",
-        settings.deployment_poller_interval, settings.reaper_interval,
+        "background sweeps started (poller_interval=%ss reaper_interval=%ss supervisor_interval=%ss)",
+        settings.deployment_poller_interval, settings.reaper_interval, settings.supervisor_interval,
     )
 
 

@@ -24,6 +24,33 @@ class CreateDeploymentParams(BaseModel):
     max_devices_in_flight: int = Field(default=10, ge=1)
     retries: int = Field(default=3, ge=0)
 
+    # Phased / canary rollout (IOT_BRIDGE.md §3 gap #2). Cumulative cohort percentages,
+    # strictly ascending and ending at 100 — e.g. [5, 25, 100] is canary 5% → 25% → all.
+    # None (the default) means a single-shot rollout: every device is wave 0, exactly the
+    # historical behavior. The supervisor auto-advances a healthy, soaked wave and pauses
+    # the deployment if a wave's failure rate exceeds failure_threshold.
+    phases: list[int] | None = None
+    failure_threshold: float = Field(default=0.05, ge=0.0, le=1.0)
+    soak_seconds: int = Field(default=0, ge=0)
+    # Blast-radius confirmation (gap #3): targeting more than OTA_CONFIRM_THRESHOLD_DEVICES
+    # devices requires confirm=true, so a fleet-wide push can't happen by accident.
+    confirm: bool = False
+
+    @field_validator("phases")
+    @classmethod
+    def _check_phases(cls, v: list[int] | None) -> list[int] | None:
+        if v is None:
+            return None
+        if not v:
+            raise ValueError("phases must be non-empty (or null for a single-shot rollout)")
+        if any(p <= 0 or p > 100 for p in v):
+            raise ValueError("each phase percentage must be in (0, 100]")
+        if any(v[i] >= v[i + 1] for i in range(len(v) - 1)):
+            raise ValueError("phases must be strictly ascending")
+        if v[-1] != 100:
+            raise ValueError("the last phase must be 100 (the full fleet)")
+        return v
+
 
 class ReportDeviceStatusParams(BaseModel):
     device_id: str = Field(min_length=1)
@@ -51,6 +78,11 @@ class DeploymentInfo(BaseModel):
     retries: int
     created_at: str
     start_time: str | None
+    # Phased rollout progress (null/0 for single-shot deployments).
+    phases: list[int] | None = None
+    current_phase: int = 0
+    phase_entered_at: str | None = None
+    halted_reason: str | None = None
 
 
 class DeploymentStatus(BaseModel):

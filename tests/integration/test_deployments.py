@@ -25,7 +25,7 @@ def _named_tables(responses: dict[str, list[list[dict]]]):
 
     def side_effect(name):
         t = MagicMock()
-        for m in ("select", "insert", "upsert", "update", "delete", "eq", "in_", "neq", "order", "limit", "lt", "gt"):
+        for m in ("select", "insert", "upsert", "update", "delete", "eq", "in_", "neq", "order", "limit", "lt", "lte", "gt"):
             getattr(t, m).return_value = t
 
         async def execute():
@@ -119,7 +119,7 @@ class TestCreateDeployment:
         fw_row = {"version": "1.0.0", "storage_path": "firmware/1.0.0.bin" if has_binary else None}
         responses: dict[str, list[list]] = {
             "firmware_versions": [[fw_row] if version_exists else []],
-            "device_groups": [[{"id": "grp-1"}] if group_exists else []],
+            "device_groups": [[{"id": "grp-1", "project_id": "proj-1"}] if group_exists else []],
             "device_group_members": [[{"device_id": d} for d in member_ids]],
             "devices": [[{"id": d, "current_firmware_version": "0.9.0", "firmware_version": "0.9.0"} for d in accepted_ids]],
             "deployments": [[_dep_row()]],
@@ -251,7 +251,7 @@ class TestDeployGate:
         fw_seq = [[fw_types_row]] if for_materialize else [[fw_storage_row], [fw_types_row]]
         responses: dict[str, list[list]] = {
             "firmware_versions": fw_seq,
-            "device_groups": [[{"id": "grp-1"}]],
+            "device_groups": [[{"id": "grp-1", "project_id": "proj-1"}]],
             "device_group_members": [[{"device_id": m} for m in members]],
             "devices": [[
                 {
