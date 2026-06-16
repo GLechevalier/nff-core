@@ -91,6 +91,9 @@ jobs:
           # the new layers are uploaded (GHCR dedups the rest by digest).
           cache-from: type=gha
           cache-to: type=gha,mode=max
+          labels: |
+            org.opencontainers.image.version=v${{ needs.version.outputs.version }}
+            org.opencontainers.image.revision=${{ github.sha }}
           tags: |
             ${{ env.REGISTRY }}/${{ env.IMAGE_OWNER }}/${{ env.IMAGE_NAME }}:latest
             ${{ env.REGISTRY }}/${{ env.IMAGE_OWNER }}/${{ env.IMAGE_NAME }}:v${{ needs.version.outputs.version }}
