@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "nff-diagnosis"
-version = "0.1.0"
+version = "0.1.1"
 description = "Diagnosis layer for ESP32 embedded device crashes"
 requires-python = ">=3.11"
 authors = [{ name = "Gauthier Lechevalier", email = "gauthier.lechevalier26@gmail.com" }]
