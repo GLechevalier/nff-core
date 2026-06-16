@@ -18,8 +18,14 @@ class NffFleetSettings(BaseSettings):
 
     command_timeout: float = 30.0
 
-    heartbeat_timeout: float = 90.0   # device marked offline after this many seconds of silence
-    reaper_interval: float = 30.0     # how often the reaper sweeps for stale devices
+    # Offline detection is per-device: a device declares its own heartbeat frequency
+    # (heartbeat "interval_s") and is marked offline after heartbeat_miss_factor beats
+    # in a row are missed (default_heartbeat_interval_s applies to devices that haven't
+    # reported one). heartbeat_timeout is kept only as a legacy reference/floor.
+    heartbeat_timeout: float = 90.0           # legacy global timeout (superseded by per-device rule)
+    default_heartbeat_interval_s: float = 30.0  # fallback interval when a device hasn't reported one
+    heartbeat_miss_factor: float = 2.0          # missed beats in a row before offline
+    reaper_interval: float = 30.0             # how often the reaper sweeps for stale devices
 
     # Claim-enrollment fulfillment worker: how often it scans for accepted-but-unfulfilled
     # enrollments and how many it issues per sweep (rate limit for 100k-scale accept-all).

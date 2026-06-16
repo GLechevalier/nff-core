@@ -10,6 +10,9 @@ class DeviceInfo:
     project_id: str | None = None
     last_seen: float = field(default_factory=time.time)
     heartbeat_payload: dict = field(default_factory=dict)
+    # Device-attested heartbeat frequency (heartbeat "interval_s"). None until the
+    # device reports it (older firmware); the reaper then falls back to the default.
+    heartbeat_interval_s: int | None = None
 
 
 class DeviceRegistry:
@@ -26,6 +29,9 @@ class DeviceRegistry:
         info.status = payload.get("status", "online")
         info.last_seen = time.time()
         info.heartbeat_payload = payload
+        interval = payload.get("interval_s")
+        if interval is not None:
+            info.heartbeat_interval_s = int(interval)
         if project_id:
             info.project_id = project_id
 
@@ -46,13 +52,23 @@ class DeviceRegistry:
     def online_devices(self) -> list[DeviceInfo]:
         return [d for d in self._devices.values() if d.status == "online"]
 
-    def stale_online_devices(self, timeout: float) -> list[DeviceInfo]:
-        cutoff = time.time() - timeout
-        return [
-            d
-            for d in self._devices.values()
-            if d.status == "online" and d.last_seen < cutoff
-        ]
+    def stale_online_devices(
+        self, default_interval: float, miss_factor: float = 2.0
+    ) -> list[DeviceInfo]:
+        """Online devices that have missed `miss_factor` heartbeats in a row.
+
+        The offline threshold is per-device: miss_factor × the device's own reported
+        heartbeat_interval_s (or default_interval when the device hasn't reported one).
+        """
+        now = time.time()
+        stale = []
+        for d in self._devices.values():
+            if d.status != "online":
+                continue
+            interval = d.heartbeat_interval_s or default_interval
+            if d.last_seen < now - miss_factor * interval:
+                stale.append(d)
+        return stale
 
 
 registry = DeviceRegistry()

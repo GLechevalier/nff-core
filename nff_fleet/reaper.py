@@ -14,13 +14,18 @@ async def _reaper_loop() -> None:
     try:
         while True:
             await asyncio.sleep(settings.reaper_interval)
-            for d in registry.stale_online_devices(settings.heartbeat_timeout):
+            for d in registry.stale_online_devices(
+                settings.default_heartbeat_interval_s, settings.heartbeat_miss_factor
+            ):
                 registry.set_offline(d.device_id)
                 db.upsert_device(d.device_id, {"status": "offline"})
+                interval = d.heartbeat_interval_s or settings.default_heartbeat_interval_s
                 logger.info(
-                    "Device %s marked offline (no heartbeat for >%ss)",
+                    "Device %s marked offline (no heartbeat for >%ss = %s× its %ss interval)",
                     d.device_id,
-                    settings.heartbeat_timeout,
+                    settings.heartbeat_miss_factor * interval,
+                    settings.heartbeat_miss_factor,
+                    interval,
                 )
     except asyncio.CancelledError:
         pass
@@ -30,8 +35,9 @@ async def start_reaper() -> None:
     global _reaper_task
     _reaper_task = asyncio.create_task(_reaper_loop())
     logger.info(
-        "Reaper started (timeout=%ss, interval=%ss)",
-        settings.heartbeat_timeout,
+        "Reaper started (per-device: %s× interval, default=%ss, sweep=%ss)",
+        settings.heartbeat_miss_factor,
+        settings.default_heartbeat_interval_s,
         settings.reaper_interval,
     )
 

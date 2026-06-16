@@ -98,6 +98,10 @@ async def _upsert_device(device_id: str, payload: dict[str, Any]) -> None:
             # right project (real ESP32s omit it; the RPC COALESCE-preserves any known
             # value). See nff-db migration 0029.
             "p_project_id": payload.get("project_id") or None,
+            # Device-attested heartbeat frequency; the reaper + dashboard login reconcile
+            # mark a device offline after 2× this many seconds. Omitted by older firmware,
+            # in which case the RPC COALESCE-preserves any previously-stored value.
+            "p_heartbeat_interval_s": payload.get("interval_s"),
         },
     ).execute()
 
@@ -273,12 +277,19 @@ async def _ingest_crash(device_id: str, payload: dict[str, Any]) -> None:
 
     frames = payload.get("backtrace", [])
     if frames:
-        await _client.table("backtrace_frames").insert(
-            [
-                {"crash_id": crash_id, "position": i, "address": addr, "resolved": None}
-                for i, addr in enumerate(frames)
-            ]
-        ).execute()
+        # A frame is either a bare address string (a real ESP32 reports raw addresses,
+        # symbolicated later via addr2line) or a {address, resolved} dict (the mock
+        # reports pre-resolved frames so the dashboard backtrace is readable offline).
+        rows = []
+        for i, frame in enumerate(frames):
+            if isinstance(frame, dict):
+                addr = frame.get("address")
+                resolved = frame.get("resolved")
+            else:
+                addr = frame
+                resolved = None
+            rows.append({"crash_id": crash_id, "position": i, "address": addr, "resolved": resolved})
+        await _client.table("backtrace_frames").insert(rows).execute()
 
     rtc = payload.get("rtc_log", [])
     if rtc:

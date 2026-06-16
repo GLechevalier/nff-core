@@ -178,15 +178,32 @@ def generate_ca() -> None:
     _CA_CERT_PATH().write_bytes(cert.public_bytes(serialization.Encoding.PEM))
 
 
-def issue_server_cert(broker_ip: str) -> tuple[Path, Path]:
-    """Issue a P-256 server cert signed by the CA, with SAN for broker_ip and localhost."""
+def issue_server_cert(sans: str | list[str]) -> tuple[Path, Path]:
+    """Issue a P-256 server cert signed by the **root** CA, valid for every address in ``sans``.
+
+    ``sans`` is one address or a list of them; each entry is classified as an IP literal or a
+    DNS name automatically, so a single cert can cover several broker addresses at once
+    (e.g. a laptop reachable at two LAN IPs, or a VPS reachable by domain). Loopback
+    (``127.0.0.1`` / ``localhost``) is always included for local tooling.
+
+    Re-mints ONLY ``server.crt`` / ``server.key`` — the root CA, the per-project intermediate
+    CAs, and all device leaf certs are untouched, so devices that pin the root keep working.
+    Use this (not ``generate_ca``/``init``) when the broker's address changes.
+    """
+    if isinstance(sans, str):
+        sans = [sans]
     ca_key, ca_cert = _load_ca()
     name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "nff-fleet-server")])
     now = _now()
-    san = x509.SubjectAlternativeName([
-        x509.IPAddress(ipaddress.ip_address(broker_ip)),
-        x509.DNSName("localhost"),
-    ])
+    alt = []
+    for entry in [*sans, "127.0.0.1", "localhost"]:
+        if any(getattr(g, "value", None) == entry or str(getattr(g, "value", "")) == entry for g in alt):
+            continue  # de-dup repeated addresses
+        try:
+            alt.append(x509.IPAddress(ipaddress.ip_address(entry)))
+        except ValueError:
+            alt.append(x509.DNSName(entry))
+    san = x509.SubjectAlternativeName(alt)
     cert = (
         x509.CertificateBuilder()
         .subject_name(name)

@@ -45,6 +45,31 @@ def provision_init(broker_ip: str):
     click.echo(f"Server key         : {key_path}")
 
 
+@provision.command("server-cert")
+@click.option("--san", "sans", multiple=True, required=True,
+              help="Address the broker is reachable at — IP or DNS name. Repeatable, e.g. "
+                   "--san 172.20.10.3 --san 192.168.1.11 --san waves.black")
+def provision_server_cert(sans: tuple[str, ...]):
+    """Re-mint ONLY the broker server cert (server.crt/server.key) for the given SANs.
+
+    Signed by the existing root CA, so the CA and every device cert are left untouched and
+    devices that pin the root keep working. Use this — not `init` — when the broker's
+    address changes (switching networks, moving to a VPS); `init` regenerates the CA and
+    invalidates all device certs. Restart the broker afterwards so it serves the new cert.
+    """
+    from cryptography.x509 import SubjectAlternativeName, load_pem_x509_certificate
+    from nff_fleet.provisioning.ca import issue_server_cert
+
+    settings.certs_dir.mkdir(parents=True, exist_ok=True)
+    cert_path, key_path = issue_server_cert(list(sans))
+    cert = load_pem_x509_certificate(cert_path.read_bytes())
+    ext = cert.extensions.get_extension_for_class(SubjectAlternativeName).value
+    click.echo(f"Server cert        : {cert_path}")
+    click.echo(f"Server key         : {key_path}")
+    click.echo("SAN                : " + ", ".join(str(g.value) for g in ext))
+    click.echo("Restart the broker (nff-fleet start) so it serves the new cert.")
+
+
 @provision.command("new-device")
 @click.option("--id", "device_id", required=True, help="Device identifier (e.g. device-42)")
 @click.option("--project", "project_id", required=True, help="Project/tenant the device is bound to")
