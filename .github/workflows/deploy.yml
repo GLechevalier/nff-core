@@ -63,7 +63,8 @@ jobs:
           git add pyproject.toml
           git commit -m "chore: bump ${IMAGE_NAME} to v${{ steps.bump.outputs.version }} [skip ci]"
           git tag "v${{ steps.bump.outputs.version }}"
-          git push origin HEAD:main --follow-tags
+          git push origin HEAD:main
+          git push origin "v${{ steps.bump.outputs.version }}"
 
   # 2. Build the image (BuildKit layer cache) and push to GHCR ------------------
   build:
