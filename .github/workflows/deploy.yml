@@ -1,0 +1,143 @@
+name: Deploy
+
+# Push to main -> bump+tag the version -> build BOTH images (controller + device,
+# cached layers only) -> push to GHCR -> on the VPS, recreate the controller service
+# and pre-pull the device image so the controller can spawn mocks from it.
+#
+# Why two images:
+#   * nff-mock-controller  - the long-running service (:3004) that spawns/reaps mocks.
+#   * nff-mock-device      - NOT a service; the controller `docker run`s one per mock.
+#     The controller reaches Docker through a SCOPED socket-proxy that DENIES image
+#     pulls, so the device image must already be on the box -> the deploy job pulls it.
+#
+# Prerequisite: the VPS /opt/nff/docker-compose.yml must already define the
+# nff-mock-controller + mock-docker-socket-proxy services (ship it once with
+# `deploy/deploy.sh --config-only` from the parent repo).
+#
+# Required secrets:
+#   VPS_SSH_KEY  - private key for ubuntu@<VPS_HOST>
+#   GHCR_PAT     - optional; PAT with read:packages for the VPS-side docker login.
+on:
+  push:
+    branches: [main]
+
+concurrency:
+  group: deploy-main
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  packages: write
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_OWNER: glechevalier
+  SERVICE: nff-mock-controller   # the compose service recreated on the VPS
+  DEVICE_IMAGE: nff-mock-device  # spawned per-mock; pre-pulled, never a service
+  VPS_HOST: 152.228.219.243
+  VPS_USER: ubuntu
+  VPS_PATH: /opt/nff
+
+jobs:
+  # 1. Bump the patch version (controller/pyproject.toml is the repo's canonical
+  #    version), commit it back to main, create a git tag -----------------------
+  version:
+    if: ${{ !contains(github.event.head_commit.message, '[skip ci]') }}
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.bump.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
+
+      - name: Bump patch version (controller/pyproject.toml)
+        id: bump
+        run: |
+          python - <<'PY' >> "$GITHUB_OUTPUT"
+          import re, pathlib
+          p = pathlib.Path("controller/pyproject.toml")
+          t = p.read_text()
+          m = re.search(r'version\s*=\s*"(\d+)\.(\d+)\.(\d+)"', t)
+          maj, mn, pa = int(m[1]), int(m[2]), int(m[3])
+          v = f"{maj}.{mn}.{pa + 1}"
+          p.write_text(re.sub(r'version\s*=\s*"\d+\.\d+\.\d+"', f'version = "{v}"', t, count=1))
+          print(f"version={v}")
+          PY
+
+      - name: Commit and tag
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add controller/pyproject.toml
+          git commit -m "chore: bump nff-mock to v${{ steps.bump.outputs.version }} [skip ci]"
+          git tag "v${{ steps.bump.outputs.version }}"
+          git push origin HEAD:main
+          git push origin "v${{ steps.bump.outputs.version }}"
+
+  # 2. Build + push both images (controller and device) in parallel ------------
+  build:
+    needs: version
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - component: controller
+            context: controller
+          - component: device
+            context: device
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: v${{ needs.version.outputs.version }}
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.context }}
+          push: true
+          cache-from: type=gha,scope=${{ matrix.component }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.component }}
+          labels: |
+            org.opencontainers.image.version=v${{ needs.version.outputs.version }}
+            org.opencontainers.image.revision=${{ github.sha }}
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_OWNER }}/nff-mock-${{ matrix.component }}:latest
+            ${{ env.REGISTRY }}/${{ env.IMAGE_OWNER }}/nff-mock-${{ matrix.component }}:v${{ needs.version.outputs.version }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_OWNER }}/nff-mock-${{ matrix.component }}:${{ github.sha }}
+
+  # 3. On the VPS: recreate the controller + its proxy, pre-pull the device image
+  deploy:
+    needs: [version, build]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy nff-mock to the VPS
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ env.VPS_HOST }}
+          username: ${{ env.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          script: |
+            set -e
+            cd ${{ env.VPS_PATH }}
+            echo "${{ secrets.GHCR_PAT || secrets.GITHUB_TOKEN }}" \
+              | docker login ${{ env.REGISTRY }} -u ${{ env.IMAGE_OWNER }} --password-stdin
+            export TAG=latest
+            # Pre-pull the device image: the controller's scoped socket-proxy can't pull,
+            # so `docker run nff-mock-device` only works if it's already on the box.
+            docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_OWNER }}/${{ env.DEVICE_IMAGE }}:latest
+            # Recreate the controller (and its scoped proxy). Unlike the other services'
+            # "only if already running" guard, the controller is meant to run in prod, so
+            # this starts it on first deploy and recreates it on subsequent ones.
+            docker compose pull ${{ env.SERVICE }}
+            docker compose up -d --no-deps --force-recreate mock-docker-socket-proxy ${{ env.SERVICE }}
+            echo "nff-mock-controller is up; device image staged for spawning."
+            docker image prune -f --filter "until=24h" || true

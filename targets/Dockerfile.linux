@@ -1,0 +1,20 @@
+# nff-mock-linux — deliberately-vulnerable embedded-Linux target (demo only).
+FROM python:3.12-slim AS builder
+WORKDIR /app
+COPY pyproject.toml ./
+COPY nff_mock_targets/ nff_mock_targets/
+RUN pip install --no-cache-dir --upgrade pip build && \
+    pip wheel --no-cache-dir --wheel-dir /wheels ".[insecure]"
+
+FROM python:3.12-slim
+WORKDIR /app
+COPY --from=builder /wheels /wheels
+RUN pip install --no-cache-dir /wheels/*.whl && rm -rf /wheels
+
+# Inside the container we run as root so the standard low ports (22/23/80) bind
+# cleanly — these are throwaway vulnerable targets on an isolated demo network.
+# Listen on all interfaces *within the container*; the compose file maps to loopback.
+ENV NFF_TARGET_LINUX_BIND=0.0.0.0
+
+EXPOSE 22 23 80 5683/udp
+ENTRYPOINT ["nff-mock-linux"]
