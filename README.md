@@ -10,7 +10,7 @@ a board. Spin up as many as you like — **one process == one device identity**.
 
 Each mock faithfully mirrors the firmware it imitates, so the wire protocol stays real:
 
-- **Announces itself.** Publishes a retained `online` heartbeat (and an `offline` Last
+- **Announces itself.** Publishes a retained `online` heartbeat (and an `offline` Last 
   Will), then a jittering telemetry heartbeat on an interval — heap, uptime, RSSI — so it
   shows up live in the dashboard / `fleet_list_devices`.
 - **Answers signed commands.** Verifies every command exactly like the SDK (ECDSA-P256
