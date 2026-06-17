@@ -183,12 +183,18 @@ async def _provision_batch(request: Request) -> JSONResponse:
 
         # The project must have its intermediate CA + signing key before any device claims into it.
         signing.ensure_project_key(project_id)
-        batch_id = await db.create_enrollment_batch(project_id, count, None)
+        # Idempotency: reuse a still-valid active batch for this project so repeat
+        # onboarding runs don't pile up batches + certs. The leaf already exists for a
+        # reused batch, so render the header from stored material without re-issuing.
+        batch_id = await db.get_active_batch(project_id)
+        reused = batch_id is not None
         if not batch_id:
-            return JSONResponse(
-                {"error": "persistence disabled — cannot create batch"}, status_code=503
-            )
-        batch_mod.issue_batch_cert(project_id, batch_id)
+            batch_id = await db.create_enrollment_batch(project_id, count, None)
+            if not batch_id:
+                return JSONResponse(
+                    {"error": "persistence disabled — cannot create batch"}, status_code=503
+                )
+            batch_mod.issue_batch_cert(project_id, batch_id)
         header_path = write_batch_bootstrap_h(project_id, batch_id)
         # Return the rendered header inline so a remote `nff provision batch` can write it locally
         # (the path is only meaningful on a co-located deployment sharing /data).
@@ -201,6 +207,7 @@ async def _provision_batch(request: Request) -> JSONResponse:
             "batch_id": batch_id,
             "project_id": project_id,
             "expires_in_hours": 24,
+            "reused": reused,
             "bootstrap_header_path": str(header_path),
             "bootstrap_header": header_content,
         }

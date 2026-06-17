@@ -197,6 +197,30 @@ async def get_accepted_unfulfilled(limit: int = 100) -> list[dict[str, Any]]:
     return resp.data or []
 
 
+async def get_active_batch(project_id: str) -> str | None:
+    """Newest non-expired active batch for a project, or None.
+
+    Lets a repeated onboarding (`nff init` re-run) reuse the existing bootstrap
+    credential instead of minting a fresh batch + cert every time. expires_at is
+    filtered in the future so we never hand back a batch a device would announce
+    into only to be rejected as expired by record_enrollment's 24h TTL check."""
+    if not _enabled:
+        return None
+    now_iso = datetime.now(timezone.utc).isoformat()
+    resp = await (
+        _client.table("enrollment_batches")
+        .select("id")
+        .eq("project_id", project_id)
+        .eq("state", "active")
+        .gt("expires_at", now_iso)
+        .order("created_at", desc=True)
+        .limit(1)
+        .execute()
+    )
+    rows = resp.data or []
+    return rows[0]["id"] if rows else None
+
+
 async def provision_claimed_device(device_id: str, project_id: str) -> None:
     """Write the devices row at claim time (ota_status='pending'). Ownership is recorded here,
     not lazily on heartbeat."""
