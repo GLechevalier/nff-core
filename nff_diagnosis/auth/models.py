@@ -21,3 +21,22 @@ class TokenResponse(BaseModel):
     refresh_token: str
     token_type: str
     expires_in: int
+
+
+class ProjectResponse(BaseModel):
+    project_id: str
+
+
+class ProvisionBatchRequest(BaseModel):
+    # Optional expected batch size; the fleet rejects enrollments beyond it as a
+    # cloned-credential anomaly. None = no hard quota (fine for self-serve onboarding).
+    count: int | None = None
+
+
+class ProvisionBatchResponse(BaseModel):
+    project_id: str
+    batch_id: str
+    reused: bool
+    # The full bootstrap credentials.h text (certs + shared batch key). The CLI writes
+    # this into the bootstrap sketch before flashing.
+    credentials_h: str
