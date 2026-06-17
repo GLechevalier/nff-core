@@ -31,6 +31,8 @@ import base64
 import binascii
 import hmac
 import tempfile
+import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 
 from starlette.requests import Request
@@ -236,7 +238,109 @@ async def _build_deploy(request: Request) -> JSONResponse:
     )
 
 
+async def _ensure_mock_target(request: Request) -> JSONResponse:
+    """Make a spawned nff-mock targetable by a deployment.
+
+    A mock heartbeats through the fleet and gets a cert, but nff-ota targets devices via
+    ``device_groups`` membership + ``ota_status='accepted'`` (see _resolve_accepted_devices),
+    and a deployment inherits its tenant from the group's ``project_id``. This route enrols
+    the mock: it upserts the device row (accepted, with project_id + device_type), finds or
+    creates the named group (carrying project_id), and adds the device to it — all idempotent.
+    nff-builder calls this for the simulated canary tier before build-deploy.
+
+        Body: {device_id, project_id, group_name, device_type?="nff-mock-esp32"}
+        -> {device_group_id, device_id, device_type}
+    """
+    if not _secret_ok(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+
+    await ensure_client()
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "invalid JSON body"}, status_code=400)
+
+    device_id = body.get("device_id")
+    project_id = body.get("project_id")
+    group_name = body.get("group_name")
+    device_type = body.get("device_type") or "nff-mock-esp32"
+    if not isinstance(device_id, str) or not device_id:
+        return JSONResponse({"error": "device_id is required"}, status_code=400)
+    if not isinstance(project_id, str) or not project_id:
+        return JSONResponse({"error": "project_id is required"}, status_code=400)
+    if not isinstance(group_name, str) or not group_name:
+        return JSONResponse({"error": "group_name is required"}, status_code=400)
+
+    client = get_client()
+    now = datetime.now(timezone.utc).isoformat()
+
+    # 1. Upsert the device row: accepted, scoped to the project, with a known device_type so
+    #    the deploy-time compatibility gate matches. Don't clobber a project_id/device_type
+    #    the fleet heartbeat already set, but always force ota_status to accepted.
+    existing = await client.table("devices").select("*").eq("id", device_id).execute()
+    if existing.data:
+        row = existing.data[0]
+        update: dict = {"ota_status": "accepted"}
+        if not row.get("project_id"):
+            update["project_id"] = project_id
+        if not (row.get("device_type") or "").strip():
+            update["device_type"] = device_type
+        await client.table("devices").update(update).eq("id", device_id).execute()
+        device_type = row.get("device_type") or device_type
+    else:
+        try:
+            await client.table("devices").insert(
+                {
+                    "id": device_id,
+                    "name": device_id,
+                    "project_id": project_id,
+                    "device_type": device_type,
+                    "status": "offline",
+                    "firmware_version": "0.0.0",
+                    "agent_connected": False,
+                    "ota_status": "accepted",
+                    "current_firmware_version": None,
+                    "created_at": now,
+                }
+            ).execute()
+        except Exception as exc:  # noqa: BLE001
+            return JSONResponse({"error": f"device upsert failed: {exc}"}, status_code=502)
+
+    # 2. Find or create the named group, carrying the tenant (deployments need group.project_id).
+    grp = (
+        await client.table("device_groups")
+        .select("id")
+        .eq("name", group_name)
+        .eq("project_id", project_id)
+        .limit(1)
+        .execute()
+    )
+    if grp.data:
+        group_id = grp.data[0]["id"]
+    else:
+        group_id = str(uuid.uuid4())
+        try:
+            await client.table("device_groups").insert(
+                {"id": group_id, "name": group_name, "project_id": project_id, "created_at": now}
+            ).execute()
+        except Exception as exc:  # noqa: BLE001
+            return JSONResponse({"error": f"group create failed: {exc}"}, status_code=502)
+
+    # 3. Add membership (idempotent — ignore duplicate key).
+    try:
+        await client.table("device_group_members").insert(
+            {"group_id": group_id, "device_id": device_id}
+        ).execute()
+    except Exception:
+        pass
+
+    return JSONResponse(
+        {"device_group_id": group_id, "device_id": device_id, "device_type": device_type}
+    )
+
+
 def register(root) -> None:
     """Register inbound HTTP routes on the FastMCP HTTP app."""
     root.custom_route("/internal/ota-result", methods=["POST"])(_ota_result)
     root.custom_route("/internal/build-deploy", methods=["POST"])(_build_deploy)
+    root.custom_route("/internal/ensure-mock-target", methods=["POST"])(_ensure_mock_target)
