@@ -134,3 +134,81 @@ async def test_start_deployment_skips_device_without_mqtt_id(mock_supabase, monk
     assert result.skipped == 1
     assert result.delivered == 0
     assert send_mock.await_count == 0
+
+
+def _recent_ota_row(dev_id: str, deployment_id: str = "other-dep") -> dict:
+    """A non-pending OTA job for ``dev_id`` from a *different* deployment — what the
+    per-device cooldown query (_rate_limited_devices) treats as 'updated too recently'."""
+    return {
+        "device_id": dev_id,
+        "deployment_id": deployment_id,
+        "status": "downloading",
+        "last_updated": "2026-01-01T00:00:00+00:00",
+    }
+
+
+async def test_start_deployment_rate_limited_skips_and_pauses(mock_supabase, monkeypatch, _patch_signed_url):
+    # A device inside the cooldown window is held back; a fully-blocked wave pauses the
+    # deployment (the dashboard surfaces that pause as the Override/Decline modal).
+    monkeypatch.setattr(ops.settings, "rate_limit_seconds", 3600.0)
+    send_mock = AsyncMock(return_value={"status": "ota_started"})
+    monkeypatch.setattr(fleet, "send_command", send_mock)
+
+    responses: dict[str, list[list]] = {
+        "deployments": [
+            [_dep_row("active")],                          # initial load
+            [],                                            # pause: status -> paused
+            [_dep_row("paused")],                          # final return (dep_after)
+        ],
+        "firmware_versions": [[_fw_row()]],
+        "ota_jobs": [
+            [_job_row("job-1", "device-1")],               # pending select
+            [_recent_ota_row("device-1")],                 # _rate_limited_devices query
+        ],
+        "devices": [[
+            {"id": "device-1", "identity_attributes": {"mqtt_id": "device-1"}, "project_id": "proj-1"},
+        ]],
+    }
+    mock_supabase.table.side_effect = _table_se(responses)
+
+    result = await start_deployment("dep-1")
+
+    assert result.error is None
+    assert result.skipped == 1
+    assert result.delivered == 0
+    assert send_mock.await_count == 0
+    assert result.deployment is not None and result.deployment.status == "paused"
+
+
+async def test_start_deployment_force_bypasses_rate_limit(mock_supabase, monkeypatch, _patch_signed_url):
+    # force=True is the programmatic equivalent of the dashboard Override: the cooldown is
+    # ignored, the device is delivered, and the deployment is NOT paused.
+    monkeypatch.setattr(ops.settings, "rate_limit_seconds", 3600.0)
+    send_mock = AsyncMock(return_value={"status": "ota_started"})
+    monkeypatch.setattr(fleet, "send_command", send_mock)
+
+    responses: dict[str, list[list]] = {
+        "deployments": [
+            [_dep_row("active")],                          # initial load
+            [_dep_row("active")],                          # recompute: load
+            [_dep_row("active")],                          # final return
+        ],
+        "firmware_versions": [[_fw_row()]],
+        "ota_jobs": [
+            [_job_row("job-1", "device-1")],               # pending select
+            [],                                            # update job-1 -> downloading
+            [_job_row("job-1", "device-1", "downloading")],  # recompute select
+        ],
+        "devices": [[
+            {"id": "device-1", "identity_attributes": {"mqtt_id": "device-1"}, "project_id": "proj-1"},
+        ]],
+    }
+    mock_supabase.table.side_effect = _table_se(responses)
+
+    result = await start_deployment("dep-1", force=True)
+
+    assert result.error is None
+    assert result.delivered == 1
+    assert result.skipped == 0
+    assert send_mock.await_count == 1
+    assert result.deployment is not None and result.deployment.status != "paused"

@@ -451,6 +451,10 @@ async def resume_deployment(deployment_id: str) -> DeploymentResult:
     supervisor re-evaluates the current wave before promoting. Undelivered later-wave jobs are
     still ``pending`` (they were never cancelled), so the rollout simply continues from where it
     halted. Use this after investigating a halt and deciding the firmware is in fact healthy.
+
+    A rate-limit pause is resolved this same way from the dashboard — by flipping the row to
+    active and setting the one-shot ``rate_limit_override`` flag (honored by ``_deliver_wave``),
+    so there's no separate bypass path here.
     """
     client = get_client()
     dep_resp = await client.table("deployments").select("*").eq("id", deployment_id).execute()
@@ -490,17 +494,48 @@ def _identity_attributes(row: dict) -> dict:
     return attrs
 
 
-async def _rate_limited_devices(device_ids: list[str], exclude_deployment: str) -> set[str]:
+async def _project_rate_limit_window(project_id: str | None) -> float:
+    """The OTA rate-limit window (seconds) in effect for a project.
+
+    A project may override the global default (settings.rate_limit_seconds) via
+    ``projects.ota_rate_limit_seconds`` (migration 0054) — surfaced as a Settings-tab
+    number input. NULL on the project (or no project) means "use the global default"; 0
+    disables the limit. Read with the service role, so RLS doesn't hide it.
+    """
+    if not project_id:
+        return settings.rate_limit_seconds
+    client = get_client()
+    try:
+        resp = (
+            await client.table("projects")
+            .select("ota_rate_limit_seconds")
+            .eq("id", project_id)
+            .limit(1)
+            .execute()
+        )
+    except Exception:  # noqa: BLE001 — a settings read must never break delivery
+        return settings.rate_limit_seconds
+    row = (resp.data or [None])[0]
+    val = row.get("ota_rate_limit_seconds") if row else None
+    return float(val) if val is not None else settings.rate_limit_seconds
+
+
+async def _rate_limited_devices(
+    device_ids: list[str], exclude_deployment: str, window_seconds: float | None = None
+) -> set[str]:
     """Devices that received an OTA from a *different* deployment within the rate-limit window.
 
     Blast-radius control (IOT_BRIDGE.md §3 gap #3): "max 1 OTA / device / hour". Returns the set
-    of device ids to skip. Disabled when OTA_RATE_LIMIT_SECONDS <= 0. A device's jobs from THIS
-    deployment never rate-limit it (re-delivery of a later wave is expected).
+    of device ids to skip. ``window_seconds`` is the project-effective limit (global default or a
+    per-project override); None falls back to the global default. Disabled when <= 0. A device's
+    jobs from THIS deployment never rate-limit it (re-delivery of a later wave is expected).
     """
-    if settings.rate_limit_seconds <= 0 or not device_ids:
+    if window_seconds is None:
+        window_seconds = settings.rate_limit_seconds
+    if window_seconds <= 0 or not device_ids:
         return set()
     client = get_client()
-    cutoff = (datetime.now(timezone.utc) - timedelta(seconds=settings.rate_limit_seconds)).isoformat()
+    cutoff = (datetime.now(timezone.utc) - timedelta(seconds=window_seconds)).isoformat()
     resp = (
         await client.table("ota_jobs")
         .select("device_id, deployment_id, status, last_updated")
@@ -521,7 +556,7 @@ async def _rate_limited_devices(device_ids: list[str], exclude_deployment: str) 
     return limited
 
 
-async def start_deployment(deployment_id: str) -> StartDeploymentResult:
+async def start_deployment(deployment_id: str, force: bool = False) -> StartDeploymentResult:
     """Push the deployment's firmware to its devices via nff-fleet.
 
     nff-ota decides what to push; nff-fleet delivers it. For each pending device job in
@@ -537,6 +572,12 @@ async def start_deployment(deployment_id: str) -> StartDeploymentResult:
     For a phased rollout only the current wave is delivered (wave <= current_phase, which
     is 0 on first start); the supervisor releases later waves. Non-phased deployments have
     every job at wave 0, so this delivers them all — the historical behavior.
+
+    ``force`` bypasses the per-device OTA cooldown (the rate limit that holds back a device
+    that received an OTA too recently). Normally a wave fully blocked by the cooldown pauses
+    the deployment so a human can Override/Decline via the dashboard; ``force=true`` is the
+    programmatic equivalent of that Override. Set it ONLY on an explicit user instruction to
+    bypass the cooldown — it skips a guardrail that prevents rapid re-flash loops.
     """
     client = get_client()
 
@@ -556,12 +597,17 @@ async def start_deployment(deployment_id: str) -> StartDeploymentResult:
         await client.table("deployments").update({"status": "active"}).eq("id", deployment_id).execute()
         dep["status"] = "active"
 
-    return await _deliver_wave(dep, deployment_id, int(dep.get("current_phase") or 0))
+    return await _deliver_wave(
+        dep, deployment_id, int(dep.get("current_phase") or 0), bypass_rate_limit=force
+    )
 
 
-async def _deliver_wave(dep: dict, deployment_id: str, max_wave: int) -> StartDeploymentResult:
+async def _deliver_wave(
+    dep: dict, deployment_id: str, max_wave: int, bypass_rate_limit: bool = False
+) -> StartDeploymentResult:
     """Deliver pending jobs whose wave <= max_wave. Shared by start_deployment (wave 0) and the
-    rollout supervisor (each promoted wave)."""
+    rollout supervisor (each promoted wave). ``bypass_rate_limit`` ignores the per-device OTA
+    window (used by an explicit user override of a rate-limit-paused deployment)."""
     client = get_client()
 
     # Resolve the firmware this deployment ships.
@@ -614,7 +660,21 @@ async def _deliver_wave(dep: dict, deployment_id: str, max_wave: int) -> StartDe
     project_by_device = {d["id"]: d.get("project_id") for d in (dev_resp.data or [])}
 
     # Blast-radius rate limit: devices that got an OTA from another deployment too recently.
-    rate_limited = await _rate_limited_devices(device_ids, deployment_id)
+    # The window is per-project (global default unless overridden). A user "Override" of a
+    # rate-limit pause is a one-shot `rate_limit_override` flag the dashboard sets on the
+    # deployment row (a plain Supabase write — no privileged call) — consume it here so this
+    # delivery ignores the window.
+    override_flag = bool(dep.get("rate_limit_override"))
+    bypass = bypass_rate_limit or override_flag
+    if override_flag:
+        await client.table("deployments").update(
+            {"rate_limit_override": False}
+        ).eq("id", deployment_id).execute()
+    window = await _project_rate_limit_window(dep.get("project_id"))
+    rate_limited: set[str] = (
+        set() if bypass
+        else await _rate_limited_devices(device_ids, deployment_id, window)
+    )
 
     sem = asyncio.Semaphore(max(1, dep["max_devices_in_flight"]))
     results: list[DeviceDeliveryResult] = []
@@ -626,7 +686,7 @@ async def _deliver_wave(dep: dict, deployment_id: str, max_wave: int) -> StartDe
                 DeviceDeliveryResult(
                     device_id=device_id,
                     outcome="skipped",
-                    detail=f"rate-limited (another OTA < {int(settings.rate_limit_seconds)}s ago)",
+                    detail=f"rate-limited (another OTA < {int(window)}s ago)",
                 )
             )
             return
@@ -673,7 +733,25 @@ async def _deliver_wave(dep: dict, deployment_id: str, max_wave: int) -> StartDe
                 )
 
     await asyncio.gather(*(_deliver_one(job) for job in pending))
-    await _recompute_deployment_status(deployment_id)
+
+    # If the whole wave was blocked by the rate limit (nothing delivered, all skipped because
+    # those devices took an OTA too recently), don't hang silently with pending jobs — pause
+    # the deployment with a reason. The dashboard surfaces a "rate_limited" pause as a modal so
+    # the user can override (re-deliver now) or decline (abort). Reuses the supervisor's
+    # paused + halted_reason channel, so _recompute_deployment_status won't auto-finish it.
+    delivered_now = sum(1 for r in results if r.outcome == "delivered")
+    if not bypass and delivered_now == 0 and rate_limited and dep["status"] == "active":
+        reason = (
+            f"rate_limited: {len(rate_limited)} device(s) received an OTA within the last "
+            f"{int(window)}s — override to deliver now, or decline to abort"
+        )
+        await client.table("deployments").update(
+            {"status": "paused", "halted_reason": reason}
+        ).eq("id", deployment_id).execute()
+        dep["status"] = "paused"
+        dep["halted_reason"] = reason
+    else:
+        await _recompute_deployment_status(deployment_id)
 
     dep_after = await client.table("deployments").select("*").eq("id", deployment_id).execute()
     return StartDeploymentResult(
