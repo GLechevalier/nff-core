@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "nff-fleet"
-version = "0.1.4"
+version = "0.1.5"
 description = "IoT fleet management microservice — MQTT broker + MCP server for Claude"
 requires-python = ">=3.12"
 dependencies = [
