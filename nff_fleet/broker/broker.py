@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import socket
 from pathlib import Path
 
 from amqtt.broker import Broker
@@ -85,8 +86,32 @@ def _build_config(
     }
 
 
+def _listener_already_up(port: int, host: str = "127.0.0.1") -> bool:
+    """Return True if a live TCP listener is already bound to ``port``.
+
+    A bind-probe is unreliable here: on Windows ``SO_REUSEADDR`` lets a second ``bind()``
+    succeed even when the port is held by a live socket, so it false-negatives the very zombie
+    we are guarding against. A short ``connect()`` is the portable signal — it only succeeds
+    when something is actually accepting connections. The TLS listener binds ``0.0.0.0`` so a
+    loopback connect reaches it.
+    """
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.settimeout(0.25)
+        return s.connect_ex((host, port)) == 0
+
+
 async def start_broker() -> Broker:
     global _broker_instance
+    # Fail loud on a zombie instance instead of silently colliding: a stale fleet still holding
+    # the MQTT TLS port shadows this one, the internal router can't relay, devices hang, and
+    # HTTP returns silent 404s. Abort with remediation rather than start a half-dead broker.
+    if _listener_already_up(settings.mqtt_port):
+        raise RuntimeError(
+            f"MQTT port {settings.mqtt_port} already has a live listener — a zombie nff-fleet "
+            f"is probably still running. Stop it before starting "
+            f"(Windows: netstat -ano | findstr :{settings.mqtt_port} ; "
+            f"Linux/macOS: lsof -ti:{settings.mqtt_port} | xargs kill)."
+        )
     config = _build_config(
         ca_cert=settings.tls_ca_cert,
         server_cert=settings.tls_server_cert,
