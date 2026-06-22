@@ -1,8 +1,28 @@
+import os
 import time
 from typing import Any
 
 from nff_fleet.commands import send_command
 from nff_fleet.registry import registry
+
+# Test-only chaos: fail the first N fleet_ping calls with a transient, retryable error so
+# the agent-worker recovery loop (#6) can be exercised end-to-end (e2e Track 3). Gated by
+# NFF_FLEET_CHAOS_FAIL_FIRST (unset/0 = off). A *raised* exception becomes an MCP is_error
+# tool result — the error event the recovery loop classifies/retries on. NEVER set in prod.
+_chaos_ping_calls = 0
+
+
+def _maybe_chaos_fail() -> None:
+    global _chaos_ping_calls
+    try:
+        fail_first = int(os.environ.get("NFF_FLEET_CHAOS_FAIL_FIRST", "0") or "0")
+    except ValueError:
+        fail_first = 0
+    if fail_first > 0 and _chaos_ping_calls < fail_first:
+        _chaos_ping_calls += 1
+        raise RuntimeError(
+            "rate limited (chaos injection): 429 Too Many Requests — retry shortly"
+        )
 
 
 def _resolve_project(device_id: str) -> str | None:
@@ -30,6 +50,7 @@ async def fleet_list_devices() -> list[dict[str, Any]]:
 
 async def fleet_ping(device_id: str) -> dict[str, Any]:
     """Send a signed ping to a device and return round-trip latency."""
+    _maybe_chaos_fail()
     project_id = _resolve_project(device_id)
     if not project_id:
         return {"device_id": device_id, "error": "unknown project (device has not connected)"}
