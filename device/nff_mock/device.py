@@ -119,6 +119,8 @@ class VirtualDevice:
         if new_version in self.cfg.buggy_version_map:
             prev = self.nvs.get_str("ota_prev_version") or self.fw_version
             prev_build = self.nvs.get_str("ota_prev_build_id")
+            scenario = self.cfg.buggy_version_map[new_version]
+            reason = f"health gate failed on v{new_version} ({scenario})"
             logger.warning(
                 "trial of buggy version %s failed health gate -> rolled back to %s",
                 new_version, prev,
@@ -132,6 +134,9 @@ class VirtualDevice:
             self.pending_fw_artifact = None          # discard the staged bad artifact
             self.nvs.erase("ota_build_id")
             self.nvs.set_str("ota_committed", "0")   # check_pending_result -> rolled_back
+            # Carry *why* we rolled back so the result message can report it (the SDK
+            # logs an equivalent reason; here it surfaces all the way to the dashboard).
+            self.nvs.set_str("ota_rollback_reason", reason)
             return
 
         # Healthy => commit: adopt the new version (and artifact / build_id) for real.

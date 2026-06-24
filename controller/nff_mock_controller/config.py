@@ -63,8 +63,8 @@ class NffMockControllerSettings(BaseSettings):
     # ── Lifecycle limits ──────────────────────────────────────────────────────
     mock_ttl_s: int = 1800        # default lifetime; reaper tears down past this
     reaper_interval_s: int = 60
-    max_per_project: int = 3
-    max_total: int = 50
+    max_per_project: int = 100
+    max_total: int = 100
 
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
 

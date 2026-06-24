@@ -221,15 +221,18 @@ def selftest() -> None:
         results.append(("crash report ingest-aligned", aligned))
         results.append(("ota scenario arms fault", dev.crash.fault_scenario == "null_deref"))
 
-        # Adopting the buggy version -> simulated rollback + fault (re)armed.
+        # Adopting the buggy version -> health gate fails -> revert to the last-good
+        # image (3.0.17), report rolled_back *with a reason*, fault stays armed.
         cap.clear()
         await dev.dispatcher.handle(t2, sign(cmd("ota", version="3.0.18", url="http://x/y", sha256="0" * 64)))
         dev._apply_pending_ota()
         await dev.ota.check_pending_result()
-        results.append(("buggy version -> rolled_back",
-                        any(p.get("type") == "ota_result" and p.get("status") == "rolled_back" for _, p in cap)))
-        results.append(("buggy version adopted + fault armed",
-                        dev.fw_version == "3.0.18" and dev.crash.fault_scenario == "null_deref"))
+        rolled = next((p for _, p in cap if p.get("type") == "ota_result" and p.get("status") == "rolled_back"), None)
+        results.append(("buggy version -> rolled_back", rolled is not None))
+        results.append(("rolled_back carries reason",
+                        bool(rolled) and "null_deref" in (rolled.get("reason") or "")))
+        results.append(("buggy version reverted to last-good + fault armed",
+                        dev.fw_version == "3.0.17" and dev.crash.fault_scenario == "null_deref"))
 
         # Adopting a higher version (the merged fix) -> committed + fault cleared.
         cap.clear()

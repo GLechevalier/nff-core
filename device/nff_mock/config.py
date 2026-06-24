@@ -46,8 +46,12 @@ class NffMockSettings(BaseSettings):
 
     heartbeat_interval_s: int = 30
 
-    # Multi-tenancy — echoed into the heartbeat so nff-fleet's upsert can stamp the
-    # device's project_id (see migration 0029 + db.py pass-through). None in dev.
+    # Multi-tenancy — REQUIRED at runtime. Every MQTT topic is nff/{project_id}/devices/{id}/…,
+    # so cli.py refuses to start without it (and it must match the cert's project). It is also
+    # echoed into the heartbeat so nff-fleet's upsert can stamp the device's project_id (migration
+    # 0029 + db.py pass-through). Typed Optional only so construction can defer the check to cli.py;
+    # a spawned mock gets it from the controller (NFF_MOCK_PROJECT_ID), the standalone compose
+    # `nff-mock` service must set it explicitly.
     project_id: str | None = None
 
     # Behaviour knobs

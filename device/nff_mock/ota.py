@@ -134,17 +134,21 @@ class OtaSimulator:
             return
         committed = d.nvs.get_str("ota_committed") == "1"
         version = d.nvs.get_str("ota_version") or d.fw_version
+        # Why the boot health gate reverted the image (set in device._apply_pending_ota).
+        reason = d.nvs.get_str("ota_rollback_reason")
         d.nvs.erase("ota_pending")
         d.nvs.erase("ota_version")
         d.nvs.erase("ota_committed")
         d.nvs.erase("ota_prev_version")
         d.nvs.erase("ota_prev_build_id")
-        await d.publish(
-            topic_response(d.cfg.project_id, d.cfg.device_id),
-            {
-                "type": "ota_result",
-                "status": "committed" if committed else "rolled_back",
-                "version": version,
-                "id": d.cfg.device_id,
-            },
-        )
+        d.nvs.erase("ota_rollback_reason")
+        result: dict = {
+            "type": "ota_result",
+            "status": "committed" if committed else "rolled_back",
+            "version": version,
+            "id": d.cfg.device_id,
+        }
+        # Only a rollback carries a reason; a committed result has nothing to explain.
+        if not committed and reason:
+            result["reason"] = reason
+        await d.publish(topic_response(d.cfg.project_id, d.cfg.device_id), result)
