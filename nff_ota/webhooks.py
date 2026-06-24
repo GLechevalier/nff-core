@@ -77,6 +77,7 @@ async def _ota_result(request: Request) -> JSONResponse:
     device_id = body.get("device_id")
     status = body.get("status")
     version = body.get("version")
+    reason = body.get("reason")
     if not isinstance(device_id, str) or not device_id:
         return JSONResponse({"error": "device_id is required"}, status_code=400)
     if status not in ("committed", "rolled_back"):
@@ -84,7 +85,9 @@ async def _ota_result(request: Request) -> JSONResponse:
     if not isinstance(version, str) or not version:
         return JSONResponse({"error": "version is required"}, status_code=400)
 
-    result = await finalize_ota_result(device_id, status, version)
+    result = await finalize_ota_result(
+        device_id, status, version, reason=reason if isinstance(reason, str) else None
+    )
     return JSONResponse(result)
 
 

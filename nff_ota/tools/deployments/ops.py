@@ -829,6 +829,7 @@ async def _apply_job_status(
     if new_status in ("success", "already-installed"):
         update["progress"] = 100
         update["completed_at"] = now
+        update["failure_reason"] = None  # a (re)tried success clears any prior rollback cause
     await client.table("ota_jobs").update(update).eq("id", job["id"]).execute()
 
     if new_status == "success":
@@ -857,12 +858,16 @@ async def _resolve_device_id(reported_id: str) -> str | None:
     return None
 
 
-async def finalize_ota_result(device_id: str, status: str, version: str) -> dict:
+async def finalize_ota_result(
+    device_id: str, status: str, version: str, reason: str | None = None
+) -> dict:
     """Finalize an ota_jobs row from a device-reported ota_result.
 
     ``status`` is the device's authoritative outcome: ``committed`` -> ``success``,
     ``rolled_back`` -> ``failure``. ``device_id`` is what the device reported (its
-    fleet MQTT identity); ``version`` is the firmware version it ran.
+    fleet MQTT identity); ``version`` is the firmware version it ran. ``reason`` is an
+    optional human-readable rollback cause (only meaningful on a failure) that the
+    dashboard surfaces on the job.
 
     Intentionally does NOT call ``validate_transition``: the job is parked in
     ``downloading`` (set at dispatch) and ``downloading -> success`` is a deliberately
@@ -906,7 +911,9 @@ async def finalize_ota_result(device_id: str, status: str, version: str) -> dict
         return {"finalized": False, "reason": "no-active-job", "device_id": ota_device_id, "version": version}
 
     job = active[0]
-    await _apply_job_status(job, new_status, job["deployment_id"], ota_device_id)
+    # Persist the rollback cause only on a failure; success carries nothing to explain.
+    extra = {"failure_reason": reason} if (new_status == "failure" and reason) else None
+    await _apply_job_status(job, new_status, job["deployment_id"], ota_device_id, extra_update=extra)
     logger.info("ota_result: device=%s version=%s -> %s (deployment=%s)",
                 ota_device_id, version, new_status, job["deployment_id"])
     return {
