@@ -252,9 +252,22 @@ async def _deprovision_device(request: Request) -> JSONResponse:
     return JSONResponse({"device_id": device_id, "removed": True})
 
 
+async def _chaos_reset(request: Request) -> JSONResponse:
+    """Test-only: zero the chaos counter so the next NFF_FLEET_CHAOS_FAIL_FIRST pings fail
+    again. Lets the e2e transient track (Track 3) re-arm per iteration without a fleet restart.
+    Harmless no-op when chaos is unarmed (env 0) — the env is still the only switch."""
+    if not _secret_ok(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    from nff_fleet.tools.devices import reset_chaos
+
+    fail_first = reset_chaos()
+    return JSONResponse({"reset": True, "fail_first": fail_first})
+
+
 def register(mcp) -> None:
     """Register the internal control routes on the FastMCP HTTP app."""
     mcp.custom_route("/internal/command", methods=["POST"])(_deliver_command)
     mcp.custom_route("/internal/provision", methods=["POST"])(_provision_device)
     mcp.custom_route("/internal/provision-batch", methods=["POST"])(_provision_batch)
     mcp.custom_route("/internal/deprovision", methods=["POST"])(_deprovision_device)
+    mcp.custom_route("/internal/chaos-reset", methods=["POST"])(_chaos_reset)

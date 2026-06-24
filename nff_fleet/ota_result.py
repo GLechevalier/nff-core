@@ -33,9 +33,15 @@ def _fire(coro) -> None:
     asyncio.create_task(_run())
 
 
-async def _post_ota_result(device_id: str, status: str, version: str) -> None:
+async def _post_ota_result(
+    device_id: str, status: str, version: str, reason: str | None = None
+) -> None:
     url = settings.ota_url.rstrip("/") + "/internal/ota-result"
-    body = {"device_id": device_id, "status": status, "version": version}
+    body: dict[str, Any] = {"device_id": device_id, "status": status, "version": version}
+    # A rollback may carry a reason; keep it optional so the payload stays minimal and
+    # back-compatible with devices/firmware that don't report one.
+    if reason:
+        body["reason"] = reason
     async with httpx.AsyncClient(timeout=10.0) as client:
         resp = await client.post(url, json=body, headers={"X-Fleet-Secret": settings.mcp_secret})
     if resp.status_code != 200:
@@ -49,7 +55,8 @@ def forward_ota_result(device_id: str, payload: dict[str, Any]) -> None:
         return
     status = payload.get("status")
     version = payload.get("version")
+    reason = payload.get("reason")
     if not status or not version:
         logger.warning("ota_result from %s missing status/version: %s", device_id, payload)
         return
-    _fire(_post_ota_result(device_id, status, version))
+    _fire(_post_ota_result(device_id, status, version, reason if isinstance(reason, str) else None))

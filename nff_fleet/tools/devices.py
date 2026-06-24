@@ -12,17 +12,32 @@ from nff_fleet.registry import registry
 _chaos_ping_calls = 0
 
 
+def _chaos_fail_first() -> int:
+    try:
+        return int(os.environ.get("NFF_FLEET_CHAOS_FAIL_FIRST", "0") or "0")
+    except ValueError:
+        return 0
+
+
 def _maybe_chaos_fail() -> None:
     global _chaos_ping_calls
-    try:
-        fail_first = int(os.environ.get("NFF_FLEET_CHAOS_FAIL_FIRST", "0") or "0")
-    except ValueError:
-        fail_first = 0
+    fail_first = _chaos_fail_first()
     if fail_first > 0 and _chaos_ping_calls < fail_first:
         _chaos_ping_calls += 1
         raise RuntimeError(
             "rate limited (chaos injection): 429 Too Many Requests — retry shortly"
         )
+
+
+def reset_chaos() -> int:
+    """Test-only: zero the per-process chaos counter so the next ``NFF_FLEET_CHAOS_FAIL_FIRST``
+    pings fail again — lets the e2e transient track re-arm between iterations without a fleet
+    restart. Does NOT arm chaos (the env stays the only switch), so it's a harmless no-op when
+    chaos is off; returns the configured budget so the caller can confirm it's armed.
+    """
+    global _chaos_ping_calls
+    _chaos_ping_calls = 0
+    return _chaos_fail_first()
 
 
 def _resolve_project(device_id: str) -> str | None:
