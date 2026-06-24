@@ -23,12 +23,12 @@ WORKDIR /app
 
 # External binaries the tools shell out to:
 #   nmap          -> port_scan, discover_devices
-#   libcoap2-bin  -> coap_discover (provides coap-client)
+#   libcoap3-bin  -> coap_discover (provides coap-client; was libcoap2-bin pre-trixie)
 #   binutils      -> analyze_strings, scan_hardcoded_creds (provides `strings`)
 #   bluez/dbus    -> ble_scan (bleak talks to BlueZ over DBus)
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
-        nmap libcoap2-bin binutils bluez dbus && \
+        nmap libcoap3-bin binutils bluez dbus && \
     rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /venv /venv

@@ -24,10 +24,11 @@ services:
     cap_add:
       - NET_ADMIN
       - NET_RAW
-    # ble_scan: bleak -> BlueZ over the host's system DBus. Drop these two
-    # volumes (and the host's bluetooth service) if you don't need BLE.
-    volumes:
-      - /var/run/dbus:/var/run/dbus
-      - /var/lib/bluetooth:/var/lib/bluetooth
-    # Firmware analysis: mount a host dir of firmware images to analyze.
-    # - ./firmware:/firmware:ro
+    # ble_scan: bleak -> BlueZ over the host's system DBus. These mounts are only
+    # needed for REAL BLE scanning (demo mode returns a canned fixture, no radio).
+    # Uncomment them — and ensure /var/lib/bluetooth exists + bluetooth.service is
+    # running on the host — to do live BLE scans.
+    # volumes:
+    #   - /var/run/dbus:/var/run/dbus
+    #   - /var/lib/bluetooth:/var/lib/bluetooth
+    #   - ./firmware:/firmware:ro   # optional: host dir of firmware images to analyze
