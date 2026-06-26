@@ -102,6 +102,10 @@ async def _upsert_device(device_id: str, payload: dict[str, Any]) -> None:
             # mark a device offline after 2× this many seconds. Omitted by older firmware,
             # in which case the RPC COALESCE-preserves any previously-stored value.
             "p_heartbeat_interval_s": payload.get("interval_s"),
+            # Optional friendly display name (mocks set NFF_MOCK_NAME). The RPC seeds
+            # devices.name on first insert ONLY — never on conflict — so a later heartbeat
+            # or a dashboard rename is never clobbered. Omitted by real firmware.
+            "p_name": payload.get("name") or None,
         },
     ).execute()
 
