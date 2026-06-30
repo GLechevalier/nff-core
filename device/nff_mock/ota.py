@@ -7,7 +7,8 @@ from typing import TYPE_CHECKING
 
 import httpx
 
-from nff_mock.mqtt import topic_response
+from nff_mock_core import ota_state
+from nff_mock_core.mqtt import topic_response
 
 if TYPE_CHECKING:
     from nff_mock.device import VirtualDevice
@@ -72,18 +73,18 @@ class OtaSimulator:
             return None
 
         # Persist intent across the simulated reboot (NVS, like nff_ota.c).
-        d.nvs.set_str("ota_pending", "1")
-        d.nvs.set_str("ota_version", version)
+        d.nvs.set_str(ota_state.NVS_OTA_PENDING, "1")
+        d.nvs.set_str(ota_state.NVS_OTA_VERSION, version)
         # Remember the running image so the boot path can revert to it if the new
         # version fails its health gate (SDK: nff_ota_rollback reverts the partition).
-        d.nvs.set_str("ota_prev_version", d.fw_version or "")
-        d.nvs.set_str("ota_prev_build_id", d.build_id or "")
+        d.nvs.set_str(ota_state.NVS_OTA_PREV_VERSION, d.fw_version or "")
+        d.nvs.set_str(ota_state.NVS_OTA_PREV_BUILD_ID, d.build_id or "")
         # build_id is an unsigned extra (not in the OTA TBS); adopt it on the next boot so
         # the heartbeat build_id matches the deployed image and verification passes.
         ota_build_id = payload.get("build_id")
         if ota_build_id:
-            d.nvs.set_str("ota_build_id", ota_build_id)
-        d.nvs.set_str("ota_committed", "1")
+            d.nvs.set_str(ota_state.NVS_OTA_BUILD_ID, ota_build_id)
+        d.nvs.set_str(ota_state.NVS_OTA_COMMITTED, "1")
         d.pending_fw_artifact = artifact
         if artifact is not None:
             # Real bytes in hand: the staged artifact (a sketch) will be applied on
@@ -130,25 +131,19 @@ class OtaSimulator:
         nff_ota_check_pending_result(). The fw bump + firmware swap already happened
         in device boot, so the fresh heartbeat already shows the new version."""
         d = self.d
-        if d.nvs.get_str("ota_pending") != "1":
+        if d.nvs.get_str(ota_state.NVS_OTA_PENDING) != "1":
             return
-        committed = d.nvs.get_str("ota_committed") == "1"
-        version = d.nvs.get_str("ota_version") or d.fw_version
+        committed = d.nvs.get_str(ota_state.NVS_OTA_COMMITTED) == "1"
+        version = d.nvs.get_str(ota_state.NVS_OTA_VERSION) or d.fw_version
         # Why the boot health gate reverted the image (set in device._apply_pending_ota).
-        reason = d.nvs.get_str("ota_rollback_reason")
-        d.nvs.erase("ota_pending")
-        d.nvs.erase("ota_version")
-        d.nvs.erase("ota_committed")
-        d.nvs.erase("ota_prev_version")
-        d.nvs.erase("ota_prev_build_id")
-        d.nvs.erase("ota_rollback_reason")
-        result: dict = {
-            "type": "ota_result",
-            "status": "committed" if committed else "rolled_back",
-            "version": version,
-            "id": d.cfg.device_id,
-        }
-        # Only a rollback carries a reason; a committed result has nothing to explain.
-        if not committed and reason:
-            result["reason"] = reason
+        reason = d.nvs.get_str(ota_state.NVS_OTA_ROLLBACK_REASON)
+        d.nvs.erase(ota_state.NVS_OTA_PENDING)
+        d.nvs.erase(ota_state.NVS_OTA_VERSION)
+        d.nvs.erase(ota_state.NVS_OTA_COMMITTED)
+        d.nvs.erase(ota_state.NVS_OTA_PREV_VERSION)
+        d.nvs.erase(ota_state.NVS_OTA_PREV_BUILD_ID)
+        d.nvs.erase(ota_state.NVS_OTA_ROLLBACK_REASON)
+        result = ota_state.build_ota_result(
+            d.cfg.device_id, version, committed=committed, reason=reason
+        )
         await d.publish(topic_response(d.cfg.project_id, d.cfg.device_id), result)

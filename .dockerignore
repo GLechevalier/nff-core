@@ -1,0 +1,13 @@
+# The mock image build context is the nff-mock/ root (so core/ + the per-level device
+# package are both visible). Keep that context lean — only source needs to ship.
+**/__pycache__/
+**/*.pyc
+**/.pytest_cache/
+**/.mypy_cache/
+**/*.egg-info/
+**/.venv/
+**/.env
+**/.env.*
+# Sibling packages not needed by the device images.
+controller/
+targets/

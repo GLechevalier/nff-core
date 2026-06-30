@@ -4,7 +4,7 @@ import json
 import logging
 from typing import TYPE_CHECKING
 
-from nff_mock.mqtt import topic_response
+from nff_mock_core.mqtt import topic_response
 
 if TYPE_CHECKING:
     from nff_mock.device import VirtualDevice

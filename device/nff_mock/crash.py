@@ -3,8 +3,9 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
+from nff_mock_core.mqtt import topic_crash
+
 from nff_mock import scenarios
-from nff_mock.mqtt import topic_crash
 
 if TYPE_CHECKING:
     from nff_mock.device import VirtualDevice

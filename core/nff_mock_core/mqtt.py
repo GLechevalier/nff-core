@@ -4,7 +4,7 @@ import os
 import ssl
 import tempfile
 
-from nff_mock.config import NffMockSettings
+from nff_mock_core.config import NffMockCoreSettings
 
 # MQTT topic schema — project-scoped per the device-ownership design
 # (DEVICE_OWNERSHIP_DESIGN.md §7). The broker ACL derives (project_id, device_id)
@@ -31,7 +31,7 @@ def topic_crash(project_id: str, device_id: str) -> str:
     return f"nff/{project_id}/devices/{device_id}/crash"
 
 
-def build_ssl_context(cfg: NffMockSettings) -> ssl.SSLContext:
+def build_ssl_context(cfg: NffMockCoreSettings) -> ssl.SSLContext:
     """mTLS context: verify the broker against the nff CA, and present this device's
     client cert + key. The fleet server cert has no `nff-fleet` DNS SAN (only the
     broker IP + localhost), so hostname checking must be disabled while still
@@ -51,7 +51,7 @@ def build_ssl_context(cfg: NffMockSettings) -> ssl.SSLContext:
     return ctx
 
 
-def _load_client_chain(ctx: ssl.SSLContext, cfg: NffMockSettings) -> None:
+def _load_client_chain(ctx: ssl.SSLContext, cfg: NffMockCoreSettings) -> None:
     """Load the device key + the full client cert chain (leaf + project intermediate).
 
     ``SSLContext.load_cert_chain`` only takes file paths and reads intermediates from the same

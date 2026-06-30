@@ -8,15 +8,16 @@ from typing import Any
 
 import aiomqtt
 
-from nff_mock import heartbeat
+from nff_mock_core import heartbeat, ota_state
+from nff_mock_core.mqtt import build_ssl_context, topic_cmd, topic_heartbeat
+from nff_mock_core.nvs import Nvs
+from nff_mock_core.security import CommandVerifier
+
 from nff_mock.config import NffMockSettings
 from nff_mock.crash import CrashInjector
 from nff_mock.dispatcher import Dispatcher
 from nff_mock.firmware import FirmwareContext, load_firmware
-from nff_mock.mqtt import build_ssl_context, topic_cmd, topic_heartbeat
-from nff_mock.nvs import Nvs
 from nff_mock.ota import OtaSimulator
-from nff_mock.security import CommandVerifier
 from nff_mock.telemetry import Telemetry
 
 logger = logging.getLogger(__name__)
@@ -111,14 +112,14 @@ class VirtualDevice:
         reports rolled_back, staying online (no crash loop). A healthy release commits:
         the new version takes effect, and a staged artifact (if any) becomes the new
         behaviour; a simulated download (no artifact) keeps the running behaviour."""
-        if self.nvs.get_str("ota_pending") != "1":
+        if self.nvs.get_str(ota_state.NVS_OTA_PENDING) != "1":
             return
-        new_version = self.nvs.get_str("ota_version") or self.fw_version
+        new_version = self.nvs.get_str(ota_state.NVS_OTA_VERSION) or self.fw_version
 
         # Health gate (SDK: nff_ota_trial_tick). Known-bad version => trial fails.
         if new_version in self.cfg.buggy_version_map:
-            prev = self.nvs.get_str("ota_prev_version") or self.fw_version
-            prev_build = self.nvs.get_str("ota_prev_build_id")
+            prev = self.nvs.get_str(ota_state.NVS_OTA_PREV_VERSION) or self.fw_version
+            prev_build = self.nvs.get_str(ota_state.NVS_OTA_PREV_BUILD_ID)
             scenario = self.cfg.buggy_version_map[new_version]
             reason = f"health gate failed on v{new_version} ({scenario})"
             logger.warning(
@@ -132,11 +133,11 @@ class VirtualDevice:
             if prev_build:
                 self.build_id = prev_build
             self.pending_fw_artifact = None          # discard the staged bad artifact
-            self.nvs.erase("ota_build_id")
-            self.nvs.set_str("ota_committed", "0")   # check_pending_result -> rolled_back
+            self.nvs.erase(ota_state.NVS_OTA_BUILD_ID)
+            self.nvs.set_str(ota_state.NVS_OTA_COMMITTED, "0")   # check_pending_result -> rolled_back
             # Carry *why* we rolled back so the result message can report it (the SDK
             # logs an equivalent reason; here it surfaces all the way to the dashboard).
-            self.nvs.set_str("ota_rollback_reason", reason)
+            self.nvs.set_str(ota_state.NVS_OTA_ROLLBACK_REASON, reason)
             return
 
         # Healthy => commit: adopt the new version (and artifact / build_id) for real.
@@ -144,10 +145,10 @@ class VirtualDevice:
         self.fw_ctx.fw_version = self.fw_version
         # Adopt the deployed build_id when the OTA carried one (nff-ota sends it as an
         # unsigned extra). Mirrors real firmware reporting its compiled-in build id.
-        new_build = self.nvs.get_str("ota_build_id")
+        new_build = self.nvs.get_str(ota_state.NVS_OTA_BUILD_ID)
         if new_build:
             self.build_id = new_build
-            self.nvs.erase("ota_build_id")
+            self.nvs.erase(ota_state.NVS_OTA_BUILD_ID)
         if self.pending_fw_artifact is not None:
             self.firmware = load_firmware(
                 self.pending_fw_artifact, fallback_version=self.fw_version

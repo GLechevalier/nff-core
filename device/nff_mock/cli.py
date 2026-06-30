@@ -67,10 +67,11 @@ def selftest() -> None:
     from cryptography.hazmat.primitives import hashes, serialization
     from cryptography.hazmat.primitives.asymmetric import ec
 
-    from nff_mock import heartbeat
+    from nff_mock_core import heartbeat
+    from nff_mock_core.mqtt import topic_cmd
+    from nff_mock_core.security import _build_tbs
+
     from nff_mock.device import VirtualDevice
-    from nff_mock.mqtt import topic_cmd
-    from nff_mock.security import _build_tbs
 
     import tempfile
     from pathlib import Path

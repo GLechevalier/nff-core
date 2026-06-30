@@ -54,7 +54,9 @@ if (-not (Test-Path $envFile)) { throw "missing env file: $envFile" }
 # --- 1. Build images ----------------------------------------------------------
 if (-not $SkipBuild) {
     Step "Building nff-mock:dev"
-    docker build -q -t nff-mock:dev -f (Join-Path $repoDir "device\Dockerfile.dev") (Join-Path $repoDir "device") | Out-Null
+    # Build context is the nff-mock/ root so the shared core (core/) and the L1 device
+    # package (device/) are both visible to device/Dockerfile.dev.
+    docker build -q -t nff-mock:dev -f (Join-Path $repoDir "device\Dockerfile.dev") $repoDir | Out-Null
     if ($LASTEXITCODE -ne 0) { throw "nff-mock:dev build failed" }
 
     Step "Building nff-mock-controller:dev"
