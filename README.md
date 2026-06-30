@@ -30,9 +30,11 @@ Each mock faithfully mirrors the firmware it imitates, so the wire protocol stay
 
 ## Mocked features
 
-Everything below is what the virtual device (`device/`) reproduces from the real
-`nff-sdk-c` firmware, so the wire protocol is indistinguishable to the backend. Each
-row notes the module that implements it and the SDK source it mirrors.
+Everything below is what the **Level-1** virtual device (`device/`) reproduces from the real
+`nff-sdk-c` firmware, so the wire protocol is indistinguishable to the backend. Each row notes
+the module that implements it and the SDK source it mirrors. (The shared contract pieces —
+`mqtt`, `security`, `nvs`, `heartbeat`, `config` — now live in the `core/` package and are
+imported as `nff_mock_core.*`; see [Complexity levels](#complexity-levels) below.)
 
 ### Connectivity & transport
 - **mTLS to the real broker** (`mqtt.py` ← `nff_mqtt.c`) — verifies the broker against
@@ -120,22 +122,49 @@ row notes the module that implements it and the SDK source it mirrors.
   no broker, asserting each response — the same logic that runs against the live fleet,
   minus the network.
 
+## Complexity levels
+
+A mock can be spawned at one of several **fidelity levels** — the same device contract to the
+platform, a very different engine underneath. The controller picks the level per request
+(`POST /mocks {"level": N}`, default `1`):
+
+| level | engine | crashes / OTA | cost | use |
+|---|---|---|---|---|
+| **0** | — | — | none | "spawn nothing" (a no-op request → `{"spawned": []}`) |
+| **1** | `device/` — pure-Python protocol sim | *simulated* (scenario catalog; version-gated rollback) | tiny (~128 MB) | fleet breadth, fast CI, public demos — spawn by the hundred |
+| **2** | `qemu/` — the real `nff-sdk-c` firmware in `qemu-system-xtensa` **(planned)** | **real** Guru-Meditation panics with resolvable backtraces; real OTA flash + partition rollback | heavy (~1 GB RAM, GB-scale image) | high-fidelity canary / pre-ship validation — spawn a handful |
+| **3** | real ESP32 hardware in a rack **(not implemented)** | real | a board | the seam; `POST /mocks {level:3}` returns `501` |
+
+Levels 1 and 2 are meant to run **together**: L1 gives you a believable fleet, L2 gives you one
+or two devices that genuinely compile, crash, and self-heal. Whatever the level, the device looks
+identical to the backend — the shared contract (env, mTLS cert chain, topic schema,
+heartbeat/crash/`ota_result` shapes, NVS model) lives in `core/` (`nff-mock-core`) so no level can
+drift from it.
+
+> **Status:** Level 1 and the level routing are live; the Level-2 runtime (`qemu/`) is not built
+> yet. Until the `nff-mock-l2` image exists, keep the controller's `NFF_MOCKCTL_MAX_LEVEL=1` so a
+> `level:2` request is rejected cleanly (400) instead of failing at `docker run`. The full L2
+> plan — what's built, the QEMU networking spike, the openeth + WiFi-shim approach, and the
+> remaining stages — is in [`docs/NFF_MOCK_ROADMAP.md`](../docs/NFF_MOCK_ROADMAP.md).
+
 ## Packages
 
-Two packages live here:
+The packages here:
 
 | dir | package | what |
 |---|---|---|
-| [`device/`](device/) | `nff-mock` | the pure-software virtual ESP32 — **one process == one device identity**. Connects to the real fleet broker over mTLS and is indistinguishable from an ESP32 running `nff-sdk-c`. See [`device/README.md`](device/README.md). |
-| [`controller/`](controller/) | `nff-mock-controller` | the **orchestrator** — an HTTP service that mints a cert, spawns a capped/TTL'd `device/` container per request, and reaps it. This is how you get mocks **on demand** instead of a hand-written compose block per identity. |
+| [`core/`](core/) | `nff-mock-core` | the **shared contract** every level presents to the platform — `NFF_MOCK_*` config, mTLS cert-chain assembly, MQTT topic schema, `CommandVerifier`, the heartbeat / `ota_result` wire shapes, the NVS model. A library (no entry point); the device packages build on it. |
+| [`device/`](device/) | `nff-mock` | **Level 1** — the pure-software virtual ESP32 (**one process == one device identity**). Connects to the real fleet broker over mTLS and is indistinguishable from an ESP32 running `nff-sdk-c`. See [`device/README.md`](device/README.md). |
+| [`qemu/`](qemu/) | `nff-mock-l2` | **Level 2** *(planned)* — the real compiled `nff-sdk-c` firmware booted in `qemu-system-xtensa`: genuine panics with resolvable backtraces + real OTA. Heavy; spawned rarely. |
+| [`controller/`](controller/) | `nff-mock-controller` | the **orchestrator** — an HTTP service that mints a cert, spawns a capped/TTL'd device container per request **at the requested level** (picking the image + resource caps), and reaps it. This is how you get mocks **on demand** instead of a hand-written compose block per identity. |
 
 ## How they fit together
 
 ```
-client ──POST /mocks──▶ nff-mock-controller ──┬─▶ fleet  POST /internal/provision   (mint cert, CA key stays in fleet)
-                              │                └─▶ docker run nff-mock  (capped, labelled, TTL'd)
-                              │
-                        (TTL reaper) ─────────────▶ docker kill+rm  +  fleet /internal/deprovision
+client ─POST /mocks {level}─▶ nff-mock-controller ──┬─▶ fleet  POST /internal/provision   (mint cert, CA key stays in fleet)
+                                  │                  └─▶ docker run <image-for-level>  (capped, labelled nff.level=N, TTL'd)
+                                  │
+                            (TTL reaper) ─────────────▶ docker kill+rm  +  fleet /internal/deprovision
 ```
 
 The controller never holds the CA signing key — cert minting is delegated to fleet's
@@ -144,4 +173,3 @@ here; it goes through the existing fleet and nff-ota planes against the spawned 
 
 Quick start for each package is in its own README. The controller is wired into
 `docker-compose.dev.yml` as `nff-mock-controller` (`:3004`).
-# nff-mock

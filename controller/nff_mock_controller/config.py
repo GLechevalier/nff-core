@@ -48,6 +48,36 @@ class NffMockControllerSettings(BaseSettings):
     # demo make mocks crash-loop on a buggy release and recover on the fix. Empty = off.
     mock_buggy_versions: str = ""
 
+    # ── Complexity levels ─────────────────────────────────────────────────────
+    # A mock's fidelity tier (see nff-mock/core/README.md):
+    #   0 = none          → spawn nothing
+    #   1 = lightweight   → the Python protocol sim (mock_image); cheap, spawns often
+    #   2 = virtual ESP32 → the real firmware booted in QEMU (l2_image); heavy, spawns rarely
+    #   3 = real hardware → not implemented; POST /mocks {level:3} returns 501
+    # default_level is what a request without an explicit `level` gets (1 = unchanged
+    # behaviour). Set max_level=1 in any environment that hasn't built the L2 image.
+    default_level: int = 1
+    max_level: int = 2
+
+    # Level 2 (real QEMU ESP32) — heavy, so its own image + larger caps + longer TTL,
+    # and a small fleet cap. read_only is off because QEMU needs a writable flash image
+    # (mounted on a dedicated tmpfs, l2_tmpfs_size).
+    l2_image: str = "nff-mock-l2:dev"
+    l2_mem: str = "1g"
+    l2_cpus: str = "1.0"
+    l2_pids: int = 512
+    l2_ttl_s: int = 7200
+    l2_read_only: bool = False
+    l2_tmpfs_size: str = "256m"
+    max_l2_per_project: int = 2
+    max_l2_total: int = 4
+    # device_type stamped into an L2 mock so its `devices` row is distinguishable from an
+    # L1 mock — nff-ota's source build branches on it (real compile vs the L1 regex path).
+    l2_device_type: str = "nff-qemu-esp32"
+
+    # Level 3 (real hardware) seam — a URL to a hardware-rack bridge. Unset → 501.
+    l3_bridge_url: str = ""
+
     # ── Fleet provisioning plane ──────────────────────────────────────────────
     # We POST to fleet's /internal/{provision,deprovision} to mint/remove certs.
     fleet_url: str = "http://nff-fleet:3001"
