@@ -1,0 +1,11 @@
+# partitions.csv — Stage-0 spike (4 MB). Two OTA slots (no factory) so a real OTA partition-flip +
+# rollback can be exercised; the app boots from ota_0. An nvs partition holds the injected
+# creds/boot_epoch; a coredump partition makes a real panic produce a resolvable ELF backtrace.
+# Sizes are chosen to fit EXACTLY in 4 MB (0x400000) — matches the L2 supervisor's flash.bin.
+# Name,     Type, SubType,  Offset,   Size
+nvs,        data, nvs,      0x9000,   0x6000
+otadata,    data, ota,      0xf000,   0x2000
+phy_init,   data, phy,      0x11000,  0x1000
+ota_0,      app,  ota_0,    0x20000,  0x1D0000
+ota_1,      app,  ota_1,    0x1F0000, 0x1D0000
+coredump,   data, coredump, 0x3C0000, 0x40000

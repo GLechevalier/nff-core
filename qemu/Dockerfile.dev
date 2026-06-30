@@ -1,0 +1,39 @@
+# nff-mock-l2 — DEV image (Level 2): the real firmware booted in qemu-system-xtensa.
+#
+# Build context is the nff-mock/ ROOT so the shared core (core/) and this package (qemu/) are
+# both visible. Built ONLY on demand — `docker compose --profile l2 build nff-mock-l2` — never by
+# the default `up`, because it is heavy.
+#
+# What it bundles: ncat (the host-side guestfwd forwarder), esptool (NVS/flash tooling via pip),
+# the Python supervisor, and — when ESP_QEMU_URL is supplied — the Espressif fork of
+# qemu-system-xtensa (the only build with an `esp32` machine). Without the QEMU binary the image
+# still builds and `nff-mock-l2 doctor` works; `run` then fails loudly with "qemu not found".
+FROM python:3.12-slim
+
+WORKDIR /app
+
+# ncat bridges the emulated NIC to in-cluster services (broker / OTA origin) via QEMU guestfwd.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ncat ca-certificates xz-utils curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Espressif qemu-system-xtensa. Pin a release asset and pass it at build time:
+#   docker build --build-arg ESP_QEMU_URL=https://github.com/espressif/qemu/releases/download/<tag>/<asset>.tar.xz ...
+# Left empty by default so the image builds without it (the supervisor degrades gracefully).
+ARG ESP_QEMU_URL=""
+RUN if [ -n "$ESP_QEMU_URL" ]; then \
+        curl -fsSL "$ESP_QEMU_URL" -o /tmp/qemu.tar.xz && \
+        mkdir -p /opt/qemu && tar -xJf /tmp/qemu.tar.xz -C /opt/qemu --strip-components=1 && \
+        rm /tmp/qemu.tar.xz && ln -sf /opt/qemu/bin/qemu-system-xtensa /usr/local/bin/qemu-system-xtensa ; \
+    else \
+        echo "WARNING: ESP_QEMU_URL unset — qemu-system-xtensa NOT installed (doctor works, run will not)"; \
+    fi
+
+COPY core/ core/
+COPY qemu/ qemu/
+
+RUN pip install --no-cache-dir --upgrade pip esptool && \
+    pip install --no-cache-dir -e ./core && \
+    pip install --no-cache-dir -e ./qemu
+
+ENTRYPOINT ["nff-mock-l2", "run"]

@@ -1,0 +1,37 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "nff-mock-l2"
+version = "0.1.0"
+description = "Level-2 virtual ESP32 — the real nff-sdk-c firmware booted in qemu-system-xtensa"
+requires-python = ">=3.12"
+dependencies = [
+    "nff-mock-core",
+    "click>=8.0",
+]
+
+[project.scripts]
+nff-mock-l2 = "nff_mock_l2.cli:cli"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.4",
+]
+# The Stage-0 spike's broker-side detector (spike/tools/watch_heartbeat.py) needs an MQTT client.
+spike = [
+    "paho-mqtt>=2.0",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["nff_mock_l2"]
+
+# nff-mock-core is a sibling path package in this monorepo (../core). The Docker image installs
+# it explicitly before this package; uv resolves it from here for local dev.
+[tool.uv.sources]
+nff-mock-core = { path = "../core", editable = true }
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

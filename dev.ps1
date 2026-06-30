@@ -29,6 +29,8 @@ param(
     [int]$FleetMcpPort = 3001,
     [int]$ControllerPort = 3004,
     [switch]$SkipBuild,
+    # Also build the heavy Level-2 image (nff-mock-l2:dev: QEMU + supervisor). Off by default.
+    [switch]$L2,
     [switch]$Down
 )
 
@@ -62,6 +64,14 @@ if (-not $SkipBuild) {
     Step "Building nff-mock-controller:dev"
     docker build -q -t nff-mock-controller:dev -f (Join-Path $repoDir "controller\Dockerfile.dev") (Join-Path $repoDir "controller") | Out-Null
     if ($LASTEXITCODE -ne 0) { throw "nff-mock-controller:dev build failed" }
+
+    if ($L2) {
+        # Heavy Level-2 image (QEMU + supervisor). Context = nff-mock/ root (needs core/ + qemu/).
+        # Pass -ESP_QEMU_URL via --build-arg when you have the pinned Espressif qemu release.
+        Step "Building nff-mock-l2:dev (heavy — QEMU + supervisor)"
+        docker build -q -t nff-mock-l2:dev -f (Join-Path $repoDir "qemu\Dockerfile.dev") $repoDir | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw "nff-mock-l2:dev build failed" }
+    }
 }
 
 # --- 2. Provision a project-bound cert for the standalone mock ----------------

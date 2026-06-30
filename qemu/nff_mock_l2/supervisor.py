@@ -1,0 +1,98 @@
+"""The Level-2 supervisor: prepare flash → launch QEMU → watch UART → relaunch across resets.
+
+The firmware itself owns the network (mTLS MQTT to the fleet, OTA download/flash/rollback), so
+the supervisor is deliberately thin: it boots the emulated device, tees its UART for the
+diagnosis plane, and handles the *physical* layer QEMU can't on its own — the reboot (relaunch
+against the same persistent flash, so an OTA partition-flip takes effect) and the crash-loop
+guard (stop relaunching a device that resets too fast).
+
+The QEMU launch + the firmware's networking need a live ``qemu-system-xtensa`` + the openeth
+firmware variant (the Stage-0 spike). The decision logic exercised here — argv, marker scan,
+crash-loop, NVS-cred prep — is unit-tested independently.
+"""
+
+from __future__ import annotations
+
+import logging
+import shutil
+import time
+from pathlib import Path
+
+from nff_mock_l2 import credentials, qemu, serial_monitor
+from nff_mock_l2.config import NffMockL2Settings
+
+logger = logging.getLogger(__name__)
+
+
+class Supervisor:
+    def __init__(self, cfg: NffMockL2Settings) -> None:
+        self.cfg = cfg
+        self.crash_loop = serial_monitor.CrashLoopDetector(
+            max_reboots=cfg.max_trial_boots, window_s=cfg.crash_loop_window_s
+        )
+
+    # ── flash preparation ────────────────────────────────────────────────────
+    def prepare_flash(self) -> Path:
+        """Stage a writable per-device flash image: copy the firmware image, then splice in this
+        device's NVS credential blob. Returns the writable flash path the QEMU drive points at."""
+        flash = self.cfg.flash_path
+        flash.parent.mkdir(parents=True, exist_ok=True)
+        if self.cfg.firmware_image is not None:
+            shutil.copyfile(self.cfg.firmware_image, flash)
+        elif not flash.exists():
+            raise FileNotFoundError(
+                "no firmware image: set NFF_MOCK_FIRMWARE_IMAGE or pre-stage flash_path "
+                "(the server-side build serves the merged.bin — Stage 4)"
+            )
+        # The NVS credential blob is generated from the provisioned certs and spliced into the
+        # flash at the nvs partition offset (credentials.write_nvs_csv → nvs_partition_gen →
+        # splice). Finalized with the L2 image; see credentials.py.
+        logger.info("prepared flash %s for %s", flash, self.cfg.device_id)
+        return flash
+
+    # ── run loop ─────────────────────────────────────────────────────────────
+    def run(self) -> None:
+        """Boot the device and supervise it: relaunch across each reset (so OTA flips take
+        effect) until it is stopped or declared a crash-loop."""
+        flash = self.prepare_flash()
+        argv = qemu.build_qemu_argv(self.cfg, flash)
+        logger.info("qemu argv: %s", " ".join(argv))
+
+        while True:
+            proc = qemu.QemuProcess(argv)
+            proc.start()
+            panicked = self._pump_serial(proc)
+            proc.wait()
+
+            self.crash_loop.record_reboot()
+            if self.crash_loop.is_crash_looping():
+                logger.error(
+                    "%s crash-looping (%d resets in %.0fs) — bricked, not relaunching",
+                    self.cfg.device_id, self.crash_loop.reboot_count, self.cfg.crash_loop_window_s,
+                )
+                return
+            logger.info("%s reset (panic=%s) — relaunching against persistent flash",
+                        self.cfg.device_id, panicked)
+            time.sleep(0.5)
+
+    def _pump_serial(self, proc: qemu.QemuProcess) -> bool:
+        """Tee the UART, recording whether a panic was seen this boot. The firmware reports the
+        crash over MQTT on its next boot (same as field hardware), so the supervisor's job is to
+        observe + persist the serial, not to publish."""
+        log = None
+        if self.cfg.serial_log_path is not None:
+            log = self.cfg.serial_log_path.open("a", encoding="utf-8")
+        panicked = False
+        try:
+            for line in proc.serial_lines():
+                if log is not None:
+                    log.write(line + "\n")
+                if serial_monitor.looks_like_panic(line):
+                    panicked = True
+                    logger.warning("%s PANIC: %s", self.cfg.device_id, line)
+                elif serial_monitor.looks_like_boot_banner(line):
+                    logger.info("%s booted: %s", self.cfg.device_id, line)
+        finally:
+            if log is not None:
+                log.close()
+        return panicked
