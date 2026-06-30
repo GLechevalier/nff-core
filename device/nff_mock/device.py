@@ -159,12 +159,50 @@ class VirtualDevice:
             self.firmware.version = self.fw_version
 
         # A higher version than a previously-injected (crash-injection) fault cures it —
-        # the agent's merged fix shipping as a good OTA. Mirrors clear-on-recovery.
-        if self.crash.fault_scenario and _version_gt(
-            self.fw_version, self.nvs.get_str("fault_fixed_after") or "0.0.0"
+        # the agent's merged fix shipping as a good OTA. Mirrors clear-on-recovery. This is
+        # version-gated and applies ONLY to command-injected faults; a held-firmware fault is
+        # content-gated (cured when the adopted sketch declares no fault), handled by
+        # _sync_fault_from_firmware below so version logic can't prematurely clear it.
+        if (
+            self.crash.fault_scenario
+            and self.crash.fault_source != "firmware"
+            and _version_gt(self.fw_version, self.nvs.get_str("fault_fixed_after") or "0.0.0")
         ):
             self.crash.clear_fault()
             logger.info("adopted fixed version %s -> fault cleared", self.fw_version)
+
+    def _sync_fault_from_firmware(self) -> None:
+        """Make the held firmware's declared `fault` the source of truth for crash-looping.
+
+        Called on every boot (after the staged OTA, if any, has been committed and the new
+        sketch loaded): if the code the device now holds declares a fault it arms the
+        persistent crash-loop (driven by _fault_recrash_loop); if it declares none it clears
+        any *firmware-sourced* fault, so the device recovers. A command-injected fault
+        (source != "firmware") is left untouched — its cure is the version gate above."""
+        fault = getattr(self.firmware, "fault", None)
+        scenario = fault.get("scenario") if isinstance(fault, dict) else None
+        if scenario:
+            # fixed_after is irrelevant for content-gated faults (the curing OTA is the one
+            # whose sketch drops the fault, regardless of version); pin it low so the legacy
+            # version path never owns it.
+            self.crash.arm_fault(scenario, fixed_after="0.0.0", source="firmware")
+            logger.info("held firmware declares fault %s -> crash-loop armed", scenario)
+        elif self.crash.fault_scenario and self.crash.fault_source == "firmware":
+            self.crash.clear_fault()
+            logger.info("held firmware declares no fault -> firmware fault cleared")
+
+    def _online_heartbeat(self) -> dict:
+        """The online heartbeat, but with status='error' while a crash-loop fault is armed.
+
+        A crash-looping device is up just long enough between reboots to send a heartbeat;
+        without this it would report 'online' the whole time (build_online hardcodes it) and
+        the dashboard would never show it as broken. Surfacing 'error' makes the fleet flip
+        the device red until an OTA clears the fault (matching the demo's 'flip to error,
+        then back online' contract). The fault is cleared on heal, so the device goes green."""
+        payload = heartbeat.build_online(self)
+        if self.crash.fault_scenario:
+            payload["status"] = "error"
+        return payload
 
     async def _heartbeat_loop(self) -> None:
         try:
@@ -173,7 +211,7 @@ class VirtualDevice:
                 self.telemetry.sample()
                 await self.publish(
                     topic_heartbeat(self.cfg.project_id, self.cfg.device_id),
-                    heartbeat.build_online(self),
+                    self._online_heartbeat(),
                     retain=True,
                 )
         except asyncio.CancelledError:
@@ -216,6 +254,9 @@ class VirtualDevice:
         self._reboot.clear()
         self._apply_pending_ota()
         self.firmware.on_boot(self.fw_ctx)
+        # The held firmware (stock, a boot sketch, or one just adopted via OTA) decides
+        # whether this device crash-loops — arm/clear the persistent fault accordingly.
+        self._sync_fault_from_firmware()
 
         ctx = build_ssl_context(self.cfg)
         will = aiomqtt.Will(
@@ -241,7 +282,7 @@ class VirtualDevice:
             # Boot announce, then drain any pending crash / OTA result.
             self.telemetry.sample()
             await self.publish(
-                topic_heartbeat(self.cfg.project_id, self.cfg.device_id), heartbeat.build_online(self), retain=True
+                topic_heartbeat(self.cfg.project_id, self.cfg.device_id), self._online_heartbeat(), retain=True
             )
             await self.crash.check_and_report()
             await self.ota.check_pending_result()

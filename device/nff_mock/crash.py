@@ -56,17 +56,27 @@ class CrashInjector:
         logger.info("crash injected: %s (#%d)", sid, count)
         d.request_reboot()
 
-    def arm_fault(self, scenario_id: str, *, fixed_after: str) -> None:
+    def arm_fault(self, scenario_id: str, *, fixed_after: str, source: str = "inject") -> None:
         self.d.nvs.set_str("fault_scenario", scenario_id)
         self.d.nvs.set_str("fault_fixed_after", fixed_after or "0.0.0")
+        # Who armed it: "inject" (a `crash` command, cured by an OTA to a higher version)
+        # vs "firmware" (the held sketch declares a bug, cured by an OTA whose firmware
+        # declares none). The distinction lets version-based curing and content-based
+        # curing coexist without one clobbering the other.
+        self.d.nvs.set_str("fault_source", source)
 
     def clear_fault(self) -> None:
         self.d.nvs.erase("fault_scenario")
         self.d.nvs.erase("fault_fixed_after")
+        self.d.nvs.erase("fault_source")
 
     @property
     def fault_scenario(self) -> str | None:
         return self.d.nvs.get_str("fault_scenario")
+
+    @property
+    def fault_source(self) -> str | None:
+        return self.d.nvs.get_str("fault_source")
 
     # ------------------------------------------------------------------ #
     # Reporting                                                           #

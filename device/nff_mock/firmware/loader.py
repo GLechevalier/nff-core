@@ -33,10 +33,28 @@ class _SketchFirmware(VirtualFirmware):
         self.extra_heartbeat_fields = dict(spec.get("heartbeat_extra", {}))
         self._telemetry_spec = dict(spec.get("telemetry_extra", {}))
         self.extra_telemetry_fields = {}
+        self.fault = self._parse_fault(spec.get("fault"))
         self.command_handlers = {
             name: self._make_handler(name, op)
             for name, op in dict(spec.get("commands", {})).items()
         }
+
+    @staticmethod
+    def _parse_fault(raw: Any) -> dict[str, Any] | None:
+        """Normalise a sketch's `fault` into {"scenario": <id>} or None.
+
+        Accepts {"scenario": "null_deref"} (the canonical form) or a bare scenario id
+        string. An unknown / malformed value is treated as "no fault" so a bad sketch
+        never wedges the device crash-looping on a scenario it can't report.
+        """
+        from nff_mock import scenarios
+
+        scenario = raw.get("scenario") if isinstance(raw, dict) else raw
+        if not isinstance(scenario, str) or scenario not in scenarios.SCENARIOS:
+            if scenario:
+                logger.warning("sketch declared unknown fault scenario %r; ignoring", scenario)
+            return None
+        return {"scenario": scenario}
 
     def on_boot(self, ctx: FirmwareContext) -> None:
         # Seed an initial telemetry sample so the first diag after boot is populated.
