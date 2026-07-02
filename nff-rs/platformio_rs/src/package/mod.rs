@@ -9,6 +9,7 @@
 pub mod error;
 pub mod manifest;
 pub mod meta;
+pub mod pack;
 pub mod version;
 
 pub use error::{PackageError, Result};
