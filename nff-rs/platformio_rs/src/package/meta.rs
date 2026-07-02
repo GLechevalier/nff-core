@@ -651,6 +651,11 @@ impl PackageItem {
         Ok(None)
     }
 
+    /// Canonicalized path, falling back to the raw path when it doesn't exist.
+    fn real_path(&self) -> PathBuf {
+        fs::canonicalize(&self.path).unwrap_or_else(|_| self.path.clone())
+    }
+
     /// `PackageItem.dump_meta`.
     pub fn dump_meta(&self) -> Result<()> {
         let location = self
@@ -667,6 +672,14 @@ impl PackageItem {
         md.dump(&location.join(Self::METAFILE_NAME))
     }
 }
+
+impl PartialEq for PackageItem {
+    /// `PackageItem.__eq__` — realpath + metadata equality.
+    fn eq(&self, other: &Self) -> bool {
+        self.real_path() == other.real_path() && self.metadata == other.metadata
+    }
+}
+impl Eq for PackageItem {}
 
 // ---------------------------------------------------------------------------
 // PackageCompatibility

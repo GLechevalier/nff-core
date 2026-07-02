@@ -37,6 +37,20 @@ pub enum PackageError {
     /// validated. `Display` reproduces the upstream `__str__`.
     ManifestValidation { messages: serde_json::Value, valid_data: serde_json::Value },
 
+    /// `platformio.package.exception.MissingPackageManifestError` — carries the
+    /// comma-joined manifest names the manager looked for.
+    MissingPackageManifest { names: String },
+
+    /// `platformio.package.exception.UnknownPackageError`.
+    UnknownPackage { spec: String },
+
+    /// `platformio.package.exception.IncompatiblePackageError`.
+    IncompatiblePackage { spec: String, system: String },
+
+    /// `platformio.http.HTTPClientError` — carries the HTTP status when known
+    /// (so the registry client can turn a 404 into "no such package").
+    Http { message: String, status: Option<u16> },
+
     /// `platformio.package.exception.ManifestException` / generic package error.
     Package { message: String },
 }
@@ -52,6 +66,10 @@ impl PackageError {
             Self::ManifestParser { .. } => "ManifestParserError",
             Self::UnknownManifest { .. } => "UnknownManifestError",
             Self::ManifestValidation { .. } => "ManifestValidationError",
+            Self::MissingPackageManifest { .. } => "MissingPackageManifestError",
+            Self::UnknownPackage { .. } => "UnknownPackageError",
+            Self::IncompatiblePackage { .. } => "IncompatiblePackageError",
+            Self::Http { .. } => "HTTPClientError",
             Self::Package { .. } => "PackageException",
         }
     }
@@ -76,6 +94,18 @@ impl fmt::Display for PackageError {
                 "Invalid manifest fields: {messages}. \nPlease check specification -> \
                  https://docs.platformio.org/page/librarymanager/config.html"
             ),
+            Self::MissingPackageManifest { names } => {
+                write!(f, "Could not find one of '{names}' manifest files in the package")
+            }
+            Self::UnknownPackage { spec } => {
+                write!(f, "Could not find the package with '{spec}' requirements")
+            }
+            Self::IncompatiblePackage { spec, system } => write!(
+                f,
+                "Could not find a version of the package with '{spec}' requirements \
+                 compatible with the '{system}' system"
+            ),
+            Self::Http { message, .. } => write!(f, "{message}"),
             Self::Package { message } => write!(f, "{message}"),
         }
     }

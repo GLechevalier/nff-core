@@ -6,7 +6,7 @@
 //! are serialized by [`TEST_LOCK`].
 
 use std::path::{Path, PathBuf, MAIN_SEPARATOR};
-use std::sync::{Mutex, MutexGuard};
+use std::sync::MutexGuard;
 
 use super::{Defaulted, ProjectConfig, SetValue, Value};
 use super::error::ConfigError;
@@ -103,10 +103,9 @@ src_filter = ${custom.src_filter} +<c>
 // Test harness
 // ---------------------------------------------------------------------------
 
-static TEST_LOCK: Mutex<()> = Mutex::new(());
-
 fn lock() -> MutexGuard<'static, ()> {
-    TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    // Shared with every other module's env/cwd-mutating tests.
+    crate::test_lock::guard()
 }
 
 /// Restores the working directory on drop.

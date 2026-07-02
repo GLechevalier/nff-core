@@ -6,10 +6,13 @@
 //! vendored `tests/package/test_meta.py`, mirrored as Rust unit tests in
 //! [`tests`].
 
+pub mod download;
 pub mod error;
+pub mod manager;
 pub mod manifest;
 pub mod meta;
 pub mod pack;
+pub mod unpack;
 pub mod version;
 
 pub use error::{PackageError, Result};

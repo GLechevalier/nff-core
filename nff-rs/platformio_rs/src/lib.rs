@@ -11,7 +11,27 @@
 
 pub mod cli;
 pub mod config;
+pub mod http;
 pub mod package;
+pub mod registry;
+
+/// A process-wide lock shared by every test that mutates global state (the
+/// current directory or environment variables), so tests across modules
+/// serialize against each other rather than racing on `PLATFORMIO_*`/cwd.
+#[cfg(test)]
+pub(crate) mod test_lock {
+    use std::sync::{Mutex, MutexGuard, PoisonError};
+
+    static LOCK: Mutex<()> = Mutex::new(());
+
+    pub(crate) fn guard() -> MutexGuard<'static, ()> {
+        LOCK.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+/// `platformio.__registry_mirror_hosts__` — the registry mirror hosts. API
+/// endpoints are `https://api.<host>`, download endpoints `https://dl.<host>`.
+pub const REGISTRY_MIRROR_HOSTS: &[&str] = &["registry.platformio.org", "registry.nm1.platformio.org"];
 
 /// The upstream PlatformIO Core version this port targets for parity.
 ///
