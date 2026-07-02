@@ -52,6 +52,10 @@ def _make_supabase_mock() -> MagicMock:
     table_mock.eq.return_value = table_mock
     table_mock.in_.return_value = table_mock
     table_mock.neq.return_value = table_mock
+    table_mock.lt.return_value = table_mock
+    table_mock.gt.return_value = table_mock
+    table_mock.gte.return_value = table_mock
+    table_mock.lte.return_value = table_mock
     table_mock.order.return_value = table_mock
     table_mock.limit.return_value = table_mock
     # Client is an AsyncClient: .execute() is awaited (the chained builder

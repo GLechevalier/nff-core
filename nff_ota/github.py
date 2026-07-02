@@ -8,15 +8,20 @@ image (WiFi→openeth shim force-included, merged for QEMU) via its internal HTT
         Header: X-Fleet-Secret: <shared secret>
         Body:   {"source": "...", "build_id": "<16hex>", "fw_version": "<semver>",
                  "sketch_name"?: "...", "files"?: {path: content}}
-        -> 200  {"ok": true, "artifact_b64": "...", "elf_b64": "...", "build_id": "...",
-                 "sha256": "...", "size_bytes": <int>, "logs": "..."}
+        -> 200  application/x-ndjson: zero or more {"keepalive": true} lines while the build
+                runs, then a terminal line: {"ok": true, "artifact_b64": "...", "elf_b64": "...",
+                "build_id": "...", "sha256": "...", "size_bytes": <int>, "logs": "..."}
+                (or {"ok": false, "error": "...", "logs": "..."} on a build failure).
 
-The returned build_id is baked into the firmware (NFF_BUILD_ID) so a QEMU crash's backtrace
-resolves against the ELF (stored on nff-fleet via fleet.store_elf).
+The stream's keepalives keep the connection from idling through the multi-minute compile
+(Docker Desktop's proxy drops idle host↔container conns). The returned build_id is baked into
+the firmware (NFF_BUILD_ID) so a QEMU crash's backtrace resolves against the ELF (stored on
+nff-fleet via fleet.store_elf).
 """
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 import httpx
@@ -58,22 +63,47 @@ async def compile_source(
         "device_type": device_type,
         "sketch_name": sketch_name,
     }
-    async with httpx.AsyncClient(timeout=settings.github_timeout) as client:
+    # nff-github streams newline-delimited JSON: periodic {"keepalive": true} lines while the
+    # ~15-18 min build runs, then a single terminal result line. We read the stream so the
+    # connection never sits idle long enough for Docker Desktop's vpnkit proxy to drop it. The
+    # timeout is per-read (the gap between lines), NOT a total cap: keepalives arrive every few
+    # seconds so a long build never trips it, but a genuinely stuck stream still does.
+    timeout = httpx.Timeout(settings.github_timeout, connect=30.0)
+    final: dict[str, Any] | None = None
+    status_code = 0
+    async with httpx.AsyncClient(timeout=timeout) as client:
         try:
-            resp = await client.post(
-                url, json=body, headers={"X-Fleet-Secret": settings.github_secret}
-            )
+            async with client.stream(
+                "POST", url, json=body, headers={"X-Fleet-Secret": settings.github_secret}
+            ) as resp:
+                status_code = resp.status_code
+                if resp.status_code != 200:
+                    # Auth/validation failures come back as a normal (non-streamed) JSON body.
+                    await resp.aread()
+                    try:
+                        final = resp.json()
+                    except ValueError:
+                        final = {"error": resp.text}
+                else:
+                    async for line in resp.aiter_lines():
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            obj = json.loads(line)
+                        except ValueError:
+                            continue  # ignore a partial/non-JSON line
+                        if obj.get("keepalive"):
+                            continue
+                        final = obj  # last non-keepalive line is the result
         except httpx.HTTPError as exc:
             raise GithubError(f"nff-github request failed: {exc}") from exc
 
-    try:
-        data = resp.json()
-    except ValueError:
-        data = {"error": resp.text}
-
-    if resp.status_code != 200 or not data.get("ok"):
-        detail = data.get("error") or data.get("logs") or resp.text
-        raise GithubError(f"nff-github compile failed ({resp.status_code}): {str(detail)[:500]}")
-    if not data.get("artifact_b64"):
+    if final is None:
+        raise GithubError(f"nff-github returned no result (status {status_code})")
+    if not final.get("ok"):
+        detail = final.get("error") or final.get("logs") or "unknown error"
+        raise GithubError(f"nff-github compile failed: {str(detail)[:500]}")
+    if not final.get("artifact_b64"):
         raise GithubError("nff-github returned no artifact")
-    return data
+    return final

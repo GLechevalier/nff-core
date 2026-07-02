@@ -23,6 +23,7 @@ import threading
 from nff_ota import poller, reaper, supervisor
 from nff_ota.client import init_client
 from nff_ota.config import settings
+from nff_ota.source import fix_worker
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +43,10 @@ async def _run() -> None:
         tasks.append(asyncio.create_task(supervisor._loop()))
     else:
         logger.info("supervisor disabled (OTA_SUPERVISOR_ENABLED=false)")
+    if settings.fix_worker_enabled:
+        tasks.append(asyncio.create_task(fix_worker._loop()))
+    else:
+        logger.info("fix_worker disabled (OTA_FIX_WORKER_ENABLED=false)")
     await asyncio.gather(*tasks)
 
 
@@ -67,8 +72,10 @@ def start() -> None:
     _thread = threading.Thread(target=_thread_main, name="nff-ota-sweeps", daemon=True)
     _thread.start()
     logger.info(
-        "background sweeps started (poller_interval=%ss reaper_interval=%ss supervisor_interval=%ss)",
-        settings.deployment_poller_interval, settings.reaper_interval, settings.supervisor_interval,
+        "background sweeps started (poller_interval=%ss reaper_interval=%ss "
+        "supervisor_interval=%ss fix_worker_interval=%ss)",
+        settings.deployment_poller_interval, settings.reaper_interval,
+        settings.supervisor_interval, settings.fix_worker_interval,
     )
 
 

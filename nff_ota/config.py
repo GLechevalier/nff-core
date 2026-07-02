@@ -53,6 +53,17 @@ class OtaSettings(BaseSettings):
     supervisor_interval: float = 30.0          # how often the supervisor sweeps
     default_failure_threshold: float = 0.05    # default per-deployment auto-halt threshold (5%)
 
+    # Firmware-fix worker: submit_firmware_fix enqueues a firmware_fix_jobs row and returns
+    # immediately (so the agent→nff-ota MCP call never idles through the ~15-18 min L2 compile
+    # and gets dropped by Docker Desktop's vpnkit proxy). This worker, on the process-level
+    # sweeps loop, claims pending jobs and runs the compile+deploy. See source/fix_worker.py.
+    fix_worker_enabled: bool = True
+    fix_worker_interval: float = 3.0      # how often the worker claims the next pending job
+    # A job claimed but not finished within this window (a worker that died mid-compile) is
+    # re-queued — generous vs build_timeout (1800s) so a slow-but-live build is never stolen.
+    fix_job_stale_seconds: float = 2400.0
+    fix_job_max_attempts: int = 2         # after this many claims, a stuck job fails terminally
+
     # Blast-radius controls (gap #3).
     confirm_threshold_devices: int = 50  # creating a deployment targeting more than this many
                                          # devices requires confirm=true

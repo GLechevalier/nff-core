@@ -21,10 +21,12 @@ from nff_ota.client import get_client
 from nff_ota.models.artifact import UploadArtifactParams
 from nff_ota.models.deployment import CreateDeploymentParams
 from nff_ota.models.source import (
+    FirmwareFixJob,
     FirmwareSourceInfo,
     GetFirmwareSourceResult,
     SubmitFirmwareFixResult,
 )
+from nff_ota.source import jobs
 from nff_ota.source.compile import compile_sketch
 from nff_ota.tools.artifacts.ops import upload_artifact
 from nff_ota.tools.deployments.ops import create_deployment, start_deployment
@@ -211,30 +213,73 @@ async def get_firmware_source(device_id: str) -> GetFirmwareSourceResult:
     )
 
 
+async def _device_project_id(device_id: str) -> tuple[str | None, str | None]:
+    """(project_id, error) for a device — a fast pre-check so a bad target fails at submit."""
+    client = get_client()
+    resp = (
+        await client.table("devices").select("project_id").eq("id", device_id).limit(1).execute()
+    )
+    if not resp.data:
+        return None, f"device {device_id!r} not found"
+    project_id = resp.data[0].get("project_id")
+    if not project_id:
+        return None, f"device {device_id!r} has no project_id (tenant) — re-provision it"
+    return project_id, None
+
+
 async def submit_firmware_fix(
     device_id: str, version: str, source: str, changelog: str | None = None
-) -> SubmitFirmwareFixResult:
-    """Ship a fixed firmware source as the next release and roll it out to the device.
+) -> FirmwareFixJob:
+    """Enqueue a firmware fix compile+deploy and return a job handle immediately.
 
-    Enforces the device's anti-downgrade rule: ``version`` must be a bare semver strictly
-    greater than the revision the device runs now."""
+    An L2 fix is genuinely compiled (~15-18 min), so this does NOT block on the compile:
+    it validates the request cheaply (semver, anti-downgrade, device exists), records a
+    pending ``firmware_fix_jobs`` row, and returns a ``FirmwareFixJob`` with ``status`` set.
+    A background worker (source/fix_worker.py) runs the compile+deploy; the caller polls
+    ``get_firmware_fix_status(job_id)`` until ``status`` is ``done`` or ``error``.
+
+    Enforces the device's anti-downgrade rule up front: ``version`` must be a bare semver
+    strictly greater than the revision the device runs now (a rejected job never enqueues).
+    """
     new = _semver(version)
     if new is None:
-        return SubmitFirmwareFixResult(
-            error=f"version {version!r} must be a bare semver (major.minor.patch)"
+        return FirmwareFixJob(
+            job_id="", status="error",
+            error=f"version {version!r} must be a bare semver (major.minor.patch)",
         )
+    project_id, dev_err = await _device_project_id(device_id)
+    if dev_err:
+        return FirmwareFixJob(job_id="", status="error", device_id=device_id, error=dev_err)
+
     current = await _latest_revision(device_id)
     if current is not None:
         cur = _semver(current.get("version"))
         if cur is not None and new <= cur:
-            return SubmitFirmwareFixResult(
+            return FirmwareFixJob(
+                job_id="", status="error", device_id=device_id,
                 error=(
                     f"version {version} is not strictly greater than the current "
                     f"{current['version']} — pick a higher semver"
-                )
+                ),
             )
     parent = current.get("version") if current else None
-    return await build_and_deploy_source(
-        device_id, version, source, author="agent",
-        parent_version=parent, changelog=changelog,
-    )
+    try:
+        job_id = await jobs.enqueue(
+            device_id, version, source,
+            project_id=project_id, author="agent",
+            parent_version=parent, changelog=changelog,
+        )
+    except Exception as exc:  # noqa: BLE001 — surface a DB/enqueue failure to the caller
+        return FirmwareFixJob(
+            job_id="", status="error", device_id=device_id,
+            error=f"could not enqueue fix job: {exc}",
+        )
+    return FirmwareFixJob(job_id=job_id, status="pending", device_id=device_id, version=version)
+
+
+async def get_firmware_fix_status(job_id: str) -> FirmwareFixJob:
+    """Read the status of a firmware fix job enqueued by ``submit_firmware_fix``."""
+    job = await jobs.get(job_id)
+    if job is None:
+        return FirmwareFixJob(job_id=job_id, status="error", error=f"job {job_id!r} not found")
+    return job

@@ -53,14 +53,76 @@ async def real_build_and_deploy(
     client = get_client()
     build_id = build_id_for(source)  # identical contract to L1: sha256(source)[:16]
 
-    # 1. Real compile (the regex analyzer's L2 replacement).
-    try:
-        result = await github.compile_source(source, build_id, version, device_type)
-    except github.GithubError as exc:
-        return SubmitFirmwareFixResult(error=f"real compile failed: {exc}")
+    # 1. Reuse an already-built artifact for this build_id if one exists — BEFORE compiling. build_id =
+    #    sha256(source)[:16] and firmware_versions.build_id is UNIQUE, so the same source (a re-seed, or
+    #    the same fixture on another mock) is byte-identical and its app/ELF/merged were already
+    #    uploaded+staged on the first build. Skipping the compile makes a re-seed near-instant, which
+    #    also avoids a multi-minute silently-blocking HTTP request that Docker Desktop's port-proxy
+    #    would drop as idle. A fresh source falls through to the real compile.
+    existing = (
+        await client.table("firmware_versions")
+        .select("version")
+        .eq("build_id", build_id)
+        .limit(1)
+        .execute()
+    )
+    if existing.data:
+        catalog_version = existing.data[0]["version"]
+        logger.info("reusing existing artifact %s for build_id=%s (skipping compile)", catalog_version, build_id)
+    else:
+        # Real compile (the regex analyzer's L2 replacement).
+        try:
+            result = await github.compile_source(source, build_id, version, device_type)
+        except github.GithubError as exc:
+            return SubmitFirmwareFixResult(error=f"real compile failed: {exc}")
 
-    # 2. Record the revision (the source of truth the agent reads back). No compile-time fault
-    #    for L2 — a genuine panic happens at runtime in QEMU, not via a regex match.
+        # Upload the APP image as the deployable OTA artifact (NOT the merged 4 MB flash — that fails
+        # Update.begin "too large"; the merged is cold-boot only, staged below).
+        catalog_version = _catalog_version(device_id, version)
+        bin_bytes = base64.b64decode(result["artifact_b64"])
+        fd = tempfile.NamedTemporaryFile(prefix="nff-l2-fw-", suffix=".bin", delete=False)
+        try:
+            fd.write(bin_bytes)
+            fd.close()
+            upload = await upload_artifact(
+                UploadArtifactParams(
+                    name=catalog_version,
+                    version=catalog_version,
+                    device_types=[device_type],
+                    file_path=fd.name,
+                    build_id=build_id,
+                    release_version=version,
+                    author=author,
+                    changelog=changelog,
+                )
+            )
+        finally:
+            Path(fd.name).unlink(missing_ok=True)
+        if upload.error:
+            return SubmitFirmwareFixResult(error=f"artifact upload failed: {upload.error}")
+
+        # Stage the ELF on fleet under build_id so fleet_resolve_backtrace can symbolicate the QEMU
+        #    crash. A missing ELF must not block the rollout — it only costs a resolved backtrace.
+        elf_b64 = result.get("elf_b64")
+        if elf_b64:
+            try:
+                await fleet.store_elf(build_id, elf_b64)
+            except fleet.FleetError as exc:
+                logger.warning("could not store ELF for %s (build_id=%s): %s", device_id, build_id, exc)
+        else:
+            logger.warning("real compile for %s returned no ELF — backtraces will not resolve", device_id)
+
+        # Stage the MERGED 4 MB flash image on fleet under build_id for cold-boot spawns (QEMU -drive;
+        #    read off the shared /data mount as NFF_MOCK_FIRMWARE_IMAGE). This is the MERGED image, NOT
+        #    the OTA artifact (which is the app). Falls back to the artifact for non-L2 builds.
+        cold_boot_b64 = result.get("merged_b64") or result["artifact_b64"]
+        try:
+            await fleet.store_bin(build_id, cold_boot_b64)
+        except fleet.FleetError as exc:
+            logger.warning("could not store bin for %s (build_id=%s): %s", device_id, build_id, exc)
+
+    # 2. Record the revision (device-scoped source of truth the agent reads back). No compile-time
+    #    fault for L2 — a genuine panic happens at runtime in QEMU, not via a regex match.
     try:
         await client.table("mock_firmware_revisions").insert(
             {
@@ -77,52 +139,6 @@ async def real_build_and_deploy(
         ).execute()
     except Exception as exc:  # noqa: BLE001 — unique(device_id, version) or RLS/db error
         return SubmitFirmwareFixResult(error=f"could not record revision: {exc}")
-
-    # 3. Upload the merged flash image as the deployable artifact.
-    catalog_version = _catalog_version(device_id, version)
-    bin_bytes = base64.b64decode(result["artifact_b64"])
-    fd = tempfile.NamedTemporaryFile(prefix="nff-l2-fw-", suffix=".bin", delete=False)
-    try:
-        fd.write(bin_bytes)
-        fd.close()
-        upload = await upload_artifact(
-            UploadArtifactParams(
-                name=catalog_version,
-                version=catalog_version,
-                device_types=[device_type],
-                file_path=fd.name,
-                build_id=build_id,
-                release_version=version,
-                author=author,
-                changelog=changelog,
-            )
-        )
-    finally:
-        Path(fd.name).unlink(missing_ok=True)
-    if upload.error:
-        return SubmitFirmwareFixResult(error=f"artifact upload failed: {upload.error}")
-
-    # 4. Stage the ELF on fleet under build_id so fleet_resolve_backtrace can symbolicate the
-    #    QEMU crash. A missing ELF must not block the rollout — it only costs us a resolved
-    #    backtrace, not the firmware.
-    elf_b64 = result.get("elf_b64")
-    if elf_b64:
-        try:
-            await fleet.store_elf(build_id, elf_b64)
-        except fleet.FleetError as exc:
-            logger.warning("could not store ELF for %s (build_id=%s): %s", device_id, build_id, exc)
-    else:
-        logger.warning("real compile for %s returned no ELF — backtraces will not resolve", device_id)
-
-    # 4b. Stage the merged flash image on fleet under the same build_id, so the L2 supervisor can
-    #    seed a fresh emulated device's flash by reading it off the shared /data mount
-    #    (NFF_MOCK_FIRMWARE_IMAGE = /data/firmware/{build_id}/firmware.bin). Best-effort — the
-    #    device still gets this build via the OTA path below; store_bin only enables cold-boot
-    #    spawns of a device already pinned to this build_id.
-    try:
-        await fleet.store_bin(build_id, result["artifact_b64"])
-    except fleet.FleetError as exc:
-        logger.warning("could not store bin for %s (build_id=%s): %s", device_id, build_id, exc)
 
     # 5. Deploy to the device's group via the normal OTA path.
     created = await create_deployment(

@@ -84,6 +84,54 @@ async def test_real_build_and_deploy(mock_supabase, monkeypatch):
     assert calls["start"] == "dep-1"
 
 
+async def test_real_build_and_deploy_reuses_existing_artifact(mock_supabase, monkeypatch):
+    # A build_id already present in firmware_versions must SKIP the compile+upload+store entirely
+    # (the reuse-before-compile fast path that keeps a re-seed instant) and still record the
+    # revision + roll out. Any compile/upload/store call would be a bug, so they raise.
+    bid = _build_id(SRC)
+    catalog = "mock-l2-2.0.0"
+    resp_existing = MagicMock(data=[{"version": catalog}])   # firmware_versions has this build_id
+    resp_insert = MagicMock(data=[{}])                       # revision insert
+    mock_supabase.table.return_value.execute = AsyncMock(side_effect=[resp_existing, resp_insert])
+
+    async def must_not_compile(*a, **k):
+        raise AssertionError("compile_source called on the reuse path")
+
+    async def must_not_upload(*a, **k):
+        raise AssertionError("upload_artifact called on the reuse path")
+
+    async def must_not_store(*a, **k):
+        raise AssertionError("fleet store called on the reuse path")
+
+    created = {}
+
+    async def fake_create(params):
+        created["target_version"] = params.target_version
+        return MagicMock(error=None, deployment=MagicMock(id="dep-reuse"))
+
+    async def fake_start(deployment_id):
+        return MagicMock(delivered=1)
+
+    monkeypatch.setattr(realcompile.github, "compile_source", must_not_compile)
+    monkeypatch.setattr(realcompile, "upload_artifact", must_not_upload)
+    monkeypatch.setattr(realcompile.fleet, "store_elf", must_not_store)
+    monkeypatch.setattr(realcompile.fleet, "store_bin", must_not_store)
+    monkeypatch.setattr(realcompile, "create_deployment", fake_create)
+    monkeypatch.setattr(realcompile, "start_deployment", fake_start)
+
+    res = await realcompile.real_build_and_deploy(
+        "mock-l2", "2.0.0", SRC, "agent",
+        project_id="p", group_id="g", device_type="nff-qemu-esp32",
+    )
+    assert res.error is None
+    assert res.deployment_id == "dep-reuse"
+    assert res.fault_remaining is False
+    # Deployed the reused catalog version (proves we picked existing.data[0]["version"]).
+    assert created["target_version"] == catalog
+    # And the build_id we looked up was sha256(source)[:16].
+    mock_supabase.table.return_value.eq.assert_any_call("build_id", bid)
+
+
 async def test_real_build_and_deploy_compile_error(mock_supabase, monkeypatch):
     async def boom(*a, **k):
         raise realcompile.github.GithubError("toolchain exploded")

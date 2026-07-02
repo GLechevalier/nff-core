@@ -33,3 +33,23 @@ class SubmitFirmwareFixResult(BaseModel):
     # that the fix did not actually remove the fault, so the device will keep crash-looping.
     fault_remaining: bool = False
     error: str | None = None
+
+
+class FirmwareFixJob(BaseModel):
+    """The async view of a firmware fix: what ``submit_firmware_fix`` returns and what
+    ``get_firmware_fix_status`` polls.
+
+    An L2 fix is genuinely compiled (~15-18 min), so the compile+deploy runs in a
+    background worker (see nff_ota/source/fix_worker.py) and the tool returns a job handle
+    immediately instead of holding the MCP call open for the whole compile. ``status`` walks
+    pending → running → done/error. The build outcome (``deployment_id`` / ``fault_remaining``)
+    is only populated once ``status == 'done'``; ``error`` is set once ``status == 'error'``."""
+
+    job_id: str
+    status: str                        # pending | running | done | error
+    device_id: str | None = None
+    version: str | None = None
+    deployment_id: str | None = None
+    # True when the compiled fix still contains the fault — the device will keep crash-looping.
+    fault_remaining: bool = False
+    error: str | None = None
