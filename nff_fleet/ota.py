@@ -18,8 +18,25 @@ def elf_path(build_id: str) -> Path:
     return settings.firmware_dir / build_id / "firmware.elf"
 
 
+def bin_path(build_id: str) -> Path:
+    return settings.firmware_dir / build_id / "firmware.bin"
+
+
 async def store_elf(build_id: str, data: bytes) -> Path:
     dest = elf_path(build_id)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    async with aiofiles.open(dest, "wb") as f:
+        await f.write(data)
+    return dest
+
+
+async def store_bin(build_id: str, data: bytes) -> Path:
+    """Stage a build's merged flash image, keyed by build_id.
+
+    The L2 supervisor mounts /data:ro and reads this back to seed a fresh emulated device's flash
+    (NFF_MOCK_FIRMWARE_IMAGE = /data/firmware/{build_id}/firmware.bin). Parallels store_elf; the
+    ELF is for crash symbolication, the bin is the bootable image."""
+    dest = bin_path(build_id)
     dest.parent.mkdir(parents=True, exist_ok=True)
     async with aiofiles.open(dest, "wb") as f:
         await f.write(data)

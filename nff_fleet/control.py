@@ -30,6 +30,13 @@ POST /internal/deprovision
     callers (nff-mock-controller) ask fleet to issue certs rather than holding the CA key
     themselves. deprovision is constrained to mock-prefixed ids so it can never delete a
     real device's credentials.
+
+POST /internal/store-elf
+    Header: X-Fleet-Secret: <shared secret>
+    Body:   {"build_id": "<16hex>", "elf_b64": "<base64 ELF>"}
+    Stage a build's ELF for crash symbolication, keyed by build_id (the HTTP analogue of the
+    fleet_store_elf MCP tool). nff-ota's Stage-4 L2 compile path posts the freshly-built ELF
+    so fleet_resolve_backtrace can resolve a QEMU crash's backtrace.
 """
 
 from __future__ import annotations
@@ -264,6 +271,69 @@ async def _chaos_reset(request: Request) -> JSONResponse:
     return JSONResponse({"reset": True, "fail_first": fail_first})
 
 
+async def _store_elf(request: Request) -> JSONResponse:
+    """Stage a build's ELF for crash symbolication, keyed by an explicit build_id.
+
+    The HTTP analogue of the fleet_store_elf MCP tool: nff-ota's Stage-4 L2 compile path posts
+    the freshly-built ELF here so fleet_resolve_backtrace can resolve a QEMU crash's backtrace
+    (the device reports the same build_id, baked in as NFF_BUILD_ID). Body:
+    {"build_id": "<16hex>", "elf_b64": "<base64 ELF>"}.
+    """
+    if not _secret_ok(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "malformed body"}, status_code=400)
+
+    build_id = body.get("build_id")
+    elf_b64 = body.get("elf_b64")
+    if not _valid_device_id(build_id):  # same single-path-segment safety as a device id
+        return JSONResponse({"error": "build_id is required and must be a path segment"}, status_code=400)
+    if not isinstance(elf_b64, str) or not elf_b64:
+        return JSONResponse({"error": "elf_b64 is required"}, status_code=400)
+
+    from nff_fleet.tools.ota import fleet_store_elf
+
+    try:
+        result = await fleet_store_elf(build_id, elf_b64)
+    except Exception as exc:  # noqa: BLE001 — bad base64 / write failure
+        logger.warning("store-elf failed for %s: %s", build_id, exc)
+        return JSONResponse({"error": f"could not store ELF: {exc}"}, status_code=500)
+    return JSONResponse(result)
+
+
+async def _store_bin(request: Request) -> JSONResponse:
+    """Stage a build's merged flash image, keyed by an explicit build_id.
+
+    The L2 supervisor reads this back off the shared /data mount to seed a fresh emulated device's
+    flash. nff-ota's Stage-4 L2 compile path posts the freshly-built merged.bin here beside the ELF.
+    Body: {"build_id": "<16hex>", "bin_b64": "<base64 merged.bin>"}.
+    """
+    if not _secret_ok(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "malformed body"}, status_code=400)
+
+    build_id = body.get("build_id")
+    bin_b64 = body.get("bin_b64")
+    if not _valid_device_id(build_id):  # same single-path-segment safety as a device id
+        return JSONResponse({"error": "build_id is required and must be a path segment"}, status_code=400)
+    if not isinstance(bin_b64, str) or not bin_b64:
+        return JSONResponse({"error": "bin_b64 is required"}, status_code=400)
+
+    from nff_fleet.tools.ota import fleet_store_bin
+
+    try:
+        result = await fleet_store_bin(build_id, bin_b64)
+    except Exception as exc:  # noqa: BLE001 — bad base64 / write failure
+        logger.warning("store-bin failed for %s: %s", build_id, exc)
+        return JSONResponse({"error": f"could not store bin: {exc}"}, status_code=500)
+    return JSONResponse(result)
+
+
 def register(mcp) -> None:
     """Register the internal control routes on the FastMCP HTTP app."""
     mcp.custom_route("/internal/command", methods=["POST"])(_deliver_command)
@@ -271,3 +341,5 @@ def register(mcp) -> None:
     mcp.custom_route("/internal/provision-batch", methods=["POST"])(_provision_batch)
     mcp.custom_route("/internal/deprovision", methods=["POST"])(_deprovision_device)
     mcp.custom_route("/internal/chaos-reset", methods=["POST"])(_chaos_reset)
+    mcp.custom_route("/internal/store-elf", methods=["POST"])(_store_elf)
+    mcp.custom_route("/internal/store-bin", methods=["POST"])(_store_bin)
