@@ -101,3 +101,61 @@ async def deliver_ota(
     if build_id:
         payload["build_id"] = build_id
     return await send_command(mqtt_id, payload, project_id, timeout=timeout)
+
+
+async def store_elf(build_id: str, elf_b64: str) -> dict[str, Any]:
+    """Stage a build's ELF on nff-fleet for crash symbolication, keyed by build_id.
+
+    Used by the L2/nff-qemu-esp32 compile path (source/realcompile.py): the QEMU device
+    reports its compiled-in build_id in a crash, and fleet_resolve_backtrace resolves the
+    backtrace against the ELF stored here under the same id. POSTs to fleet's
+    /internal/store-elf (same shared secret as /internal/command).
+    """
+    _require_config()
+    url = settings.fleet_url.rstrip("/") + "/internal/store-elf"
+    async with httpx.AsyncClient(timeout=settings.fleet_timeout) as client:
+        try:
+            resp = await client.post(
+                url,
+                json={"build_id": build_id, "elf_b64": elf_b64},
+                headers={"X-Fleet-Secret": settings.fleet_secret},
+            )
+        except httpx.HTTPError as exc:
+            raise FleetError(f"fleet store-elf request failed: {exc}") from exc
+
+    if resp.status_code != 200:
+        try:
+            detail = resp.json().get("error", resp.text)
+        except ValueError:
+            detail = resp.text
+        raise FleetError(f"fleet store-elf returned {resp.status_code}: {detail}")
+    return resp.json()
+
+
+async def store_bin(build_id: str, bin_b64: str) -> dict[str, Any]:
+    """Stage a build's merged flash image on nff-fleet, keyed by build_id.
+
+    Used by the L2/nff-qemu-esp32 compile path (source/realcompile.py): the mock controller points
+    a fresh emulated device's NFF_MOCK_FIRMWARE_IMAGE at /data/firmware/{build_id}/firmware.bin,
+    which the supervisor reads off the shared /data mount. POSTs to fleet's /internal/store-bin
+    (same shared secret as /internal/command).
+    """
+    _require_config()
+    url = settings.fleet_url.rstrip("/") + "/internal/store-bin"
+    async with httpx.AsyncClient(timeout=settings.fleet_timeout) as client:
+        try:
+            resp = await client.post(
+                url,
+                json={"build_id": build_id, "bin_b64": bin_b64},
+                headers={"X-Fleet-Secret": settings.fleet_secret},
+            )
+        except httpx.HTTPError as exc:
+            raise FleetError(f"fleet store-bin request failed: {exc}") from exc
+
+    if resp.status_code != 200:
+        try:
+            detail = resp.json().get("error", resp.text)
+        except ValueError:
+            detail = resp.text
+        raise FleetError(f"fleet store-bin returned {resp.status_code}: {detail}")
+    return resp.json()

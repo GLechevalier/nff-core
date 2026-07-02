@@ -14,6 +14,7 @@ from nff_ota.tools.artifacts import register as register_artifacts
 from nff_ota.tools.deployments import register as register_deployments
 from nff_ota.tools.device_groups import register as register_groups
 from nff_ota.tools.devices import register as register_devices
+from nff_ota.tools.source import register as register_source
 
 
 @asynccontextmanager
@@ -52,6 +53,7 @@ register_artifacts(mcp)
 register_devices(mcp)
 register_deployments(mcp)
 register_groups(mcp)
+register_source(mcp)
 register_resources(mcp)
 register_prompts(mcp)
 webhooks.register(mcp)

@@ -41,6 +41,7 @@ from starlette.responses import JSONResponse
 from nff_ota.client import ensure_client, get_client
 from nff_ota.config import settings
 from nff_ota.models.artifact import UploadArtifactParams
+from nff_ota.source.ops import build_and_deploy_source
 from nff_ota.storage import upload_elf
 from nff_ota.models.deployment import CreateDeploymentParams
 from nff_ota.tools.artifacts.ops import upload_artifact
@@ -342,8 +343,54 @@ async def _ensure_mock_target(request: Request) -> JSONResponse:
     )
 
 
+async def _firmware_seed(request: Request) -> JSONResponse:
+    """Seed a mock's held firmware source and deploy it (the harness side of the demo).
+
+    The agent-facing fix path is the ``submit_firmware_fix`` MCP tool; this is its sibling
+    for the harness, which seeds an INITIAL (often buggy) revision the device crash-loops on.
+    It shares the same store + build + deploy core, but skips the anti-downgrade gate so the
+    first revision can be any version, and tags the revision author='seed'.
+
+        Body: {device_id, version, source, project_id?, changelog?}
+        -> {deployment_id, version, fault_remaining}
+    """
+    if not _secret_ok(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+
+    await ensure_client()
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "invalid JSON body"}, status_code=400)
+
+    device_id = body.get("device_id")
+    version = body.get("version")
+    source = body.get("source")
+    if not isinstance(device_id, str) or not device_id:
+        return JSONResponse({"error": "device_id is required"}, status_code=400)
+    if not isinstance(version, str) or not version:
+        return JSONResponse({"error": "version is required"}, status_code=400)
+    if not isinstance(source, str) or not source:
+        return JSONResponse({"error": "source is required"}, status_code=400)
+
+    changelog = body.get("changelog") if isinstance(body.get("changelog"), str) else None
+    result = await build_and_deploy_source(
+        device_id, version, source, author="seed", changelog=changelog
+    )
+    if result.error:
+        return JSONResponse({"error": result.error}, status_code=400)
+    return JSONResponse(
+        {
+            "deployment_id": result.deployment_id,
+            "version": result.version,
+            "fault_remaining": result.fault_remaining,
+        }
+    )
+
+
 def register(root) -> None:
     """Register inbound HTTP routes on the FastMCP HTTP app."""
     root.custom_route("/internal/ota-result", methods=["POST"])(_ota_result)
     root.custom_route("/internal/build-deploy", methods=["POST"])(_build_deploy)
     root.custom_route("/internal/ensure-mock-target", methods=["POST"])(_ensure_mock_target)
+    root.custom_route("/internal/firmware/seed", methods=["POST"])(_firmware_seed)

@@ -26,6 +26,13 @@ class OtaSettings(BaseSettings):
                                  # shared secret for the inbound /internal/ota-result webhook
     fleet_timeout: float = 120.0  # seconds to await a device response for an OTA command
 
+    # nff-github is the server-side build plane. For an L2 (nff-qemu-esp32) device the
+    # source build/deploy path compiles the submitted firmware for real via nff-github's
+    # POST /internal/compile-source (instead of L1's regex analyzer) — see source/realcompile.py.
+    github_url: str = ""          # e.g. http://nff-github:3003
+    github_secret: str = ""       # must match nff-github's NFF_GITHUB_INTERNAL_SECRET
+    github_timeout: float = 1800.0  # an IDF+arduino compile is slow (minutes)
+
     # Stuck-job reaper: a device that downloads but never reports an ota_result
     # (bricked / never reconnects) would leave its ota_jobs row in 'downloading'
     # forever. The reaper marks such jobs 'timed_out' so the deployment can finish.

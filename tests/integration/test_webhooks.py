@@ -31,7 +31,7 @@ def test_happy_path(client, monkeypatch):
     )
     assert resp.status_code == 200
     assert resp.json()["finalized"] is True
-    fake.assert_awaited_once_with("test-device-01", "committed", "2.0.0")
+    fake.assert_awaited_once_with("test-device-01", "committed", "2.0.0", reason=None)
 
 
 def test_bad_secret_401(client, monkeypatch):
