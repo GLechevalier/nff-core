@@ -30,6 +30,13 @@ static const char *TAG = "nff_l2_creds";
 #ifndef NFF_FQBN
 #  define NFF_FQBN "esp32:esp32:esp32"
 #endif
+/* L2 is an emulated device, not real silicon. It must advertise "nff-qemu-esp32" in its heartbeat so
+ * the OTA plane (nff-ota build_and_deploy_source) routes it to the real server-side compile path
+ * instead of L1's regex analyzer. The port's silicon probe would report plain "esp32" (the QEMU
+ * esp32 machine == CONFIG_IDF_TARGET), so we override via cfg->device_type. This file is L2-only. */
+#ifndef NFF_DEVICE_TYPE
+#  define NFF_DEVICE_TYPE "nff-qemu-esp32"
+#endif
 
 /* The NVS key names — MUST mirror nff_mock_l2/credentials.py. */
 #define K_DEVICE_ID   "device_id"
@@ -118,6 +125,7 @@ int nff_l2_load_config_from_nvs(nff_config_t *cfg) {
     cfg->fw_version           = NFF_FW_VERSION;
     cfg->build_id             = NFF_BUILD_ID;
     cfg->fqbn                 = NFF_FQBN;
+    cfg->device_type          = NFF_DEVICE_TYPE;  /* "nff-qemu-esp32" — overrides the silicon probe */
     cfg->heartbeat_interval_s = 30;
     cfg->batch_id             = NULL;
 

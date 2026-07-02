@@ -138,6 +138,19 @@ async def spawn(
                 "-e",
                 f"NFF_MOCK_FIRMWARE_IMAGE=/data/firmware/{settings.l2_firmware_build_id}/firmware.bin",
             ]
+        # Crash-loop budget for the QEMU supervisor. Raise (e.g. 1000) so a crash-looping L2 device
+        # keeps rebooting long enough for the self-heal loop to OTA a fix onto one of its brief online
+        # windows, instead of being declared bricked after 3 boots (~90 s) — far shorter than an
+        # agent-fix + real recompile takes.
+        args += ["-e", f"NFF_MOCK_MAX_TRIAL_BOOTS={settings.l2_max_trial_boots}"]
+        # Real nameserver for the QEMU guest so OTA downloads from the public Supabase signed URL
+        # resolve (SLIRP can't forward guest DNS to Docker's loopback 127.0.0.11 resolver).
+        if settings.l2_guest_dns:
+            args += ["--dns", settings.l2_guest_dns]
+        # Tee the full UART to the writable tmpfs so `docker exec cat` can read openeth/mTLS/OTA/panic
+        # (stdout only carries boot-banner + panic markers).
+        if settings.l2_serial_log_path:
+            args += ["-e", f"NFF_MOCK_SERIAL_LOG_PATH={settings.l2_serial_log_path}"]
     # Demo bridge passthrough (self-healing-firmware): crash-loop on a buggy release.
     # Per-spawn override wins over the controller-wide default; "" from the caller is
     # treated as "no override" (fall back to settings), not "disable".

@@ -24,6 +24,16 @@ L2NET=$PROJDIR/components/nff_l2_net
 SKETCH_DIR=${SKETCH_DIR:-/repo/test-nff}
 ARDUINO_VER=${ARDUINO_VER:-"~3.1.0"}   # pin to the arduino-esp32 line matching your IDF's mbedtls
 
+# ccache: the IDF image already wires ccache into the compiler launcher, but its cache lives in the
+# container and is lost with `docker run --rm`, so every build recompiles the whole arduino-esp32 core
+# from scratch (~15 min). Point CCACHE_DIR at /ccache — a persistent docker volume the caller mounts
+# there (see nff-github _l2_build_config) — so warm rebuilds drop to ~2-3 min. Defaults are overridable
+# via `-e CCACHE_DIR=… -e CCACHE_MAXSIZE=…`; with no /ccache mount it just caches to the ephemeral
+# container FS (harmless, same as before).
+export CCACHE_DIR="${CCACHE_DIR:-/ccache}"
+export CCACHE_MAXSIZE="${CCACHE_MAXSIZE:-5G}"
+mkdir -p "$CCACHE_DIR" 2>/dev/null || true
+
 git config --global --add safe.directory /repo 2>/dev/null || true
 rm -rf "$PROJ/main"; mkdir -p "$PROJ/main" "$PROJ/components"
 
@@ -34,14 +44,20 @@ include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 project(nff_l2_arduino)
 idf_build_set_property(COMPILE_DEFINITIONS "NFF_QEMU=1" APPEND)
 EOF
-# Bake firmware identity project-wide (so it reaches the nff SDK component, like NFF_QEMU): the
-# IDF analogue of the arduino-cli path's -DNFF_BUILD_ID_TOKEN. nff.h #undefs any creds default and
-# stringifies these bare tokens. Without NFF_BUILD_ID the device's crash build_id won't match the
-# stored ELF and backtraces won't resolve. Forwarded from the server build via `docker run -e`.
-[ -n "$NFF_BUILD_ID" ] && \
-  echo "idf_build_set_property(COMPILE_DEFINITIONS \"NFF_BUILD_ID_TOKEN=$NFF_BUILD_ID\" APPEND)" >> "$PROJ/CMakeLists.txt"
-[ -n "$NFF_FW_VERSION" ] && \
-  echo "idf_build_set_property(COMPILE_DEFINITIONS \"NFF_FW_VERSION_TOKEN=$NFF_FW_VERSION\" APPEND)" >> "$PROJ/CMakeLists.txt"
+# Firmware identity (NFF_BUILD_ID_TOKEN / NFF_FW_VERSION_TOKEN) is baked per-COMPONENT below (main +
+# nff SDK), NOT project-wide. These tokens change every build (build_id = sha256(source)), so a
+# project-wide COMPILE_DEFINITION would put a per-build value on all ~3100 TUs (arduino-esp32 core,
+# IDF, mbedtls) and defeat ccache entirely — every object misses. Only the sketch and the nff SDK
+# (nff.h #undefs the creds default and stringifies these bare tokens) actually reference them, so
+# scoping the defines to those two components lets the big unchanged core hit the ccache across builds.
+# Emitted after each component's idf_component_register (needs ${COMPONENT_LIB}). Without NFF_BUILD_ID
+# the device's crash build_id won't match the stored ELF and backtraces won't resolve.
+_fw_ident_defs() {  # $1 = path to a component CMakeLists.txt to append target_compile_definitions to
+  [ -n "$NFF_BUILD_ID" ] && \
+    echo "target_compile_definitions(\${COMPONENT_LIB} PRIVATE \"NFF_BUILD_ID_TOKEN=$NFF_BUILD_ID\")" >> "$1"
+  [ -n "$NFF_FW_VERSION" ] && \
+    echo "target_compile_definitions(\${COMPONENT_LIB} PRIVATE \"NFF_FW_VERSION_TOKEN=$NFF_FW_VERSION\")" >> "$1"
+}
 
 cat > "$PROJ/sdkconfig.defaults" <<'EOF'
 CONFIG_IDF_TARGET="esp32"
@@ -64,6 +80,17 @@ CONFIG_MBEDTLS_ECDSA_C=y
 # these to n, so enable them here. (These two menu titles are exactly the `#warning` text.)
 CONFIG_MBEDTLS_PSK_MODES=y
 CONFIG_MBEDTLS_KEY_EXCHANGE_PSK=y
+# OTA bulk-download tuning for the emulated openeth NIC. A sustained 4 MB HTTPS OTA download stalls and
+# the connection dies at ~3 KB with the IDF defaults (lwIP TCP receive window ~5.7 KB + a 6-slot RX
+# mailbox + no out-of-seq queue) — the app (flash write + SHA) drains slower than openeth delivers, the
+# window fills, and the transfer resets. Enlarge the receive window/mailbox and enable OOSEQ queuing so
+# the guest can absorb the stream. (Send-side bumped too; harmless.)
+CONFIG_LWIP_TCP_WND_DEFAULT=32768
+CONFIG_LWIP_TCP_RECVMBOX_SIZE=32
+CONFIG_LWIP_TCP_SND_BUF_DEFAULT=32768
+CONFIG_LWIP_TCP_QUEUE_OOSEQ=y
+CONFIG_LWIP_TCP_OOSEQ_MAX_PBUFS=16
+CONFIG_LWIP_TCPIP_RECVMBOX_SIZE=64
 CONFIG_ESP_INT_WDT=n
 CONFIG_ESP_TASK_WDT_TIMEOUT_S=30
 CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
@@ -80,6 +107,7 @@ idf_component_register(SRCS ${SK} INCLUDE_DIRS "." REQUIRES espressif__arduino-e
 # Force-include the shim into the sketch TU so the customer's WiFi.* binds to the openeth shim.
 target_compile_options(${COMPONENT_LIB} PRIVATE -include "${CMAKE_CURRENT_LIST_DIR}/nff_wifi_shim.h")
 EOF
+_fw_ident_defs "$PROJ/main/CMakeLists.txt"   # per-build build_id/fw_version, scoped for ccache
 cat > "$PROJ/main/idf_component.yml" <<EOF
 dependencies:
   idf: ">=5.1"
@@ -104,6 +132,7 @@ idf_component_register(
 # arduino-cli build does not apply (not the spike's global -w).
 target_compile_options(${COMPONENT_LIB} PRIVATE -Wno-error=format-truncation -Wno-error=format -Wno-error=format-nonliteral)
 EOF
+_fw_ident_defs "$PROJ/components/nff/CMakeLists.txt"   # per-build build_id/fw_version, scoped for ccache
 
 # ---- PubSubClient (nff Arduino-port dependency) ----
 if [ ! -f "$PROJ/components/PubSubClient/PubSubClient.cpp" ]; then
@@ -134,4 +163,11 @@ cd "$PROJ/build"
 esptool.py --chip esp32 merge_bin --fill-flash-size 4MB -o "$PROJ/merged.bin" @flash_args
 cd "$PROJ"
 cp "$PROJ"/build/*.elf "$PROJ/firmware.elf"
-echo "L2 artifacts: $PROJ/merged.bin (padded to 4MB) + $PROJ/firmware.elf"
+
+# The OTA payload is the APP image ONLY (~1.1 MB), NOT the merged 4 MB flash: an OTA flashes the app
+# partition (ota_1 = 0x1D0000 ≈ 1.9 MB), so pushing the merged image fails `Update.begin(): too large`.
+# Copy out the app bin (the entry at flash offset 0x20000 in flash_args) as app.bin so nff-github's
+# compile-source can return it separately (merged.bin stays the cold-boot QEMU image, app.bin is OTA).
+app_bin=$(awk '$1=="0x20000"{print $2}' "$PROJ/build/flash_args")
+cp "$PROJ/build/$app_bin" "$PROJ/app.bin"
+echo "L2 artifacts: $PROJ/merged.bin (4MB, cold-boot) + $PROJ/app.bin (OTA) + $PROJ/firmware.elf"

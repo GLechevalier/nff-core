@@ -102,7 +102,10 @@ class Supervisor:
         observe + persist the serial, not to publish."""
         log = None
         if self.cfg.serial_log_path is not None:
-            log = self.cfg.serial_log_path.open("a", encoding="utf-8")
+            # buffering=1 (line-buffered) so `docker exec cat` sees UART live while the device runs —
+            # a block-buffered file only flushes on boot exit, hiding a mid-boot hang (e.g. an OTA
+            # download stuck on DNS) which is exactly when the full serial is most useful.
+            log = self.cfg.serial_log_path.open("a", buffering=1, encoding="utf-8")
         panicked = False
         try:
             for line in proc.serial_lines():

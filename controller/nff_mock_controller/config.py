@@ -80,6 +80,21 @@ class NffMockControllerSettings(BaseSettings):
     # the supervisor reads it off the shared /data:ro mount. Empty → the supervisor falls back to
     # a pre-staged flash_path (or errors). Auto-resolving the latest build is a follow-up.
     l2_firmware_build_id: str = ""
+    # How many times the L2 supervisor relaunches a crash-looping device before declaring it bricked
+    # (maps to NffMockL2Settings.max_trial_boots via NFF_MOCK_MAX_TRIAL_BOOTS). The default 3 models a
+    # real device giving up, but the self-heal e2e needs the device to keep rebooting/reconnecting for
+    # minutes so a later online window receives the agent's fix OTA — raise it (e.g. 1000) for that.
+    l2_max_trial_boots: int = 3
+    # Guest DNS for the QEMU L2 mock. The firmware downloads OTA images from a public Supabase
+    # signed URL, so the emulated guest must resolve a hostname. QEMU user-net (SLIRP) forwards guest
+    # DNS to the container's resolv.conf, which under Docker is the loopback 127.0.0.11 embedded
+    # resolver that libslirp can't use → resolution fails and the OTA download times out. Giving the
+    # mock container a real nameserver (docker run --dns) makes SLIRP forward there. Empty → no --dns.
+    l2_guest_dns: str = "8.8.8.8"
+    # Where the supervisor tees the QEMU UART inside the container (writable tmpfs). Lets us read the
+    # full serial (openeth/mTLS/OTA-download/panic) via `docker exec cat` while the mock runs — the
+    # supervisor otherwise only logs boot-banner + panic markers to stdout. Empty → don't capture.
+    l2_serial_log_path: str = "/run/qemu/uart.log"
 
     # Level 3 (real hardware) seam — a URL to a hardware-rack bridge. Unset → 501.
     l3_bridge_url: str = ""
