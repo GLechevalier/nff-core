@@ -8,7 +8,7 @@ scope, and do not build anything in the **Out of scope** list.
 
 ## What this is
 
-`nff-maintenance` is the **diagnosis layer** of nff. It takes a crash that came off
+`nff-maintenance` is the **diagnosis layer** of nff. It takes a crash that came off 
 an embedded device and produces a specific, source-level explanation of *why* the
 device failed (e.g. "stack overflow in `poll_sensors()` at sensors.c:88").
 
