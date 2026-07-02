@@ -1408,10 +1408,12 @@ dependencies = [
  "anyhow",
  "clap",
  "dirs",
+ "flate2",
  "glob",
  "regex",
  "serde_json",
  "sha1",
+ "tar",
  "tempfile",
 ]
 

@@ -11,6 +11,7 @@
 
 pub mod cli;
 pub mod config;
+pub mod package;
 
 /// The upstream PlatformIO Core version this port targets for parity.
 ///
