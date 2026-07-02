@@ -29,7 +29,6 @@ static bool on_health_check(void *ctx) {
 }
 
 void app_main(void) {
-    esp_log_level_set("esp-tls-mbedtls", ESP_LOG_DEBUG);  /* TEMP: surface TLS verify flags */
     nvs_flash_init();
 
     nff_l2_openeth_up();        /* 1. network up via Ethernet (no WiFi radio in QEMU) */

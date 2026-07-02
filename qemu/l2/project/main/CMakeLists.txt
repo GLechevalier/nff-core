@@ -4,11 +4,8 @@ idf_component_register(
     REQUIRES nff nff_l2_net nvs_flash
 )
 
-# L2-only build define. Enables the SDK IDF port's QEMU concessions (the hostname-check skip in
-# nff_port_esp32_idf.c, gated by #ifdef NFF_QEMU) and any WiFi->openeth shim.
-target_compile_definitions(${COMPONENT_LIB} PRIVATE NFF_QEMU=1)
-
-# Firmware identity from the build server (nff-github build.py exports these env vars for an L2
+# NFF_QEMU is set PROJECT-WIDE in the top-level CMakeLists.txt (it must reach the nff component, not
+# just this one). Firmware identity from the build server (nff-github build.py exports these env vars for an L2
 # build_command; nff.h #undefs + stringifies the bare *_TOKEN). Bare tokens, no quotes — a hex
 # build_id and a semver are each a valid preprocessing token. Absent (a bare demo build), nff.h /
 # nvs_creds.c fall back to defaults.

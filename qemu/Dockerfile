@@ -1,30 +1,29 @@
-# nff-mock-l2 — production image (Level 2). Heavy: QEMU + the supervisor.
-# Build context is the nff-mock/ ROOT so the shared core (core/) is in scope. See Dockerfile.dev
-# for the ESP_QEMU_URL build-arg (the Espressif qemu-system-xtensa release to bundle).
-FROM python:3.12-slim AS builder
-WORKDIR /app
-COPY core/ core/
-COPY qemu/ qemu/
-RUN pip install --no-cache-dir --upgrade pip build && \
-    pip wheel --no-cache-dir --wheel-dir /wheels ./core && \
-    pip wheel --no-cache-dir --wheel-dir /wheels --find-links /wheels ./qemu
+# nff-mock-l2 — production image (Level 2). Heavy: the real firmware booted in qemu-system-xtensa.
+#
+# Based on espressif/idf:v5.3.1, which bundles qemu-system-xtensa (the `esp32` machine) AND
+# nvs_partition_gen.py (the NVS credential-splice tool) — the toolchain the Stage-3/Stage-4 live
+# runs proved green. The merged.bin is produced server-side (Stage 4); the supervisor only needs
+# qemu + nvs-gen. Build context is the nff-mock/ ROOT so the shared core (core/) is in scope.
+FROM espressif/idf:v5.3.1
 
-FROM python:3.12-slim
 WORKDIR /app
-RUN apt-get update && apt-get install -y --no-install-recommends \
-        ncat ca-certificates xz-utils curl \
+
+# ncat bridges the emulated NIC to in-cluster services (broker / OTA origin) via QEMU guestfwd.
+RUN apt-get update && apt-get install -y --no-install-recommends ncat \
     && rm -rf /var/lib/apt/lists/*
 
-ARG ESP_QEMU_URL=""
-RUN if [ -n "$ESP_QEMU_URL" ]; then \
-        curl -fsSL "$ESP_QEMU_URL" -o /tmp/qemu.tar.xz && \
-        mkdir -p /opt/qemu && tar -xJf /tmp/qemu.tar.xz -C /opt/qemu --strip-components=1 && \
-        rm /tmp/qemu.tar.xz && ln -sf /opt/qemu/bin/qemu-system-xtensa /usr/local/bin/qemu-system-xtensa ; \
-    else \
-        echo "WARNING: ESP_QEMU_URL unset — qemu-system-xtensa NOT installed (doctor works, run will not)"; \
-    fi
+COPY core/ core/
+COPY qemu/ qemu/
 
-COPY --from=builder /wheels /wheels
-RUN pip install --no-cache-dir esptool /wheels/*.whl && rm -rf /wheels
+# Install into the IDF python env (export.sh's) so the supervisor and nvs_partition_gen.py share
+# one interpreter — credentials.generate_nvs_bin shells out via sys.executable.
+RUN . "$IDF_PATH/export.sh" && \
+    pip install --no-cache-dir ./core && \
+    pip install --no-cache-dir ./qemu
 
-ENTRYPOINT ["nff-mock-l2", "run"]
+COPY qemu/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh
+
+# The entrypoint sources export.sh then execs `nff-mock-l2 "$@"`; CMD is the default subcommand.
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
+CMD ["run"]

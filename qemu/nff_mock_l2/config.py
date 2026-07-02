@@ -32,6 +32,17 @@ class NffMockL2Settings(NffMockCoreSettings):
     # Where to tee the captured UART (for diagnosis ingest / debugging). "" → don't persist.
     serial_log_path: Path | None = None
 
+    # ── NVS credential splice ─────────────────────────────────────────────────
+    # The per-device identity is injected at launch by generating an ESP-IDF NVS partition from
+    # the provisioned certs and splicing it into the writable flash at the `nvs` partition offset
+    # (see credentials.generate_nvs_bin + splice_nvs_into_flash). These track l2/project/
+    # partitions.csv (`nvs, data, nvs, 0x9000, 0x6000`).
+    nvs_offset: int = 0x9000
+    nvs_size: int = 0x6000
+    # Path to esp-idf's nvs_partition_gen.py. Empty → resolve from $IDF_PATH (the IDF base image),
+    # falling back to a `nvs_partition_gen` console entry-point on PATH.
+    nvs_partition_gen_path: Path | None = None
+
     # ── Networking (the spike-gated part) ─────────────────────────────────────
     # QEMU's esp32 machine emulates no WiFi radio, so the firmware reaches the broker over the
     # OpenCores Ethernet MAC + SLIRP user-net, bridged to the real services by a host-side

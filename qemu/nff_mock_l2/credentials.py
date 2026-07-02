@@ -13,8 +13,14 @@ variant (Stage 3); they are namespaced under ``nff`` and documented here so both
 
 from __future__ import annotations
 
+import logging
+import os
+import subprocess
+import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from nff_mock_l2.config import NffMockL2Settings
@@ -163,11 +169,104 @@ def nvs_csv_for_device(
     return build_nvs_csv(strings, files)
 
 
-# ── The shell-out steps (need esp-idf host tools; not exercised here) ─────────────────
-# nvs_partition_gen.py generate <csv> <out.bin> <size>; then splice <out.bin> into flash.bin at
-# the partition table's `nvs` offset. Kept thin + documented; finalized alongside the L2 image.
+def write_nvs_csv(
+    cfg: "NffMockL2Settings",
+    *,
+    boot_epoch: int,
+    dest: Path,
+    der_dir: str | Path | None = None,
+    cmd_vkey_path: str | Path | None = None,
+) -> Path:
+    """Write the assembled CSV to ``dest`` (the input to nvs_partition_gen.py).
 
-def write_nvs_csv(cfg: "NffMockL2Settings", *, boot_epoch: int, dest: Path) -> Path:
-    """Write the assembled CSV to ``dest`` (the input to nvs_partition_gen.py)."""
-    dest.write_text(nvs_csv_for_device(cfg, boot_epoch=boot_epoch), encoding="utf-8")
+    ``der_dir`` / ``cmd_vkey_path`` are threaded to ``nvs_csv_for_device``: the splice passes them
+    so the CSV references the materialised DER creds + the pre-derived command-verify blob (rather
+    than the raw provisioned PEMs, which the pure unit tests use)."""
+    dest.write_text(
+        nvs_csv_for_device(
+            cfg, boot_epoch=boot_epoch, der_dir=der_dir, cmd_vkey_path=cmd_vkey_path
+        ),
+        encoding="utf-8",
+    )
     return dest
+
+
+# ── The splice: NVS partition generation + write into the flash image ─────────────────
+# The identity is injected at launch (one generic image, cheap spawns): generate an ESP-IDF NVS
+# partition from the provisioned certs and write it into the writable flash at the `nvs` offset.
+# Needs esp-idf's nvs_partition_gen.py (present in the IDF base image); the splice itself is pure
+# Python (the RUNBOOK's `dd ... seek=0x9000 conv=notrunc`).
+
+def _nvs_partition_gen_cmd(cfg: "NffMockL2Settings") -> list[str]:
+    """Resolve the ``nvs_partition_gen`` invocation: an explicit config override, else the script
+    under ``$IDF_PATH`` (the IDF base image), else a ``nvs_partition_gen`` console entry on PATH."""
+    override = getattr(cfg, "nvs_partition_gen_path", None)
+    if override:
+        return [sys.executable, str(override)]
+    idf = os.environ.get("IDF_PATH")
+    if idf:
+        script = (
+            Path(idf)
+            / "components" / "nvs_flash" / "nvs_partition_generator" / "nvs_partition_gen.py"
+        )
+        if script.exists():
+            return [sys.executable, str(script)]
+    return ["nvs_partition_gen"]
+
+
+def generate_nvs_bin(
+    cfg: "NffMockL2Settings",
+    *,
+    boot_epoch: int,
+    work_dir: str | Path,
+    size: int | None = None,
+) -> Path:
+    """Generate this device's NVS partition image under ``work_dir`` and return the ``.bin`` path.
+
+    Materialises the DER creds + derives the 65-byte command-verify point (when the fleet signing
+    key is present — connect+heartbeat still work without it, only signed-command verification is
+    skipped), writes the CSV, and shells out to ``nvs_partition_gen.py generate <csv> <bin> <size>``.
+    """
+    work_dir = Path(work_dir)
+    work_dir.mkdir(parents=True, exist_ok=True)
+    size = cfg.nvs_size if size is None else size
+
+    cmd_vkey_path: Path | None = None
+    signing_key = Path(cfg.cmd_verify_key)
+    if signing_key.exists():
+        cmd_vkey_path = work_dir / "cmd_vkey.bin"
+        cmd_vkey_path.write_bytes(public_point_from_signing_key(signing_key))
+    else:
+        logger.warning(
+            "no command-verify key at %s — signed commands cannot be verified", signing_key
+        )
+
+    csv_path = write_nvs_csv(
+        cfg,
+        boot_epoch=boot_epoch,
+        dest=work_dir / "nff_nvs.csv",
+        der_dir=work_dir / "der",
+        cmd_vkey_path=cmd_vkey_path,
+    )
+    out_bin = work_dir / "nff_nvs.bin"
+    cmd = _nvs_partition_gen_cmd(cfg) + ["generate", str(csv_path), str(out_bin), hex(size)]
+    logger.info("generating NVS partition: %s", " ".join(cmd))
+    subprocess.run(cmd, check=True)
+    return out_bin
+
+
+def splice_nvs_into_flash(
+    flash_path: str | Path, nvs_bin: str | Path, *, offset: int, size_limit: int | None = None
+) -> None:
+    """Write ``nvs_bin`` into ``flash_path`` at ``offset`` in place (the ``dd conv=notrunc`` step).
+
+    ``size_limit`` (the nvs partition size) guards against a blob that would overrun into the next
+    partition."""
+    data = Path(nvs_bin).read_bytes()
+    if size_limit is not None and len(data) > size_limit:
+        raise ValueError(
+            f"NVS blob is {len(data)} bytes, exceeds the nvs partition ({size_limit} bytes)"
+        )
+    with open(flash_path, "r+b") as f:
+        f.seek(offset)
+        f.write(data)

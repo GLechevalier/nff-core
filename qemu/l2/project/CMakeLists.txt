@@ -7,3 +7,10 @@ cmake_minimum_required(VERSION 3.16)
 
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 project(nff_l2)
+
+# NFF_QEMU must reach EVERY component — especially the nff SDK (components/nff), whose IDF port gates
+# the broker hostname-check skip on `#ifdef NFF_QEMU` (the fleet server cert's CN is nff-fleet-server,
+# but the device dials the guestfwd IP). A per-component target_compile_definitions on `main` would
+# NOT reach the nff component, so set it project-wide here. Real-hardware arduino-cli builds never
+# define it, so production keeps full CN/SAN verification.
+idf_build_set_property(COMPILE_DEFINITIONS "NFF_QEMU=1" APPEND)

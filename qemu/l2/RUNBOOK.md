@@ -1,5 +1,37 @@
 # Stage 3 toolchain-box runbook — validate the L2 firmware build + boot
 
+> **✅ STAGE 5 AUTOMATED + LIVE-VALIDATED 2026-07-01** — the manual Steps 3-4 below are now done by
+> `Supervisor.prepare_flash` (`nff_mock_l2/supervisor.py` → `credentials.generate_nvs_bin` +
+> `splice_nvs_into_flash`), and `NFF_MOCKCTL_MAX_LEVEL=2` is live. End-to-end proof on this box:
+> built the **generic `l2/project` NVS firmware** (this runbook, Steps 1-2), merged to a 4 MB image
+> (`esptool merge_bin --fill-flash-size 4MB @flash_args` — NO baked NVS; the supervisor splices
+> per-device), staged it on the fleet volume via the new `POST /internal/store-bin`
+> (`/data/firmware/e6d5c20a4e5cb04e/firmware.bin`), set `NFF_MOCKCTL_L2_FIRMWARE_BUILD_ID` to that
+> id, and `POST /mocks {level:2}` spawned `nff-mock-l2:dev` (now based on `espressif/idf:v5.3.1`,
+> which bundles qemu + nvs_partition_gen). The supervisor generated the NVS partition, spliced it at
+> 0x9000, booted QEMU (openeth → NVS identity → mTLS → CONNACK → heartbeat), and the fleet upserted
+> the device **status=online** in Supabase — identity read from the spliced NVS, not compiled in.
+> **CRITICAL:** the baseline MUST be the `l2/project` (NVS) firmware. A Stage-4 arduino-shim
+> `merged.bin` bakes `credentials.h` and *ignores* the NVS splice — it cannot be the L2 baseline.
+> (The Stage-4 `store_bin` wiring is for OTA *updates* to L2 devices, not the cold-boot baseline.)
+
+
+> **✅ RAN GREEN 2026-06-30** (Docker `espressif/idf:release-v5.3`, this machine, vs the live dev
+> `nff-fleet`). The real `nff-sdk-c` built clean as an IDF component (no spike patches, no `-w`); the
+> L2 firmware did openeth→DHCP→NVS boot-epoch clock→**NVS identity load**→mTLS→CONNACK→`NFF_L2:
+> heartbeat published`, no panic, broker-side retained heartbeat for `mock-l2qemu` at
+> `nff/<proj>/devices/mock-l2qemu/heartbeat`. Running it caught **4 real bugs** (all fixed):
+> 1. NVS held PEM but the SDK needs **DER** (PKCS#8 key) — fleet provisions a SEC1 `EC PRIVATE KEY`,
+>    so the round-trip mis-labelled it → `mbedtls_pk_parse -0x3D80`. Fix: DER contract +
+>    `materialize_der_creds` (SEC1→PKCS#8) + firmware reads DER verbatim.
+> 2. `main.c` used a **stack-local** `nff_config_t` — the SDK keeps a pointer to it, so after
+>    `app_main` returned the nff task derefed garbage → crash in the heartbeat-topic `snprintf`. Fix:
+>    `static`. (The resolved coredump backtrace pinpointed it — Stage-6 backtraces work.)
+> 3. `NFF_QEMU` was set per-component on `main`, so it **never reached the nff SDK component** →
+>    the `#ifdef NFF_QEMU` hostname-check skip compiled out → `-0x2700` CN mismatch. Fix: set it
+>    **project-wide** (`idf_build_set_property`).
+> 4. `main.c` referenced `NFF_FW_VERSION` directly (undefined w/o credentials.h). Fix: use `cfg.fw_version`.
+
 Run this on a box with Docker + the live dev `nff-fleet` (same setup that proved the Stage-0 spike).
 It validates the four Stage-3 parts that can't be compiled in the dev session. Do the steps in order;
 **Step 2 is the cheapest, highest-value check** (does the real SDK build clean on IDF 5.3 without the
@@ -60,19 +92,23 @@ Build artifacts land in `build/` — note `build/nff_l2.elf` (symbolicates cored
 
 The firmware reads its creds from NVS. Generate the partition the supervisor will eventually splice:
 
+The creds in NVS must be **DER** — X.509 DER certs + **PKCS#8 DER** key (the SDK wraps the key as a
+PKCS#8 `"PRIVATE KEY"` PEM; fleet provisions a SEC1 `"EC PRIVATE KEY"`, which would be rejected).
+`nvs_csv_for_device(..., der_dir=...)` calls `materialize_der_creds` to convert + reference the DER.
+
 ```bash
 cd $REPO/nff-mock/qemu
-# 3a. derive the 65-byte command-verify point + write the NVS CSV
+# 3a. materialize DER creds + derive the 65-byte command-verify point + write the NVS CSV
 PYTHONPATH=core python - <<'PY'
 from pathlib import Path
+import time
 from nff_mock_l2 import credentials as creds
 from nff_mock_l2.config import NffMockL2Settings
 cfg = NffMockL2Settings(device_id="l2-01", project_id="<PROJECT_UUID>", guest_broker_ip="10.13.0.10")
 vkey = creds.public_point_from_signing_key(Path("/data/keys/projects/<PROJECT_UUID>/cmd_sign.pem"))
 Path("/tmp/cmd_vkey.bin").write_bytes(vkey)
-import time
-Path("/tmp/nff_nvs.csv").write_text(
-    creds.nvs_csv_for_device(cfg, boot_epoch=int(time.time()), cmd_vkey_path="/tmp/cmd_vkey.bin"))
+Path("/tmp/nff_nvs.csv").write_text(creds.nvs_csv_for_device(
+    cfg, boot_epoch=int(time.time()), cmd_vkey_path="/tmp/cmd_vkey.bin", der_dir="/tmp/der"))
 print(Path("/tmp/nff_nvs.csv").read_text())
 PY
 
@@ -82,8 +118,9 @@ docker run --rm -v $REPO:/repo -v /tmp:/tmp espressif/idf:release-v5.3 bash -lc 
         generate /tmp/nff_nvs.csv /tmp/nff_nvs.bin 0x6000'
 ```
 
-> Cert paths in the CSV (`/data/certs/...`) must be readable inside the nvs_partition_gen container —
-> mount the shared cert volume too if it isn't already under `$REPO`.
+> The provisioned cert paths must be readable where step 3a runs (mount the shared cert volume).
+> The proven manual equivalent of `materialize_der_creds` is plain openssl:
+> `openssl x509 -in device.crt -outform der …` and `openssl pkcs8 -topk8 -nocrypt -in device.key -outform der …`.
 
 ## Step 4 — merge to a 4 MB flash image and splice the NVS in
 
@@ -140,6 +177,8 @@ openeth to CONNACK with no edits to the sketch source.
 ### After this runbook is green
 - Stage 4 — server-side real compile route (`nff-github /internal/compile-source` + `nff-ota`
   `source/realcompile.py` + `device_type == nff-qemu-esp32` branch + ELF-by-build_id store).
-- Stage 5 runtime — automate Steps 3-4 in `supervisor.prepare_flash`, flip `NFF_MOCKCTL_MAX_LEVEL=2`.
+- Stage 5 runtime — ✅ DONE 2026-07-01 (Steps 3-4 automated in `supervisor.prepare_flash`;
+  `NFF_MOCKCTL_MAX_LEVEL=2`; merged.bin delivered by build_id via fleet `/internal/store-bin`; L2
+  image rebased on `espressif/idf:v5.3.1`). Live boot → `status=online`. See the top banner.
 - Stage 6 — `e2e/test_code_fix_device_l2.py` with `NFF_E2E_L2_ENABLED=1`: real panic → resolved
   backtrace → agent fix → OTA → recover.

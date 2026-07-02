@@ -50,8 +50,12 @@ void nff_l2_openeth_up(void) {
     s_started = true;
     s_eth_events = xEventGroupCreate();
 
-    ESP_ERROR_CHECK(esp_netif_init());
-    ESP_ERROR_CHECK(esp_event_loop_create_default());
+    /* Tolerate a netif/event loop already brought up by the host framework (e.g. arduino-esp32 in
+     * the shim path) — re-init returns ESP_ERR_INVALID_STATE, which is not an error for us. */
+    esp_err_t e = esp_netif_init();
+    if (e != ESP_OK && e != ESP_ERR_INVALID_STATE) ESP_ERROR_CHECK(e);
+    e = esp_event_loop_create_default();
+    if (e != ESP_OK && e != ESP_ERR_INVALID_STATE) ESP_ERROR_CHECK(e);
 
     esp_netif_config_t netif_cfg = ESP_NETIF_DEFAULT_ETH();
     s_eth_netif = esp_netif_new(&netif_cfg);

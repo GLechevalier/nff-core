@@ -6,7 +6,9 @@ build-backend = "hatchling.build"
 name = "nff-mock-l2"
 version = "0.1.0"
 description = "Level-2 virtual ESP32 — the real nff-sdk-c firmware booted in qemu-system-xtensa"
-requires-python = ">=3.12"
+# 3.10 floor so this installs into the espressif/idf image's Python env (3.10) alongside
+# qemu-system-xtensa + nvs_partition_gen.py; the supervisor code is 3.10-safe.
+requires-python = ">=3.10"
 dependencies = [
     "nff-mock-core",
     "click>=8.0",

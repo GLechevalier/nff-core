@@ -74,6 +74,12 @@ class NffMockControllerSettings(BaseSettings):
     # device_type stamped into an L2 mock so its `devices` row is distinguishable from an
     # L1 mock — nff-ota's source build branches on it (real compile vs the L1 regex path).
     l2_device_type: str = "nff-qemu-esp32"
+    # The baseline/stock L2 firmware build a fresh emulated device boots. nff-ota's realcompile
+    # path stages each build's merged.bin on the fleet volume at /data/firmware/{build_id}/
+    # firmware.bin (store_bin); the controller stamps that path into NFF_MOCK_FIRMWARE_IMAGE so
+    # the supervisor reads it off the shared /data:ro mount. Empty → the supervisor falls back to
+    # a pre-staged flash_path (or errors). Auto-resolving the latest build is a follow-up.
+    l2_firmware_build_id: str = ""
 
     # Level 3 (real hardware) seam — a URL to a hardware-rack bridge. Unset → 501.
     l3_bridge_url: str = ""

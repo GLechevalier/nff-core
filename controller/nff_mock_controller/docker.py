@@ -130,6 +130,14 @@ async def spawn(
     # Per-level device_type so nff-ota can tell an L2 (real-compile) device from an L1 one.
     if profile.device_type:
         args += ["-e", f"NFF_MOCK_DEVICE_TYPE={profile.device_type}"]
+        # L2 boots a real flash image: point the supervisor at the baseline build's merged.bin
+        # staged on the shared /data mount by nff-ota's store_bin. Only when configured — absent
+        # it, the supervisor falls back to a pre-staged flash_path.
+        if settings.l2_firmware_build_id:
+            args += [
+                "-e",
+                f"NFF_MOCK_FIRMWARE_IMAGE=/data/firmware/{settings.l2_firmware_build_id}/firmware.bin",
+            ]
     # Demo bridge passthrough (self-healing-firmware): crash-loop on a buggy release.
     # Per-spawn override wins over the controller-wide default; "" from the caller is
     # treated as "no override" (fall back to settings), not "disable".

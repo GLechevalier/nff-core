@@ -53,6 +53,52 @@ def test_csv_includes_cmd_vkey_when_path_given():
     assert "cmd_vkey,file,binary,/run/qemu/cmd_vkey.bin" in csv
 
 
+def test_materialize_der_creds_converts_pem_to_der(tmp_path):
+    import datetime
+
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import ec
+    from cryptography.x509.oid import NameOID
+
+    certs = tmp_path / "certs"
+    dev = certs / "dev-x"
+    dev.mkdir(parents=True)
+    key = ec.generate_private_key(ec.SECP256R1())
+    # fleet provisions a SEC1 "EC PRIVATE KEY" PEM — the exact case the SDK's PKCS#8 wrapping rejects
+    (dev / "device.key").write_bytes(
+        key.private_bytes(
+            serialization.Encoding.PEM,
+            serialization.PrivateFormat.TraditionalOpenSSL,
+            serialization.NoEncryption(),
+        )
+    )
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "dev-x")])
+    cert = (
+        x509.CertificateBuilder()
+        .subject_name(name)
+        .issuer_name(name)
+        .public_key(key.public_key())
+        .serial_number(1)
+        .not_valid_before(datetime.datetime(2020, 1, 1, tzinfo=datetime.timezone.utc))
+        .not_valid_after(datetime.datetime(2030, 1, 1, tzinfo=datetime.timezone.utc))
+        .sign(key, hashes.SHA256())
+    )
+    cert_pem = cert.public_bytes(serialization.Encoding.PEM)
+    (dev / "device.crt").write_bytes(cert_pem)
+    (certs / "ca.crt").write_bytes(cert_pem)
+
+    cfg = NffMockL2Settings(device_id="dev-x", project_id=None, certs_dir=certs)
+    out = creds.materialize_der_creds(cfg, tmp_path / "der")
+
+    # certs come back as parseable X.509 DER; the key as PKCS#8 DER (SEC1 was re-encoded)
+    x509.load_der_x509_certificate((tmp_path / "der" / f"{creds.KEY_DEVICE_CERT}.der").read_bytes())
+    key_der = (tmp_path / "der" / f"{creds.KEY_DEVICE_KEY}.der").read_bytes()
+    loaded = serialization.load_der_private_key(key_der, password=None)
+    assert isinstance(loaded, ec.EllipticCurvePrivateKey)
+    assert out[creds.KEY_DEVICE_KEY].endswith(".der")
+
+
 def test_public_point_from_signing_key_is_65_bytes(tmp_path):
     from cryptography.hazmat.primitives.asymmetric import ec
     from cryptography.hazmat.primitives.serialization import Encoding, NoEncryption, PrivateFormat

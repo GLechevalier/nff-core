@@ -17,6 +17,7 @@ import logging
 import shutil
 import time
 from pathlib import Path
+from typing import Callable
 
 from nff_mock_l2 import credentials, qemu, serial_monitor
 from nff_mock_l2.config import NffMockL2Settings
@@ -25,8 +26,10 @@ logger = logging.getLogger(__name__)
 
 
 class Supervisor:
-    def __init__(self, cfg: NffMockL2Settings) -> None:
+    def __init__(self, cfg: NffMockL2Settings, *, clock: Callable[[], float] | None = None) -> None:
         self.cfg = cfg
+        # Wall-clock for the injected NVS boot_epoch (QEMU has no RTC); injectable for tests.
+        self._clock = clock or time.time
         self.crash_loop = serial_monitor.CrashLoopDetector(
             max_reboots=cfg.max_trial_boots, window_s=cfg.crash_loop_window_s
         )
@@ -44,11 +47,29 @@ class Supervisor:
                 "no firmware image: set NFF_MOCK_FIRMWARE_IMAGE or pre-stage flash_path "
                 "(the server-side build serves the merged.bin — Stage 4)"
             )
-        # The NVS credential blob is generated from the provisioned certs and spliced into the
-        # flash at the nvs partition offset (credentials.write_nvs_csv → nvs_partition_gen →
-        # splice). Finalized with the L2 image; see credentials.py.
+        self._splice_nvs(flash)
         logger.info("prepared flash %s for %s", flash, self.cfg.device_id)
         return flash
+
+    def _splice_nvs(self, flash: Path) -> None:
+        """Generate this device's NVS credential partition from the provisioned certs and write it
+        into ``flash`` at the nvs offset — so one generic image boots as this specific device."""
+        for label, path in (
+            ("device cert", self.cfg.device_cert),
+            ("device key", self.cfg.device_key),
+            ("CA cert", self.cfg.ca_cert),
+        ):
+            if not Path(path).exists():
+                raise FileNotFoundError(
+                    f"missing {label} at {path} — is the fleet cert volume mounted at "
+                    f"{self.cfg.certs_dir} and {self.cfg.device_id} provisioned?"
+                )
+        nvs_bin = credentials.generate_nvs_bin(
+            self.cfg, boot_epoch=int(self._clock()), work_dir=flash.parent / "nvs"
+        )
+        credentials.splice_nvs_into_flash(
+            flash, nvs_bin, offset=self.cfg.nvs_offset, size_limit=self.cfg.nvs_size
+        )
 
     # ── run loop ─────────────────────────────────────────────────────────────
     def run(self) -> None:
