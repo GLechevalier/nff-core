@@ -12,6 +12,12 @@ use platformio_rs::{dispatch, version_string};
 fn main() {
     let cli = Cli::parse();
 
+    // Thread `--no-ansi` to the command layer (which reads PLATFORMIO_NO_ANSI),
+    // matching how Click's `--no-ansi` disables colour process-wide.
+    if cli.no_ansi {
+        std::env::set_var("PLATFORMIO_NO_ANSI", "true");
+    }
+
     // `pio --version` prints PlatformIO's exact version string and exits 0.
     if cli.version {
         println!("{}", version_string());

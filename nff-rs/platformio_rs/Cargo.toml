@@ -32,6 +32,8 @@ sha2       = "0.10"
 md-5       = "0.10"
 # HTTP client for the registry + package downloads (M2c networked layer).
 reqwest    = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
+# Serial-port enumeration for `device list` (M3).
+serialport = "4"
 
 [dev-dependencies]
 tempfile = "3"

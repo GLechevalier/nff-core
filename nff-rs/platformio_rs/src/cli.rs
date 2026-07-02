@@ -51,7 +51,7 @@ pub enum Command {
     /// Manage PlatformIO account.
     Account(PassthroughArgs),
     /// Board Explorer.
-    Boards(PassthroughArgs),
+    Boards(BoardsArgs),
     /// Static Code Analysis.
     Check(PassthroughArgs),
     /// Continuous Integration helper.
@@ -59,7 +59,7 @@ pub enum Command {
     /// Unit Debugging.
     Debug(PassthroughArgs),
     /// Device manager & serial/socket monitor.
-    Device(PassthroughArgs),
+    Device(DeviceArgs),
     /// GUI to manage PlatformIO.
     Home(PassthroughArgs),
     /// Library manager (deprecated upstream alias of `pkg`).
@@ -71,15 +71,15 @@ pub enum Command {
     /// Platform manager.
     Platform(PassthroughArgs),
     /// Project manager.
-    Project(PassthroughArgs),
+    Project(ProjectArgs),
     /// Remote development.
     Remote(PassthroughArgs),
     /// Run project targets (build, upload, clean, etc.).
     Run(PassthroughArgs),
     /// Manage PlatformIO settings.
-    Settings(PassthroughArgs),
+    Settings(SettingsArgs),
     /// Miscellaneous system commands.
-    System(PassthroughArgs),
+    System(SystemArgs),
     /// Manage teams.
     Team(PassthroughArgs),
     /// Unit Testing.
@@ -88,6 +88,109 @@ pub enum Command {
     Update(PassthroughArgs),
     /// Upgrade PlatformIO Core to the latest version.
     Upgrade(PassthroughArgs),
+}
+
+// --- M3 command surfaces ----------------------------------------------------
+
+/// `pio boards [QUERY] [--installed] [--json-output]`.
+#[derive(Args, Debug, Default, Clone)]
+pub struct BoardsArgs {
+    /// Filter boards by a substring of id/name/mcu/vendor/platform/frameworks.
+    pub query: Option<String>,
+    /// List only boards from installed platforms (skip the registry).
+    #[arg(long)]
+    pub installed: bool,
+    /// Emit a single-line JSON array of board briefs.
+    #[arg(long = "json-output")]
+    pub json_output: bool,
+}
+
+/// `pio settings <get|set|reset>`.
+#[derive(Args, Debug, Clone)]
+pub struct SettingsArgs {
+    #[command(subcommand)]
+    pub action: SettingsAction,
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum SettingsAction {
+    /// Get existing setting(s).
+    Get {
+        /// Restrict output to a single setting.
+        name: Option<String>,
+    },
+    /// Set a new value for a setting.
+    Set { name: String, value: String },
+    /// Reset settings to their defaults.
+    Reset,
+}
+
+/// `pio system <info|prune|completion>`.
+#[derive(Args, Debug, Clone)]
+pub struct SystemArgs {
+    #[command(subcommand)]
+    pub action: SystemAction,
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum SystemAction {
+    /// Display system-wide information.
+    Info {
+        #[arg(long = "json-output")]
+        json_output: bool,
+    },
+    /// Remove unused data (deferred to a later milestone).
+    Prune(PassthroughArgs),
+    /// Install/uninstall shell completion (deferred to a later milestone).
+    Completion(PassthroughArgs),
+}
+
+/// `pio device <list|monitor>`.
+#[derive(Args, Debug, Clone)]
+pub struct DeviceArgs {
+    #[command(subcommand)]
+    pub action: DeviceAction,
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum DeviceAction {
+    /// List devices.
+    List {
+        #[arg(long)]
+        serial: bool,
+        #[arg(long)]
+        logical: bool,
+        #[arg(long)]
+        mdns: bool,
+        #[arg(long = "json-output")]
+        json_output: bool,
+    },
+    /// Serial/socket monitor (deferred to a later milestone).
+    Monitor(PassthroughArgs),
+}
+
+/// `pio project <config|metadata|init>`.
+#[derive(Args, Debug, Clone)]
+pub struct ProjectArgs {
+    #[command(subcommand)]
+    pub action: ProjectAction,
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum ProjectAction {
+    /// Show computed configuration.
+    Config {
+        #[arg(short = 'd', long = "project-dir", default_value = ".")]
+        project_dir: String,
+        #[arg(long)]
+        lint: bool,
+        #[arg(long = "json-output")]
+        json_output: bool,
+    },
+    /// Dump project build metadata (deferred — needs the build system, M4).
+    Metadata(PassthroughArgs),
+    /// Initialize a new project (deferred — heavy scaffolding).
+    Init(PassthroughArgs),
 }
 
 #[cfg(test)]

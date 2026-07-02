@@ -9,10 +9,14 @@
 //! The library API (not the binary) is what the `nff` crate links against for
 //! in-process builds once the relevant milestones land.
 
+pub mod app;
 pub mod cli;
+pub mod commands;
 pub mod config;
 pub mod http;
+pub mod output;
 pub mod package;
+pub mod platform;
 pub mod registry;
 
 /// A process-wide lock shared by every test that mutates global state (the
@@ -71,38 +75,37 @@ impl CmdOutcome {
     }
 }
 
-/// Dispatch a parsed CLI invocation. At M0 every real command is a stub; the
-/// only fully-honest behaviours are `--version`/`--help` (handled by clap before
-/// we get here) and the not-implemented signalling.
+/// Dispatch a parsed CLI invocation. The M3 command groups (`boards`, `device`,
+/// `project`, `settings`, `system`) route to real handlers in [`commands`];
+/// everything else is still a not-implemented stub filled in by later milestones.
 #[must_use]
 pub fn dispatch(command: &cli::Command) -> CmdOutcome {
     use cli::Command::{
         Account, Boards, Check, Ci, Debug, Device, Home, Lib, Org, Pkg, Platform, Project, Remote,
         Run, Settings, System, Team, Test, Update, Upgrade,
     };
-    let name = match command {
-        Account(_) => "account",
-        Boards(_) => "boards",
-        Check(_) => "check",
-        Ci(_) => "ci",
-        Debug(_) => "debug",
-        Device(_) => "device",
-        Home(_) => "home",
-        Lib(_) => "lib",
-        Org(_) => "org",
-        Pkg(_) => "pkg",
-        Platform(_) => "platform",
-        Project(_) => "project",
-        Remote(_) => "remote",
-        Run(_) => "run",
-        Settings(_) => "settings",
-        System(_) => "system",
-        Team(_) => "team",
-        Test(_) => "test",
-        Update(_) => "update",
-        Upgrade(_) => "upgrade",
-    };
-    CmdOutcome::not_implemented(name)
+    match command {
+        Boards(a) => commands::boards::run(a),
+        Device(a) => commands::device::run(a),
+        Project(a) => commands::project::run(a),
+        Settings(a) => commands::settings::run(a),
+        System(a) => commands::system::run(a),
+        Account(_) => CmdOutcome::not_implemented("account"),
+        Check(_) => CmdOutcome::not_implemented("check"),
+        Ci(_) => CmdOutcome::not_implemented("ci"),
+        Debug(_) => CmdOutcome::not_implemented("debug"),
+        Home(_) => CmdOutcome::not_implemented("home"),
+        Lib(_) => CmdOutcome::not_implemented("lib"),
+        Org(_) => CmdOutcome::not_implemented("org"),
+        Pkg(_) => CmdOutcome::not_implemented("pkg"),
+        Platform(_) => CmdOutcome::not_implemented("platform"),
+        Remote(_) => CmdOutcome::not_implemented("remote"),
+        Run(_) => CmdOutcome::not_implemented("run"),
+        Team(_) => CmdOutcome::not_implemented("team"),
+        Test(_) => CmdOutcome::not_implemented("test"),
+        Update(_) => CmdOutcome::not_implemented("update"),
+        Upgrade(_) => CmdOutcome::not_implemented("upgrade"),
+    }
 }
 
 #[cfg(test)]

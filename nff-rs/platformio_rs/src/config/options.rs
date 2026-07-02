@@ -199,6 +199,17 @@ pub fn validate_dir(path: &str) -> String {
     abspath(&expanded)
 }
 
+/// The effective PlatformIO core directory: `$PLATFORMIO_CORE_DIR` when set,
+/// else [`get_default_core_dir`]. This is the value `ProjectConfig.get(
+/// "platformio", "core_dir")` resolves to for a default (project-less) config.
+#[must_use]
+pub fn get_core_dir() -> String {
+    match std::env::var("PLATFORMIO_CORE_DIR") {
+        Ok(v) if !v.is_empty() => v,
+        _ => get_default_core_dir(),
+    }
+}
+
 /// `get_default_core_dir`: `~/.platformio`, preferring `<drive>:\.platformio` on
 /// Windows when it exists.
 #[must_use]

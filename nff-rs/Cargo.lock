@@ -1424,6 +1424,7 @@ dependencies = [
  "regex",
  "reqwest",
  "serde_json",
+ "serialport",
  "sha1",
  "sha2",
  "tar",
