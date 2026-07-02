@@ -40,10 +40,17 @@ async def send_command(
 
     import json
     topic = f"nff/{project_id}/devices/{device_id}/cmd"
+    body = json.dumps(signed, separators=(",", ":"))
+    # Register for reconnect-redelivery: a QoS-0 publish is dropped if the device is not connected
+    # at this instant, and a crash-looping device (the L2 recovery case) is only briefly online.
+    # The router republishes this on every heartbeat/crash until the future resolves, so the
+    # command lands inside a live window instead of failing once and never retrying.
+    router.register_redeliver(device_id, topic, body)
     try:
-        await router.publish(topic, json.dumps(signed, separators=(",", ":")))
+        await router.publish(topic, body)
         return await asyncio.wait_for(fut, timeout=timeout)
     except asyncio.TimeoutError:
         raise TimeoutError(f"Device {device_id} did not respond within {timeout}s")
     finally:
         router.unregister_pending(device_id)
+        router.unregister_redeliver(device_id)

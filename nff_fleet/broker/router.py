@@ -18,6 +18,14 @@ _crash_cache: dict[str, dict] = {}
 # Pending command futures keyed by device_id — one in-flight command per device
 _pending: dict[str, asyncio.Future] = {}
 
+# In-flight command to (re)deliver keyed by device_id → (topic, payload_json). A command is
+# published QoS 0 with no broker-side queue, so a one-shot publish at send time is lost if the
+# device is not connected at that instant. A crash-looping device (the L2 recovery case) is only
+# briefly online between reboots, so send_command registers the command here and we REPUBLISH it
+# every time we hear from the device (heartbeat/crash on reconnect) until it responds — landing the
+# command inside a live connected window. Cleared by send_command's finally.
+_redeliver: dict[str, tuple[str, str]] = {}
+
 # Pending rollover-ack futures keyed by hwid — the fulfillment worker awaits the device's
 # `rollover_cert` ack on nff/_bootstrap/{batch}/{hwid}/response.
 _bootstrap_pending: dict[str, asyncio.Future] = {}
@@ -56,6 +64,34 @@ def register_pending(device_id: str, fut: asyncio.Future) -> None:
 
 def unregister_pending(device_id: str) -> None:
     _pending.pop(device_id, None)
+
+
+def register_redeliver(device_id: str, topic: str, payload: str) -> None:
+    _redeliver[device_id] = (topic, payload)
+
+
+def unregister_redeliver(device_id: str) -> None:
+    _redeliver.pop(device_id, None)
+
+
+async def _maybe_redeliver(device_id: str) -> None:
+    """Republish an in-flight command to a device we just heard from (it is connected now).
+
+    Called from the heartbeat/crash handlers: a crash-looping device is only online for a few
+    seconds per reboot, so re-sending the command the moment it reconnects is what gets a recovery
+    OTA to land. No-op unless a command is registered and its response future is still pending."""
+    entry = _redeliver.get(device_id)
+    if entry is None:
+        return
+    fut = _pending.get(device_id)
+    if fut is not None and fut.done():
+        return
+    topic, payload = entry
+    try:
+        await publish(topic, payload)
+        logger.info("Redelivered in-flight command to %s on reconnect", device_id)
+    except Exception as exc:  # a redeliver failure must not break message handling
+        logger.warning("Redeliver to %s failed: %s", device_id, exc)
 
 
 async def _handle_message(topic: str, payload_bytes: bytes) -> None:
@@ -99,6 +135,9 @@ async def _handle_message(topic: str, payload_bytes: bytes) -> None:
             db.upsert_device(device_id, {"status": "offline", "project_id": project_id})
         else:
             db.upsert_device(device_id, payload, with_telemetry=True)
+            # The device just (re)connected — if a command is waiting for it (e.g. a recovery
+            # OTA to a crash-looping device), republish it now while it is live.
+            await _maybe_redeliver(device_id)
         logger.debug("Heartbeat from %s (project %s): %s", device_id, project_id,
                      payload.get("status"))
 
@@ -115,6 +154,10 @@ async def _handle_message(topic: str, payload_bytes: bytes) -> None:
         _crash_cache[device_id] = payload
         db.ingest_crash(device_id, payload)
         logger.info("Crash report cached for %s", device_id)
+        # A crash report is published on connect (reporting the prior boot). It is a reliable
+        # "device is online right now" signal for a crash-looping device that may report a crash
+        # before its heartbeat — republish any in-flight command so the recovery OTA can land.
+        await _maybe_redeliver(device_id)
 
 
 async def _router_loop(client: MQTTClient) -> None:

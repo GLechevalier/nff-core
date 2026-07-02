@@ -317,6 +317,24 @@ async def _ingest_crash(device_id: str, payload: dict[str, Any]) -> None:
                 addr = frame
                 resolved = None
             rows.append({"crash_id": crash_id, "position": i, "address": addr, "resolved": resolved})
+
+        # Auto-symbolicate raw-address frames (real ESP32 / QEMU) when the build's ELF is staged,
+        # so the dashboard/agent see resolved backtraces without a manual fleet_resolve_backtrace.
+        # Best-effort: any failure (no ELF, no addr2line binary) leaves resolved=None — never drops
+        # the crash. The mock's pre-resolved dict frames already have `resolved` and are left alone.
+        build_id = payload.get("build_id")
+        if build_id and any(r["resolved"] is None and r["address"] for r in rows):
+            try:
+                from nff_fleet import crash as _crash
+                addrs = [r["address"] for r in rows]
+                resolved_list = await _crash.resolve_frames(build_id, addrs)
+                if resolved_list:
+                    for r, res in zip(rows, resolved_list):
+                        if r["resolved"] is None and res:
+                            r["resolved"] = res
+            except Exception as exc:  # noqa: BLE001 — resolution must never block ingest
+                logger.warning("backtrace auto-resolve failed for build_id=%s: %s", build_id, exc)
+
         await _client.table("backtrace_frames").insert(rows).execute()
 
     rtc = payload.get("rtc_log", [])
