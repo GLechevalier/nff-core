@@ -1,14 +1,20 @@
 from __future__ import annotations
 
-import os
+import hashlib
 from pathlib import Path
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
-def _random_build_id() -> str:
-    # 16 hex chars — mirrors the SDK's NFF_BUILD_ID (a 16-char SHA prefix).
-    return os.urandom(8).hex()
+def _build_id_for_fw(fw_version: str) -> str:
+    # Deterministic 16-hex build id derived from the firmware version — mirrors the SDK's
+    # NFF_BUILD_ID (a 16-char SHA prefix). REAL devices running the same firmware share one
+    # build_id (it identifies the build that produced the image), so we derive it from
+    # fw_version rather than randomizing per process. A random-per-spawn value was a test
+    # artifact that made every mock look like a distinct build to the fleet/policy layer,
+    # which broke cohort-lifted state recurrence (each spawn hashed to a unique policy state).
+    # The formula is mirrored in nff-agent-worker/scripts/seed-policy-prior.ts (deriveBuild).
+    return hashlib.sha256(f"nff-build:{fw_version}".encode()).hexdigest()[:16]
 
 
 class NffMockCoreSettings(BaseSettings):
@@ -73,7 +79,7 @@ class NffMockCoreSettings(BaseSettings):
 
     def model_post_init(self, __context) -> None:
         if not self.build_id:
-            self.build_id = _random_build_id()
+            self.build_id = _build_id_for_fw(self.fw_version)
 
     @property
     def device_cert(self) -> Path:
