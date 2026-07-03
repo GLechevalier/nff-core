@@ -151,6 +151,10 @@ async def _handle_message(topic: str, payload_bytes: bytes) -> None:
             resolve_response(device_id, payload)
 
     elif msg_type == "crash":
+        # project_id is authoritative from the cert-scoped topic, not the device payload
+        # (mirror the heartbeat handler above) — so the crash_reports row is tenant-scoped and
+        # project-scoped readers (e.g. the agent-worker's senseFleet) actually see it.
+        payload = {**payload, "project_id": project_id}
         _crash_cache[device_id] = payload
         db.ingest_crash(device_id, payload)
         logger.info("Crash report cached for %s", device_id)

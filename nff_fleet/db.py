@@ -290,6 +290,10 @@ async def _ingest_crash(device_id: str, payload: dict[str, Any]) -> None:
         {
             "id": crash_id,
             "device_id": device_id,
+            # Denormalized tenant scope (nullable since 0029): the router stamps the
+            # topic-authoritative project_id into the payload, so project-scoped readers
+            # (agent-worker senseFleet) see the crash. Mirrors upsert_device / announce.
+            "project_id": payload.get("project_id") or None,
             "ts": _now(),
             "reason": payload.get("reason"),
             "exception_cause": payload.get("exception_cause"),
