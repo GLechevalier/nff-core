@@ -195,9 +195,46 @@ async def list_mocks() -> list[MockInfo]:
     return mocks
 
 
+async def _container_present(name: str) -> bool:
+    """True if a container with this exact name still exists in any state (running/exited/removing).
+
+    Uses an anchored name filter so ``nff-mock-mock-abc`` never matches ``...-abcdef``. Any docker
+    error here is treated as "still present" (fail-safe) so a verify never falsely reports gone.
+    """
+    rc, out = await _docker(
+        [settings.docker_path, "ps", "-aq", "--filter", f"name=^{name}$"],
+        label=f"verify {name}",
+    )
+    if rc != 0:
+        return True
+    return bool(out.strip())
+
+
 async def kill_and_rm(name: str) -> None:
-    """Best-effort teardown: kill (ignore if already stopped) then force-remove."""
+    """Tear a mock container down and VERIFY it is gone before returning.
+
+    A heavy L2 ``qemu-system-xtensa`` container can lag between ``rm -f`` returning and the daemon
+    actually dropping it from ``docker ps -a`` — and the per-level spawn cap counts every non-removed
+    container in any state, so a lingering one permanently eats a project slot. So we don't just fire
+    kill+rm and hope: we bounded-graceful-stop, force-remove, then poll until the name is absent, and
+    RAISE ``DockerError`` if it is still present at the deadline (which surfaces as a truthful 502 on
+    ``DELETE /mocks/<id>`` instead of a false ``removed:true``).
+    """
+    # Bounded graceful stop first so QEMU gets a clean shutdown window; ignore its result (a
+    # not-found / already-stopped container is fine — the verify loop is the real gate).
+    await _docker([settings.docker_path, "stop", "-t", "3", name], label=f"stop {name}")
     await _docker([settings.docker_path, "kill", name], label=f"kill {name}")
     rc, out = await _docker([settings.docker_path, "rm", "-f", name], label=f"rm {name}")
     if rc != 0 and "No such container" not in out:
         logger.warning("docker rm %s: %s", name, out.strip())
+
+    # Verify the container is actually gone. Poll up to docker_timeout; the daemon can take a few
+    # seconds to reap a QEMU container after rm -f returns.
+    deadline = asyncio.get_event_loop().time() + settings.docker_timeout
+    while await _container_present(name):
+        if asyncio.get_event_loop().time() >= deadline:
+            raise DockerError(
+                f"container {name} still present {settings.docker_timeout}s after rm -f "
+                f"(reap failed — slot would leak)"
+            )
+        await asyncio.sleep(0.5)
