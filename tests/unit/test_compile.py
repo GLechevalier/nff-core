@@ -79,3 +79,34 @@ def test_heap_leak_detected():
 
 def test_clean_trivial_source_has_no_fault():
     assert detect_fault("void loop() { delay(1000); }") is None
+
+
+# ── fault-taxonomy campaign: the new scored root causes ──────────────────────
+
+def test_divide_by_zero_detected():
+    src = "int avg(int sum, int n) { return sum / n; }"  # no zero-guard on n
+    assert detect_fault(src) == {"scenario": "divide_by_zero"}
+    fixed = "int avg(int sum, int n) { if (n == 0) return 0; return sum / n; }"
+    assert detect_fault(fixed) is None
+
+
+def test_divide_by_zero_ignores_include_paths():
+    # '#include <driver/gpio.h>' has a '/', but must not read as a division.
+    src = '#include <driver/gpio.h>\nvoid loop() { delay(1000); }'
+    assert detect_fault(src) is None
+
+
+def test_unaligned_access_detected():
+    src = "uint32_t rd(uint8_t* buf) { return *(uint32_t*)(buf + 1); }"
+    assert detect_fault(src) == {"scenario": "unaligned_access"}
+    fixed = "uint32_t rd(uint8_t* buf) { uint32_t v; memcpy(&v, buf + 1, 4); return v; }"
+    assert detect_fault(fixed) is None
+
+
+def test_assert_failed_detected():
+    src = "void loop() { if (broken) abort(); }"
+    assert detect_fault(src) == {"scenario": "assert_failed"}
+    forced = "void setup() { assert(false); }"
+    assert detect_fault(forced) == {"scenario": "assert_failed"}
+    fixed = "void loop() { if (broken) recover(); }"
+    assert detect_fault(fixed) is None
