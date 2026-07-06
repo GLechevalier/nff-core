@@ -161,6 +161,7 @@ async def build_and_deploy_source(
                 version=catalog_version,
                 device_types=[device_type],
                 file_path=fd.name,
+                project_id=project_id,
                 build_id=build_id,
                 release_version=version,
                 author=author,

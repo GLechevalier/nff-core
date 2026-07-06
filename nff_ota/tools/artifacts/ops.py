@@ -72,6 +72,7 @@ async def upload_artifact(params: UploadArtifactParams) -> ArtifactResult:
     client = get_client()
 
     for column, value in (
+        ("project_id", params.project_id),
         ("build_id", params.build_id),
         ("branch_name", params.branch_name),
         ("author", params.author),

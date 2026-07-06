@@ -90,6 +90,7 @@ async def real_build_and_deploy(
                     version=catalog_version,
                     device_types=[device_type],
                     file_path=fd.name,
+                    project_id=project_id,
                     build_id=build_id,
                     release_version=version,
                     author=author,

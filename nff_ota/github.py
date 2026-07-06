@@ -102,8 +102,13 @@ async def compile_source(
     if final is None:
         raise GithubError(f"nff-github returned no result (status {status_code})")
     if not final.get("ok"):
-        detail = final.get("error") or final.get("logs") or "unknown error"
-        raise GithubError(f"nff-github compile failed: {str(detail)[:500]}")
+        detail = str(final.get("error") or final.get("logs") or "unknown error")
+        # A compile log puts the REAL failure at the END (the cmake/ninja/gcc error), while the
+        # start is just ESP-IDF's "Detecting the Python interpreter…" preamble. So surface the TAIL,
+        # not a head-truncation that would hide the actual error behind boilerplate.
+        if len(detail) > 2500:
+            detail = "…" + detail[-2500:]
+        raise GithubError(f"nff-github compile failed: {detail}")
     if not final.get("artifact_b64"):
         raise GithubError("nff-github returned no artifact")
     return final

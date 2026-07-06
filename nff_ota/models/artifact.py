@@ -15,6 +15,10 @@ class UploadArtifactParams(BaseModel):
     # onto the shared firmware_versions row so a device's heartbeat/crash build_id joins
     # back to its source commit and stored ELF. build_id must equal the value baked into
     # the firmware (NFF_BUILD_ID) — the connector guarantees this by injecting it at compile.
+    # The tenant that owns this firmware_versions row. firmware_versions.project_id is NOT NULL
+    # (multitenancy), so every real caller must supply it — resolved from the target device's /
+    # group's project. A row without it fails the DB upsert (23502).
+    project_id: str | None = None
     build_id: str | None = None
     branch_name: str | None = None
     author: str | None = None
