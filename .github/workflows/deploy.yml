@@ -85,8 +85,12 @@ jobs:
         include:
           - component: controller
             context: controller
+            dockerfile: controller/Dockerfile
+          # device needs the nff-mock/ ROOT as context so the shared ../core is in
+          # scope (see device/Dockerfile: it COPYs both core/ and device/).
           - component: device
-            context: device
+            context: .
+            dockerfile: device/Dockerfile
     steps:
       - uses: actions/checkout@v4
         with:
@@ -103,6 +107,7 @@ jobs:
       - uses: docker/build-push-action@v6
         with:
           context: ${{ matrix.context }}
+          file: ${{ matrix.dockerfile }}
           push: true
           cache-from: type=gha,scope=${{ matrix.component }}
           cache-to: type=gha,mode=max,scope=${{ matrix.component }}
