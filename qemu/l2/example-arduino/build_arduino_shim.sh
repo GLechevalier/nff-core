@@ -106,6 +106,11 @@ CONFIG_LWIP_TCPIP_RECVMBOX_SIZE=64
 CONFIG_ESP_INT_WDT=n
 CONFIG_ESP_TASK_WDT_TIMEOUT_S=30
 CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
+# Set a debug watchpoint at the end of each task's stack so an overflow traps IMMEDIATELY with a
+# clean "Stack canary watchpoint triggered" panic + coredump — instead of silently corrupting memory
+# (a tight recursion overflows in ms, well before the task WDT, and without this leaves no crash
+# report). This is what makes the stack_overflow fault-taxonomy scenario reportable on QEMU.
+CONFIG_FREERTOS_WATCHPOINT_END_OF_STACK=y
 EOF
 cp "$PROJDIR/partitions.csv" "$PROJ/partitions.csv"
 
