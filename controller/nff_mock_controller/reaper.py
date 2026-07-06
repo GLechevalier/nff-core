@@ -13,7 +13,7 @@ import logging
 from datetime import datetime, timezone
 
 from nff_mock_controller import docker as dk
-from nff_mock_controller import provision
+from nff_mock_controller import presence, provision
 from nff_mock_controller.config import settings
 
 logger = logging.getLogger(__name__)
@@ -36,19 +36,44 @@ def _expired(expires_at: str) -> bool:
     return datetime.now(timezone.utc) >= exp
 
 
+def _should_reap(m: dk.MockInfo) -> bool:
+    """True if a *live* (non-dead) mock is past its keep-alive-adjusted deadline.
+
+    L1 mocks are cheap and user-facing: while their project has a fresh browser-presence ping
+    (the user is connected) they are never reaped for TTL; otherwise they fall back to the TTL
+    baked into their ``expires_at`` label. L2 mocks are heavy/scarce, so presence does NOT keep
+    them alive — they reap on an idle deadline (the last ``/mocks/renew``, reset each time the
+    device is employed) or their label TTL if never renewed.
+    """
+    if m.level == "1":
+        if presence.presence_fresh(m.project_id):
+            return False
+        return _expired(m.expires_at)
+    # L2 (and any future heavy level): idle-lease via renew, else the label TTL.
+    deadline = presence.renew_deadline(m.device_id)
+    if deadline is not None:
+        return datetime.now(timezone.utc) >= deadline
+    return _expired(m.expires_at)
+
+
 async def sweep_once() -> int:
     """Reap expired/dead mocks. Returns the number torn down."""
     reaped = 0
-    for m in await dk.list_mocks():
+    mocks = await dk.list_mocks()
+    # Keep the keep-alive stores from growing across the controller's lifetime.
+    presence.prune({m.device_id for m in mocks})
+    for m in mocks:
         if not m.device_id.startswith(_MOCK_ID_PREFIX):
             continue  # safety: only ever touch mock-spawned identities
-        if not (m.state in _DEAD_STATES or _expired(m.expires_at)):
+        # A dead/exited container is always torn down; a live one only past its deadline.
+        if m.state not in _DEAD_STATES and not _should_reap(m):
             continue
         await dk.kill_and_rm(m.name)
         try:
             await provision.deprovision(m.device_id)
         except Exception as exc:  # best-effort: a stuck deprovision must not wedge the sweep
             logger.warning("reaper: deprovision %s failed: %s", m.device_id, exc)
+        presence.forget_device(m.device_id)
         reaped += 1
 
     if reaped:

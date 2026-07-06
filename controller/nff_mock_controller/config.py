@@ -117,6 +117,20 @@ class NffMockControllerSettings(BaseSettings):
     max_per_project: int = 100
     max_total: int = 100
 
+    # ── Browser keep-alive (presence) ─────────────────────────────────────────
+    # A connected dashboard pings POST /mocks/presence for the project it is viewing every
+    # ~60 s. While a project's last ping is within presence_ttl_s, its LEVEL-1 mocks are never
+    # reaped for TTL — they stay up as long as the user is online, and drain once the pings
+    # stop (tab closed / navigated away). Keep this comfortably above the browser ping interval
+    # so a single missed beat doesn't reap. In-memory + soft: a controller restart just reverts
+    # to label-TTL reaping until the next ping.
+    presence_ttl_s: int = 150
+    # Level-2 (heavy QEMU) mocks are a scarce shared resource, so presence does NOT keep them
+    # alive. Each instead carries an idle lease: employing one (a compile / OTA / self-heal cycle
+    # against it) POSTs /mocks/renew to reset this timer; unused for l2_idle_ttl_s it is released,
+    # even while the user is online. Absent any renew, an L2 falls back to its spawn TTL label.
+    l2_idle_ttl_s: int = 600
+
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
 
 

@@ -32,7 +32,7 @@ from starlette.responses import JSONResponse
 from starlette.routing import Route
 
 from nff_mock_controller import docker as dk
-from nff_mock_controller import provision, reaper
+from nff_mock_controller import presence, provision, reaper
 from nff_mock_controller.config import settings
 from nff_mock_controller.levels import profile_for
 
@@ -209,6 +209,52 @@ async def _delete_mock(request: Request) -> JSONResponse:
     return JSONResponse({"device_id": device_id, "removed": True})
 
 
+async def _presence(request: Request) -> JSONResponse:
+    """Keep-alive heartbeat from a connected dashboard: mark a project as 'user online'.
+
+    While a project's last ping is within ``presence_ttl_s`` the reaper never TTL-reaps its
+    Level-1 mocks (see reaper._should_reap), so the fleet the user sees stays up as long as
+    the tab is open and drains once the pings stop.
+    """
+    if not _secret_ok(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    try:
+        body: dict[str, Any] = await request.json()
+    except Exception:
+        body = {}
+    project_id = body.get("project_id")
+    if not isinstance(project_id, str) or not project_id:
+        return JSONResponse({"error": "project_id is required"}, status_code=400)
+    presence.mark_presence(project_id)
+    return JSONResponse({"ok": True, "project_id": project_id, "ttl_s": settings.presence_ttl_s})
+
+
+async def _renew_mock(request: Request) -> JSONResponse:
+    """Reset a mock's idle lease — used to signal an L2 is being employed (compile/OTA/self-heal).
+
+    Extends the device's deadline by ``ttl_s`` (default the L2 idle window). L1 mocks are governed
+    by presence instead, so renewing one is a harmless no-op on their lifetime.
+    """
+    if not _secret_ok(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    try:
+        body: dict[str, Any] = await request.json()
+    except Exception:
+        body = {}
+    device_id = body.get("device_id")
+    if not isinstance(device_id, str) or not device_id.startswith("mock-"):
+        return JSONResponse({"error": "a 'mock-' device_id is required"}, status_code=400)
+    ttl_s = body.get("ttl_s") or settings.l2_idle_ttl_s
+    try:
+        ttl_s = int(ttl_s)
+    except (TypeError, ValueError):
+        return JSONResponse({"error": "ttl_s must be an integer"}, status_code=400)
+    if ttl_s < 1:
+        return JSONResponse({"error": "ttl_s must be >= 1"}, status_code=400)
+    deadline = presence.renew_device(device_id, ttl_s)
+    return JSONResponse({"ok": True, "device_id": device_id, "expires_at": deadline.isoformat()})
+
+
 async def _health(request: Request) -> JSONResponse:
     return JSONResponse({"status": "ok"})
 
@@ -227,6 +273,10 @@ app = Starlette(
         Route("/health", _health, methods=["GET"]),
         Route("/mocks", _create_mocks, methods=["POST"]),
         Route("/mocks", _list_mocks, methods=["GET"]),
+        # Keep-alive routes must precede the /{device_id} catch-all so "presence"/"renew" are
+        # matched as literals, not treated as a device id.
+        Route("/mocks/presence", _presence, methods=["POST"]),
+        Route("/mocks/renew", _renew_mock, methods=["POST"]),
         Route("/mocks/{device_id}", _delete_mock, methods=["DELETE"]),
     ],
 )

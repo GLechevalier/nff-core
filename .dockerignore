@@ -11,3 +11,10 @@
 # Sibling packages not needed by the device images.
 controller/
 targets/
+# Local ESP-IDF build artifacts under qemu/l2/project (127 MB of build/ output). The L2 image
+# never builds firmware from these — seed_baseline.sh compiles in a SEPARATE container — so they
+# only bloat the context and, over a large transfer, can trip Docker Desktop's buildkit session.
+**/build/
+**/managed_components/
+**/dependencies.lock
+**/sdkconfig.old
