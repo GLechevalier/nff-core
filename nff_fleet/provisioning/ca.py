@@ -200,7 +200,14 @@ def issue_server_cert(sans: str | list[str]) -> tuple[Path, Path]:
         if any(getattr(g, "value", None) == entry or str(getattr(g, "value", "")) == entry for g in alt):
             continue  # de-dup repeated addresses
         try:
-            alt.append(x509.IPAddress(ipaddress.ip_address(entry)))
+            ip = ipaddress.ip_address(entry)
+            alt.append(x509.IPAddress(ip))
+            # Also emit the IP literal as a dNSName. mbedtls (the ESP32 / L2-QEMU firmware) matches
+            # the verify-hostname STRING against dNSName SANs only — it does NOT match an IP literal
+            # against iPAddress SANs — so an L2 device connecting to a bare broker IP (guest_broker_ip
+            # = 10.13.0.10) fails X.509 verification (-9984) unless the IP is also present as a DNS
+            # name. OpenSSL/Python clients still match the iPAddress form. Belt-and-suspenders.
+            alt.append(x509.DNSName(entry))
         except ValueError:
             alt.append(x509.DNSName(entry))
     san = x509.SubjectAlternativeName(alt)
