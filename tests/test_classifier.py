@@ -58,3 +58,54 @@ def test_store_prohibited_non_null_has_candidates():
     assert result.crash_class == "null_deref"
     assert result.confidence < 0.80
     assert len(result.candidates) >= 1
+
+
+# ── generalized taxonomy: the Recommended-6 new classes ──────────────────────
+
+def test_divide_by_zero_classified(divide_by_zero_raw: str):
+    result = RuleClassifier().classify(_make_crash(divide_by_zero_raw))
+    assert result.crash_class == "divide_by_zero"
+    assert result.confidence >= 0.95
+
+
+def test_unaligned_access_classified(unaligned_access_raw: str):
+    result = RuleClassifier().classify(_make_crash(unaligned_access_raw))
+    assert result.crash_class == "unaligned_access"
+    assert result.confidence >= 0.90
+
+
+def test_bad_instruction_fetch_classified(bad_instruction_fetch_raw: str):
+    result = RuleClassifier().classify(_make_crash(bad_instruction_fetch_raw))
+    assert result.crash_class == "bad_instruction_fetch"
+    assert result.confidence >= 0.85
+
+
+def test_illegal_instruction_no_repeat_classified(illegal_instruction_raw: str):
+    # EXCCAUSE=0 WITHOUT a stuck-unwinder signature → illegal_instruction, NOT stack_overflow.
+    result = RuleClassifier().classify(_make_crash(illegal_instruction_raw))
+    assert result.crash_class == "illegal_instruction"
+    assert any(c.crash_class == "bad_instruction_fetch" for c in result.candidates)
+
+
+def test_assert_failed_classified(assert_failed_raw: str):
+    result = RuleClassifier().classify(_make_crash(assert_failed_raw))
+    assert result.crash_class == "assert_failed"
+    assert result.confidence >= 0.90
+
+
+def test_abort_bare_classified(abort_bare_raw: str):
+    # A bare abort() with no assert message still classifies as assert_failed (not watchdog).
+    result = RuleClassifier().classify(_make_crash(abort_bare_raw))
+    assert result.crash_class == "assert_failed"
+
+
+def test_brownout_classified(brownout_raw: str):
+    result = RuleClassifier().classify(_make_crash(brownout_raw))
+    assert result.crash_class == "brownout"
+    assert result.confidence >= 0.90
+
+
+def test_watchdog_with_abort_is_still_watchdog(watchdog_raw: str):
+    # A real task-WDT dump ends in abort(); the watchdog signature must win over abort.
+    result = RuleClassifier().classify(_make_crash(watchdog_raw))
+    assert result.crash_class == "watchdog"

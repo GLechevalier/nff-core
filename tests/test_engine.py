@@ -60,3 +60,29 @@ def test_engine_confidence_always_set(null_deref_raw: str):
     with patch("nff_diagnosis.engine.diagnosis.anthropic.Anthropic", _mock_anthropic("cause")):
         diag = DiagnosisEngine(api_key="fake").diagnose(crash, [], {})
     assert 0.0 <= diag.confidence <= 1.0
+
+
+def test_engine_populates_family_and_is_symptom(null_deref_raw: str):
+    crash = _make_crash(null_deref_raw)
+    with patch("nff_diagnosis.engine.diagnosis.anthropic.Anthropic", _mock_anthropic("cause")):
+        diag = DiagnosisEngine(api_key="fake").diagnose(crash, [], {})
+    assert diag.family == "memory"
+    assert diag.is_symptom is False
+
+
+def test_engine_watchdog_marked_symptom(watchdog_raw: str):
+    crash = _make_crash(watchdog_raw)
+    with patch("nff_diagnosis.engine.diagnosis.anthropic.Anthropic", _mock_anthropic("blocked")):
+        diag = DiagnosisEngine(api_key="fake").diagnose(crash, [], {})
+    assert diag.crash_class == "watchdog"
+    assert diag.family == "timing"
+    assert diag.is_symptom is True
+    DiagnosisOutput.model_validate(diag.model_dump())  # round-trip incl. new fields
+
+
+def test_engine_assert_failed(assert_failed_raw: str):
+    crash = _make_crash(assert_failed_raw)
+    with patch("nff_diagnosis.engine.diagnosis.anthropic.Anthropic", _mock_anthropic("assert")):
+        diag = DiagnosisEngine(api_key="fake").diagnose(crash, [], {})
+    assert diag.crash_class == "assert_failed"
+    assert diag.family == "assertion"

@@ -189,10 +189,20 @@ Three Pydantic v2 models are the spine of the system. `build_id` has the same ty
 
 **`CrashRecord`** — emitted by the capture CLI or sent by a device. Always carries `raw` (the original serial text) so crashes can be re-parsed without re-crashing hardware.
 
-**`DiagnosisOutput`** — always includes `confidence` (0.0–1.0) and `candidates` (alternative explanations when ambiguous). A confident-but-wrong diagnosis is worse than an honest "unsure".
+**`DiagnosisOutput`** — always includes `confidence` (0.0–1.0) and `candidates` (alternative explanations when ambiguous). A confident-but-wrong diagnosis is worse than an honest "unsure". It also carries `family` and `is_symptom` from the taxonomy registry so consumers can tell a root-cause-correct fix from a symptom mask.
 
 ```
-crash_class: null_deref | stack_overflow | watchdog | heap_corruption | unknown
+crash_class: null_deref | stack_overflow | watchdog | heap_corruption
+           | divide_by_zero | unaligned_access | illegal_instruction
+           | bad_instruction_fetch | assert_failed | brownout | unknown
+family:      memory | control_flow | arithmetic | assertion | timing | power | unknown
+is_symptom:  true for classes that mask a deeper cause (e.g. watchdog)
+```
+
+Score the taxonomy on a labelled corpus offline (no LLM, no hardware):
+
+```
+nff-diag eval taxonomy      # confusion matrix + per-class accuracy; exits non-zero on a miss
 ```
 
 ---

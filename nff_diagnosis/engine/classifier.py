@@ -10,6 +10,9 @@ _EXCCAUSE_LOAD_PROHIBITED = 28   # 0x1c — load from non-readable page
 _EXCCAUSE_ILLEGAL_INSTRUCTION = 0
 _EXCCAUSE_DEBUG = 5
 _EXCCAUSE_DEBUG_ALT = 1
+_EXCCAUSE_DIVIDE_BY_ZERO = 6           # IntegerDivideByZero
+_EXCCAUSE_UNALIGNED = 9                # LoadStoreAlignmentCause
+_EXCCAUSE_INSTR_FETCH_PROHIBITED = 20  # 0x14 — fetch from non-executable page
 
 # ESP32 heap DRAM range (approximate)
 _HEAP_LOW = 0x3FFB0000
@@ -62,6 +65,23 @@ class RuleClassifier:
                 rationale="IDF watchdog task-list format detected; no register dump present.",
             )
 
+        # Rule 1b: abort()/assert is a deliberate trap — its own root cause, not a watchdog.
+        if crash.panic_type == "abort":
+            reason = crash.abort_reason or "abort() was called"
+            return ClassificationResult(
+                crash_class="assert_failed",
+                confidence=0.95,
+                rationale=f"Firmware called abort()/assert(): {reason}",
+            )
+
+        # Rule 1c: brownout — a power fault, no code signature.
+        if crash.panic_type == "brownout":
+            return ClassificationResult(
+                crash_class="brownout",
+                confidence=0.96,
+                rationale="Brownout detector triggered; supply voltage dipped below threshold.",
+            )
+
         # Rule 2: StoreProhibited + null-range address → null_deref (high confidence)
         if cause == _EXCCAUSE_STORE_PROHIBITED and _is_null_range(addr):
             return ClassificationResult(
@@ -92,6 +112,36 @@ class RuleClassifier:
                 rationale=f"LoadProhibited (EXCCAUSE=28) reading from null-range address {addr}.",
             )
 
+        # Rule 4b: definitive EXCCAUSE-keyed faults (arithmetic / alignment / bad fetch).
+        # These causes are unambiguous, so they win over the shape-based rules below.
+        if cause == _EXCCAUSE_DIVIDE_BY_ZERO:
+            return ClassificationResult(
+                crash_class="divide_by_zero",
+                confidence=0.97,
+                rationale="IntegerDivideByZero (EXCCAUSE=6): integer division or modulo by a zero divisor.",
+            )
+        if cause == _EXCCAUSE_UNALIGNED:
+            return ClassificationResult(
+                crash_class="unaligned_access",
+                confidence=0.95,
+                rationale=f"LoadStoreAlignment (EXCCAUSE=9) at {addr}: access violated required alignment.",
+            )
+        if cause == _EXCCAUSE_INSTR_FETCH_PROHIBITED:
+            return ClassificationResult(
+                crash_class="bad_instruction_fetch",
+                confidence=0.90,
+                rationale=(
+                    f"InstrFetchProhibited (EXCCAUSE=20) at PC {crash.fault_pc}: executing "
+                    "non-executable memory — a corrupted return address or function pointer."
+                ),
+                candidates=[
+                    Candidate(
+                        crash_class="stack_overflow",
+                        explanation="A smashed stack can overwrite the return address, landing the fetch in data.",
+                    )
+                ],
+            )
+
         # Rule 5: repeated PCs → stack_overflow (evaluated before address-range rules because
         # a stack overflow into DRAM will produce a heap-range fault_addr, making it look like
         # heap_corruption; the unwinder-stuck pattern is a stronger signal than the address alone).
@@ -114,6 +164,23 @@ class RuleClassifier:
                 crash_class="stack_overflow",
                 confidence=0.85,
                 rationale="IllegalInstruction with repeated backtrace PCs; SP likely corrupted, CPU executing stack data.",
+            )
+
+        # Rule 6b: IllegalInstruction without a stuck-unwinder signature → illegal_instruction.
+        if cause == _EXCCAUSE_ILLEGAL_INSTRUCTION:
+            return ClassificationResult(
+                crash_class="illegal_instruction",
+                confidence=0.80,
+                rationale=(
+                    "IllegalInstruction (EXCCAUSE=0): the CPU decoded an invalid opcode — "
+                    "likely a corrupted code pointer or a jump into data."
+                ),
+                candidates=[
+                    Candidate(
+                        crash_class="bad_instruction_fetch",
+                        explanation="A corrupted call target can also trap as a prohibited instruction fetch.",
+                    )
+                ],
             )
 
         # Rule 7: LoadProhibited + heap interior address → heap_corruption (ambiguous)

@@ -51,3 +51,46 @@ def test_heap_corrupt_parsed(heap_corrupt_raw: str):
 def test_unknown_format():
     fields = ESP32PanicParser().parse("nothing useful here")
     assert fields["panic_type"] == "unknown"
+
+
+# ── generalized taxonomy: new panic formats ──────────────────────────────────
+
+def test_assert_failed_parsed(assert_failed_raw: str):
+    fields = ESP32PanicParser().parse(assert_failed_raw)
+    assert fields["panic_type"] == "abort"
+    assert "queue.c:1545" in fields["abort_reason"]
+    assert fields["abort_reason"].startswith("assert failed:")
+    assert len(fields["backtrace"]) == 5
+    assert fields["fault_pc"] == "0x400845e4"
+    assert fields["cpu"] == 0
+
+
+def test_abort_bare_parsed(abort_bare_raw: str):
+    fields = ESP32PanicParser().parse(abort_bare_raw)
+    assert fields["panic_type"] == "abort"
+    assert "abort() was called" in fields["abort_reason"]
+    assert fields["cpu"] == 1
+
+
+def test_brownout_parsed(brownout_raw: str):
+    fields = ESP32PanicParser().parse(brownout_raw)
+    assert fields["panic_type"] == "brownout"
+    assert fields["backtrace"] == []
+
+
+def test_watchdog_with_abort_stays_watchdog(watchdog_raw: str):
+    # The watchdog fixture also contains "abort() was called"; watchdog must win.
+    fields = ESP32PanicParser().parse(watchdog_raw)
+    assert fields["panic_type"] == "idf_watchdog"
+
+
+def test_divide_by_zero_parsed(divide_by_zero_raw: str):
+    fields = ESP32PanicParser().parse(divide_by_zero_raw)
+    assert fields["panic_type"] == "guru_meditation"
+    assert fields["exception_cause"] == 6
+
+
+def test_unaligned_parsed(unaligned_access_raw: str):
+    fields = ESP32PanicParser().parse(unaligned_access_raw)
+    assert fields["exception_cause"] == 9
+    assert fields["fault_addr"] == "0x3ffb8003"

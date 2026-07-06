@@ -8,8 +8,9 @@ class CrashRecord(BaseModel):
     crash_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     build_id: str
     device_id: Optional[str] = None
-    panic_type: str  # "guru_meditation" | "idf_watchdog" | "unknown"
+    panic_type: str  # "guru_meditation" | "idf_watchdog" | "abort" | "brownout" | "unknown"
     exception_cause: Optional[int] = None
+    abort_reason: Optional[str] = None  # the failed assert / abort() line, when panic_type == "abort"
     fault_pc: Optional[str] = None
     fault_addr: Optional[str] = None
     registers: dict[str, str] = Field(default_factory=dict)

@@ -106,7 +106,18 @@ Key invariants:
 
 ### 3. Diagnosis output (engine -> storage / view)
 - `crash_id` — the crash this explains (reference; crash is always stored too)
-- `crash_class` — null_deref | stack_overflow | watchdog | heap_corruption | unknown
+- `crash_class` — the generalized fault taxonomy (10 real classes + `unknown`):
+  null_deref | stack_overflow | watchdog | heap_corruption | divide_by_zero |
+  unaligned_access | illegal_instruction | bad_instruction_fetch | assert_failed |
+  brownout | unknown. Single source of truth: `schemas/diagnosis_output.py::CrashClass`;
+  metadata (family, is_symptom, remediation) in `schemas/taxonomy.py::FAULT_TAXONOMY`.
+  Adding a root cause = one FAULT_TAXONOMY entry + one classifier rule keyed on a HARD
+  signal (see the accuracy bench: `nff-diag eval taxonomy`).
+- `family` — coarse grouping (memory | control_flow | arithmetic | assertion | timing |
+  power | unknown), from the taxonomy registry.
+- `is_symptom` — True when this class is a symptom layer that usually masks a deeper root
+  cause (e.g. `watchdog` — the root cause is whatever blocked). Lets consumers score a
+  root-cause-correct fix vs a symptom mask.
 - `root_cause` — plain-language explanation
 - `location` — resolved `function` + `file` + `line` of the relevant frame
 - `resolved_backtrace` — each PC mapped to function/file/line

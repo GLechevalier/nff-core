@@ -1,0 +1,11 @@
+Guru Meditation Error: Core  0 panic'ed (LoadStoreAlignment). Exception was unhandled.
+
+Core  0 register dump:
+PC      : 0x400d3f2c  PS      : 0x00060a33  A0      : 0x800d3f40  A1      : 0x3ffb5220
+A2      : 0x3ffb8003  A3      : 0x00000004  A4      : 0x00000002  A5      : 0x00000000
+A6      : 0x00000000  A7      : 0x00000000  A8      : 0x800d3f2c  A9      : 0x3ffb5200
+SAR     : 0x00000000  EXCCAUSE: 0x00000009  EXCVADDR: 0x3ffb8003
+
+Backtrace: 0x400d3f2c:0x3ffb5220 0x400d4010:0x3ffb5240 0x400d1500:0x3ffb5260
+
+ELF file SHA256: a11a11a1100000000000000000000000000000000000000000000000000000bb
