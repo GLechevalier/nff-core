@@ -18,6 +18,12 @@
 # (adc_continuous_data_t, i2c_ll_slave_init) — use the TAGGED v5.3.1, not the release-v5.3 snapshot.
 set -e
 PROJ=${PROJ:-/out/ardproj}
+# Where the collectable artifacts (merged.bin / app.bin / firmware.elf) are deposited for the caller's
+# glob. Defaults to $PROJ (standalone). nff-github sets ARTIFACT_DIR=/work (the mounted output) while
+# pointing PROJ at a PERSISTENT build-cache volume — so the heavy IDF build/ survives between builds
+# (ninja rebuilds only the changed sketch + nff SDK, then relinks: minutes → tens of seconds) while the
+# artifacts still land where compile-source collects them.
+ARTIFACT_DIR=${ARTIFACT_DIR:-$PROJ}
 SHIM=/repo/nff-mock/qemu/l2/shim
 PROJDIR=/repo/nff-mock/qemu/l2/project
 L2NET=$PROJDIR/components/nff_l2_net
@@ -35,6 +41,12 @@ export CCACHE_MAXSIZE="${CCACHE_MAXSIZE:-5G}"
 mkdir -p "$CCACHE_DIR" 2>/dev/null || true
 
 git config --global --add safe.directory /repo 2>/dev/null || true
+# One-shot clean-rebuild escape hatch: wipe the persisted build state (e.g. after a toolchain bump,
+# or a corrupt incremental dir). Harmless when PROJ is ephemeral. Set NFF_L2_BUILD_CLEAN=1 to force.
+[ -n "$NFF_L2_BUILD_CLEAN" ] && rm -rf "$PROJ/build" "$PROJ/managed_components" "$PROJ/dependencies.lock"
+mkdir -p "$PROJ"
+# Refresh ONLY the sketch (main); $PROJ/build, managed_components (arduino-esp32) and the PubSubClient
+# clone are deliberately left intact so a persistent PROJ rebuilds incrementally.
 rm -rf "$PROJ/main"; mkdir -p "$PROJ/main" "$PROJ/components"
 
 # ---- top-level project (NFF_QEMU project-wide so it reaches the nff SDK component) ----
@@ -170,4 +182,12 @@ cp "$PROJ"/build/*.elf "$PROJ/firmware.elf"
 # compile-source can return it separately (merged.bin stays the cold-boot QEMU image, app.bin is OTA).
 app_bin=$(awk '$1=="0x20000"{print $2}' "$PROJ/build/flash_args")
 cp "$PROJ/build/$app_bin" "$PROJ/app.bin"
-echo "L2 artifacts: $PROJ/merged.bin (4MB, cold-boot) + $PROJ/app.bin (OTA) + $PROJ/firmware.elf"
+
+# Deposit the collectable artifacts where the caller globs (ARTIFACT_DIR). When PROJ is a persistent
+# build-cache volume this copies merged.bin/app.bin/firmware.elf back onto the /work mount while build/
+# stays cached; a no-op when ARTIFACT_DIR == PROJ (standalone).
+if [ "$ARTIFACT_DIR" != "$PROJ" ]; then
+  mkdir -p "$ARTIFACT_DIR"
+  cp "$PROJ/merged.bin" "$PROJ/app.bin" "$PROJ/firmware.elf" "$ARTIFACT_DIR/"
+fi
+echo "L2 artifacts: $ARTIFACT_DIR/merged.bin (4MB, cold-boot) + $ARTIFACT_DIR/app.bin (OTA) + $ARTIFACT_DIR/firmware.elf"

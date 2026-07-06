@@ -80,6 +80,65 @@ SCENARIOS: dict[str, dict[str, Any]] = {
         ],
         "recovers_on": "ota",
     },
+    "divide_by_zero": {
+        "label": "Integer divide-by-zero (firmware bug, crash-loop)",
+        "reason": "IntegerDivideByZero",
+        "exception_cause": 6,
+        "pc": "0x400d2a10",
+        "fault_addr": "0x00000000",
+        "task_name": "sensor_poll",
+        "backtrace": ["0x400d2a10", "0x400d2b44", "0x400d88a4", "0x4008b2e5"],
+        "symbols": {
+            "0x400d2a10": "sensor_scale at src/sensor.cpp:141",
+            "0x400d2b44": "sensor_poll at src/sensor.cpp:212",
+            "0x400d88a4": "loop at src/main.cpp:156",
+        },
+        "rtc_log": [
+            ("I", "nff", "connected, heartbeat sent", 210),
+            ("W", "sensor", "sample_count reached 0", 8),
+            ("E", "PANIC", "Guru Meditation IntegerDivideByZero (avg over 0 samples)", 0),
+        ],
+        "recovers_on": "ota",
+    },
+    "unaligned_access": {
+        "label": "Unaligned memory access (firmware bug, crash-loop)",
+        "reason": "LoadStoreAlignment",
+        "exception_cause": 9,
+        "pc": "0x400d3f2c",
+        "fault_addr": "0x3ffb8003",
+        "task_name": "mqtt_tx",
+        "backtrace": ["0x400d3f2c", "0x400d4010", "0x400d8112", "0x4008b2e5"],
+        "symbols": {
+            "0x400d3f2c": "frame_read_u32 at src/proto.cpp:77",
+            "0x400d4010": "mqtt_encode at src/mqtt.cpp:149",
+            "0x400d8112": "telemetry_send at src/telemetry.cpp:67",
+        },
+        "rtc_log": [
+            ("I", "nff", "connected, heartbeat sent", 260),
+            ("E", "PANIC", "Guru Meditation LoadStoreAlignment (u32 read at +3 offset)", 0),
+        ],
+        "recovers_on": "ota",
+    },
+    "assert_failed": {
+        "label": "Assertion / abort() (firmware bug, crash-loop)",
+        "reason": "abort",
+        "panic_type": "abort",
+        "exception_cause": None,
+        "pc": "0x400845e4",
+        "fault_addr": None,
+        "task_name": "relay_ctrl",
+        "assert_message": "assert failed: relay_apply_command src/relay.cpp:118 (handle != NULL)",
+        "backtrace": ["0x40084668", "0x400845e4", "0x400d1a2c", "0x400d88a4"],
+        "symbols": {
+            "0x400d1a2c": "relay_apply_command at src/relay.cpp:118",
+            "0x400d88a4": "loop at src/main.cpp:156",
+        },
+        "rtc_log": [
+            ("I", "nff", "connected, heartbeat sent", 190),
+            ("E", "PANIC", "assert failed: relay_apply_command (handle != NULL)", 0),
+        ],
+        "recovers_on": "ota",
+    },
     "watchdog": {
         "label": "Task watchdog timeout (hung task)",
         "reason": "TaskWatchdog",
@@ -178,6 +237,20 @@ def build_raw(scenario: dict[str, Any], *, fw: str, build_id: str, uptime_ms: in
             f"Backtrace: {bt}\n"
             f"ELF file SHA256: {build_id}\n"
             f"nff: fw={fw}\nRebooting...\n"
+        )
+    if scenario.get("panic_type") == "abort":
+        # abort()/assert dump: the assert line names the invariant, then abort() +
+        # backtrace. nff-diagnosis classifies this as assert_failed (NOT watchdog).
+        pc = scenario.get("pc", "0x400845e4")
+        msg = scenario.get("assert_message", "abort() was called")
+        bt = " ".join(f"{a}:0x3ffb1f60" for a in scenario.get("backtrace", []))
+        return (
+            f"{msg}\n\n"
+            f"abort() was called at PC {pc} on core 1\n\n"
+            f"Backtrace: {bt}\n\n"
+            f"ELF file SHA256: {build_id}\n"
+            f"nff: fw={fw} uptime={uptime_ms}ms\n"
+            f"Rebooting...\n"
         )
     reason = scenario.get("reason", "LoadProhibited")
     pc = scenario.get("pc", "0x400d0000")
