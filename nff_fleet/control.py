@@ -334,6 +334,51 @@ async def _store_bin(request: Request) -> JSONResponse:
     return JSONResponse(result)
 
 
+async def _inject_crash(request: Request) -> JSONResponse:
+    """Seed a prerecorded crash for a device WITHOUT a real MQTT crash publish.
+
+    The instant-crash demo posts a fully-formed crash payload (built by the mock controller
+    from the shared scenario catalog) so a real L2 QEMU device — which has no `crash` command
+    and would otherwise have to slowly crash-loop — surfaces a crash instantly. This mirrors
+    the router's `crash` branch: stamp the topic-authoritative project_id, cache it (so
+    fleet_get_crash / the agent read it), and write the durable crash_reports row.
+
+        Body: {device_id, project_id, payload}
+        -> 200 {device_id, injected: true}
+    """
+    if not _secret_ok(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    try:
+        body: dict[str, Any] = await request.json()
+    except Exception:
+        return JSONResponse({"error": "invalid JSON body"}, status_code=400)
+
+    device_id = body.get("device_id")
+    project_id = body.get("project_id")
+    payload = body.get("payload")
+    if not _valid_device_id(device_id):
+        return JSONResponse({"error": "valid device_id is required"}, status_code=400)
+    if not _valid_device_id(project_id):
+        return JSONResponse({"error": "valid project_id is required"}, status_code=400)
+    if not isinstance(payload, dict):
+        return JSONResponse({"error": "payload must be an object"}, status_code=400)
+
+    # project_id is authoritative (like the router's crash branch) so the crash_reports row
+    # is tenant-scoped and project-scoped readers (agent-worker senseFleet) see it.
+    merged = {**payload, "project_id": project_id}
+    try:
+        from nff_fleet.broker import router
+
+        router.set_crash(device_id, merged)
+        db.ingest_crash(device_id, merged)  # fire-and-forget durable write
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("inject-crash failed for %s: %s", device_id, exc)
+        return JSONResponse({"device_id": device_id, "error": str(exc)}, status_code=500)
+
+    logger.info("Crash injected for %s (scenario=%s)", device_id, payload.get("reason"))
+    return JSONResponse({"device_id": device_id, "injected": True})
+
+
 def register(mcp) -> None:
     """Register the internal control routes on the FastMCP HTTP app."""
     mcp.custom_route("/internal/command", methods=["POST"])(_deliver_command)
@@ -343,3 +388,4 @@ def register(mcp) -> None:
     mcp.custom_route("/internal/chaos-reset", methods=["POST"])(_chaos_reset)
     mcp.custom_route("/internal/store-elf", methods=["POST"])(_store_elf)
     mcp.custom_route("/internal/store-bin", methods=["POST"])(_store_bin)
+    mcp.custom_route("/internal/inject-crash", methods=["POST"])(_inject_crash)

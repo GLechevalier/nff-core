@@ -260,6 +260,29 @@ async def mark_enrollment_cert_issued(enrollment_id: str, device_id: str) -> Non
     )
 
 
+async def claim_enrollment_by_device(device_id: str) -> int:
+    """Finalize any 'accepted' enrollment for this device to 'claimed'. An operational heartbeat
+    is proof the device applied its cert — this recovers a claim whose (QoS-0) rollover ack was
+    lost, so the enrollment isn't stranded at accepted+cert_issued. Returns rows finalized."""
+    if not _enabled:
+        return 0
+    resp = await _client.rpc(
+        "claim_enrollment_by_device", {"p_device_id": device_id}
+    ).execute()
+    return resp.data or 0
+
+
+async def reconcile_stale_enrollments(grace_seconds: int = 60) -> int:
+    """Re-open accepted-but-unclaimed enrollments whose cert was issued but never acked (rollover
+    lost), older than grace_seconds, so the fulfillment worker re-rolls them. Returns rows re-opened."""
+    if not _enabled:
+        return 0
+    resp = await _client.rpc(
+        "reconcile_stale_enrollments", {"p_grace_seconds": grace_seconds}
+    ).execute()
+    return resp.data or 0
+
+
 async def expire_stale_batches() -> list[str]:
     """Flip active→expired for batches past their 24h window; returns affected batch ids."""
     if not _enabled:

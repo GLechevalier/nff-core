@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import time
 from typing import Any
 
 from amqtt.client import MQTTClient
@@ -33,6 +34,15 @@ _bootstrap_pending: dict[str, asyncio.Future] = {}
 _router_client: MQTTClient | None = None
 _router_task: asyncio.Task | None = None
 
+# Liveness: monotonic timestamp of the last message dispatched (0 = never). Lets a health check
+# tell "router alive but idle" from "router wedged". Set on every delivered message.
+_last_message_at: float = 0.0
+
+
+def last_message_age() -> float | None:
+    """Seconds since the router last dispatched a message, or None if it never has yet."""
+    return None if _last_message_at == 0.0 else time.monotonic() - _last_message_at
+
 
 def resolve_response(device_id: str, payload: dict[str, Any]) -> None:
     if fut := _pending.get(device_id):
@@ -56,6 +66,17 @@ def resolve_bootstrap_response(hwid: str, payload: dict[str, Any]) -> None:
 
 def get_crash(device_id: str) -> dict | None:
     return _crash_cache.get(device_id)
+
+
+def set_crash(device_id: str, payload: dict) -> None:
+    """Seed the retained crash cache for a device without a real MQTT crash publish.
+
+    Used by the demo's crash-injection endpoint (control.py ``/internal/inject-crash``) so a
+    real L2 QEMU device — which has no `crash` command and would otherwise have to slowly
+    crash-loop — surfaces a prerecorded crash to ``fleet_get_crash`` (and the agent) instantly.
+    The durable ``crash_reports`` row is written separately by the caller via db.ingest_crash.
+    """
+    _crash_cache[device_id] = payload
 
 
 def register_pending(device_id: str, fut: asyncio.Future) -> None:
@@ -127,6 +148,8 @@ async def _handle_message(topic: str, payload_bytes: bytes) -> None:
     msg_type = parts[4]
 
     if msg_type == "heartbeat":
+        prev = registry.get_device(device_id)
+        was_online = prev is not None and prev.status == "online"
         registry.update_heartbeat(device_id, payload, project_id)
         # project_id is authoritative from the cert-scoped topic, not from the device payload.
         payload = {**payload, "project_id": project_id}
@@ -138,6 +161,15 @@ async def _handle_message(topic: str, payload_bytes: bytes) -> None:
             # The device just (re)connected — if a command is waiting for it (e.g. a recovery
             # OTA to a crash-looping device), republish it now while it is live.
             await _maybe_redeliver(device_id)
+            # First operational heartbeat after (re)connect: an online device is proof it applied
+            # its cert, so finalize any enrollment whose (QoS-0) rollover ack was lost — otherwise
+            # it stays stranded at accepted+cert_issued. Gated to the connect transition; a no-op
+            # once claimed.
+            if not was_online:
+                claimed = await db.claim_enrollment_by_device(device_id)
+                if claimed:
+                    logger.info("Claim finalized by presence: device=%s (%d enrollment[s])",
+                                device_id, claimed)
         logger.debug("Heartbeat from %s (project %s): %s", device_id, project_id,
                      payload.get("status"))
 
@@ -164,35 +196,59 @@ async def _handle_message(topic: str, payload_bytes: bytes) -> None:
         await _maybe_redeliver(device_id)
 
 
-async def _router_loop(client: MQTTClient) -> None:
+async def _router_loop() -> None:
+    """Own the internal broker client for its whole lifetime and NEVER die silently.
+
+    The embedded broker keeps serving devices even if this dispatch loop stops, so a loop that
+    exits on the first error (the old behavior) silently halts all announce/heartbeat/rollover
+    processing until someone restarts the fleet — exactly the prod outage we hit. So:
+      - an outer loop reconnects + re-subscribes with backoff on any connection error, and
+      - each message is handled inside its own try/except, so one bad payload or a transient
+        Supabase blip inside a handler is logged and skipped, never killing the loop.
+    """
+    global _router_client, _last_message_at
     broker_url = "mqtt://server:@127.0.0.1:11883/"
-    try:
-        await client.connect(broker_url, cleansession=True)
-        # QoS 0: broker delivers device messages to router without waiting for PUBACK.
-        # Wildcard over the project segment: nff/{project_id}/devices/{id}/{type}
-        await client.subscribe([("nff/+/devices/#", 0), ("nff/_bootstrap/#", 0)])
-        logger.info("Router subscribed to nff/+/devices/# and nff/_bootstrap/#")
-        while True:
-            message = await client.deliver_message()
-            topic = message.publish_packet.variable_header.topic_name
-            payload = message.publish_packet.payload.data
-            await _handle_message(topic, payload)
-    except asyncio.CancelledError:
-        pass
-    except Exception as exc:
-        logger.error("Router loop error: %s", exc)
-    finally:
+    backoff = 1.0
+    while True:
+        client = MQTTClient(client_id="server")
         try:
-            await client.disconnect()
-        except Exception:
-            pass
+            await client.connect(broker_url, cleansession=True)
+            # QoS 0: broker delivers device messages to router without waiting for PUBACK.
+            # Wildcard over the project segment: nff/{project_id}/devices/{id}/{type}
+            await client.subscribe([("nff/+/devices/#", 0), ("nff/_bootstrap/#", 0)])
+            _router_client = client
+            backoff = 1.0  # a healthy connection resets the backoff
+            logger.info("Router subscribed to nff/+/devices/# and nff/_bootstrap/#")
+            while True:
+                message = await client.deliver_message()
+                topic = message.publish_packet.variable_header.topic_name
+                payload = message.publish_packet.payload.data
+                _last_message_at = time.monotonic()
+                try:
+                    await _handle_message(topic, payload)
+                except Exception as exc:  # one bad message must not kill the router
+                    logger.warning("Router: handler error on %s: %s", topic, exc)
+        except asyncio.CancelledError:
+            _router_client = None
+            try:
+                await client.disconnect()
+            except Exception:
+                pass
+            raise
+        except Exception as exc:
+            _router_client = None
+            logger.error("Router connection lost (%s) — reconnecting in %.0fs", exc, backoff)
+            try:
+                await client.disconnect()
+            except Exception:
+                pass
+            await asyncio.sleep(backoff)
+            backoff = min(backoff * 2, 30.0)
 
 
 async def start_router() -> None:
-    global _router_client, _router_task
-    client = MQTTClient(client_id="server")
-    _router_client = client
-    _router_task = asyncio.create_task(_router_loop(client))
+    global _router_task
+    _router_task = asyncio.create_task(_router_loop())
     logger.info("Router started")
 
 

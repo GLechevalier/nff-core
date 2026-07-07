@@ -31,6 +31,10 @@ class NffFleetSettings(BaseSettings):
     # enrollments and how many it issues per sweep (rate limit for 100k-scale accept-all).
     enroll_worker_interval: float = 5.0
     enroll_worker_batch: int = 50
+    # Self-heal grace: re-open an accepted enrollment whose rollover was issued but never claimed
+    # (ack lost) only after it has sat this long, so a merely-offline device isn't re-issued a
+    # cert on every sweep. A few sweeps' worth.
+    enroll_reconcile_grace_s: int = 60
 
     audit_log: Path = Path("/data/audit/commands.jsonl")
 

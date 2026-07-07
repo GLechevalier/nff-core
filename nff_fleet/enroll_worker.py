@@ -129,6 +129,13 @@ async def _worker_loop() -> None:
                 if expired:
                     logger.info("Rotation reaper: %d batch(es) expired (re-flash unclaimed devices)",
                                 len(expired))
+                # Self-heal: re-open accepted-but-unclaimed enrollments whose rollover was lost
+                # (cert_issued=true, never acked) past the grace window, so they are re-rolled below
+                # instead of being stranded forever. Grace = a few sweeps so a merely-offline device
+                # isn't re-issued a cert every tick.
+                reopened = await db.reconcile_stale_enrollments(settings.enroll_reconcile_grace_s)
+                if reopened:
+                    logger.info("Reconcile: re-opened %d stale enrollment(s) for re-roll", reopened)
                 pending = await db.get_accepted_unfulfilled(settings.enroll_worker_batch)
                 for e in pending:
                     try:
