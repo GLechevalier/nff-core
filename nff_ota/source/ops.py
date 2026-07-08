@@ -27,7 +27,7 @@ from nff_ota.models.source import (
     SubmitFirmwareFixResult,
 )
 from nff_ota.source import jobs
-from nff_ota.source.compile import compile_sketch
+from nff_ota.source.compile import build_id_for, compile_sketch, detect_fault
 from nff_ota.tools.artifacts.ops import upload_artifact
 from nff_ota.tools.deployments.ops import create_deployment, start_deployment
 
@@ -193,6 +193,66 @@ async def build_and_deploy_source(
     return SubmitFirmwareFixResult(
         deployment_id=deployment_id, version=version, fault_remaining=fault is not None
     )
+
+
+async def register_source(
+    device_id: str,
+    version: str,
+    source: str,
+    author: str = "seed",
+    *,
+    parent_version: str | None = None,
+    changelog: str | None = None,
+) -> dict:
+    """Record a held-firmware revision WITHOUT building or deploying it.
+
+    The instant-crash demo seeds the buggy source this way: ``get_firmware_source`` reads
+    the latest ``mock_firmware_revisions`` row, so the agent sees (and fixes) a real buggy
+    sketch, but the device is NOT made to adopt a buggy image (no slow L2 compile, no
+    crash-loop). The crash the agent inspects is injected separately (nff-fleet
+    ``/internal/inject-crash``); recovery is the agent's real ``submit_firmware_fix`` compile.
+
+    Uses only the cheap no-build primitives (``detect_fault`` regex + ``build_id_for`` hash),
+    so it returns in milliseconds regardless of device_type. Returns
+    ``{version, build_id, fault_remaining}`` or ``{error}``.
+    """
+    client = get_client()
+    dev_resp = (
+        await client.table("devices")
+        .select("id, project_id")
+        .eq("id", device_id)
+        .execute()
+    )
+    if not dev_resp.data:
+        return {"error": f"device {device_id!r} not found"}
+    project_id = dev_resp.data[0].get("project_id")
+    if not project_id:
+        return {"error": f"device {device_id!r} has no project_id (tenant) — re-provision it"}
+
+    fault = detect_fault(source)
+    build_id = build_id_for(source)
+    try:
+        await client.table("mock_firmware_revisions").insert(
+            {
+                "id": str(uuid.uuid4()),
+                "project_id": project_id,
+                "device_id": device_id,
+                "version": version,
+                "source": source,
+                "fault": fault,
+                "build_id": build_id,
+                "parent_version": parent_version,
+                "author": author,
+            }
+        ).execute()
+    except Exception as exc:  # noqa: BLE001 — unique(device_id, version) or RLS/db error
+        return {"error": f"could not record revision: {exc}"}
+
+    logger.info(
+        "registered source %s v%s (build_id=%s, fault=%s, no build)",
+        device_id, version, build_id, fault,
+    )
+    return {"version": version, "build_id": build_id, "fault_remaining": fault is not None}
 
 
 async def get_firmware_source(device_id: str) -> GetFirmwareSourceResult:

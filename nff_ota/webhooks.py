@@ -41,7 +41,7 @@ from starlette.responses import JSONResponse
 from nff_ota.client import ensure_client, get_client
 from nff_ota.config import settings
 from nff_ota.models.artifact import UploadArtifactParams
-from nff_ota.source.ops import build_and_deploy_source
+from nff_ota.source.ops import build_and_deploy_source, register_source
 from nff_ota.storage import upload_elf
 from nff_ota.models.deployment import CreateDeploymentParams
 from nff_ota.tools.artifacts.ops import upload_artifact
@@ -388,9 +388,50 @@ async def _firmware_seed(request: Request) -> JSONResponse:
     )
 
 
+async def _firmware_register_source(request: Request) -> JSONResponse:
+    """Record a mock's held firmware source WITHOUT building or deploying it.
+
+    The instant-crash demo uses this instead of ``/internal/firmware/seed``: it registers the
+    buggy source so ``get_firmware_source`` returns it (the agent reads + fixes a real bug),
+    but skips the slow L2 compile+boot — the crash the agent inspects is injected separately
+    via nff-fleet ``/internal/inject-crash``, and recovery is the agent's real
+    ``submit_firmware_fix`` compile. Returns in milliseconds regardless of device_type.
+
+        Body: {device_id, version, source, changelog?}
+        -> {version, build_id, fault_remaining}
+    """
+    if not _secret_ok(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+
+    await ensure_client()
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "invalid JSON body"}, status_code=400)
+
+    device_id = body.get("device_id")
+    version = body.get("version")
+    source = body.get("source")
+    if not isinstance(device_id, str) or not device_id:
+        return JSONResponse({"error": "device_id is required"}, status_code=400)
+    if not isinstance(version, str) or not version:
+        return JSONResponse({"error": "version is required"}, status_code=400)
+    if not isinstance(source, str) or not source:
+        return JSONResponse({"error": "source is required"}, status_code=400)
+
+    changelog = body.get("changelog") if isinstance(body.get("changelog"), str) else None
+    result = await register_source(device_id, version, source, author="seed", changelog=changelog)
+    if result.get("error"):
+        return JSONResponse({"error": result["error"]}, status_code=400)
+    return JSONResponse(result)
+
+
 def register(root) -> None:
     """Register inbound HTTP routes on the FastMCP HTTP app."""
     root.custom_route("/internal/ota-result", methods=["POST"])(_ota_result)
     root.custom_route("/internal/build-deploy", methods=["POST"])(_build_deploy)
     root.custom_route("/internal/ensure-mock-target", methods=["POST"])(_ensure_mock_target)
     root.custom_route("/internal/firmware/seed", methods=["POST"])(_firmware_seed)
+    root.custom_route("/internal/firmware/register-source", methods=["POST"])(
+        _firmware_register_source
+    )
