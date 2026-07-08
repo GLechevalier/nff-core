@@ -9,6 +9,7 @@ description = "On-demand orchestrator that spawns/provisions/reaps nff-mock virt
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    "nff-mock-core",
     "starlette>=0.37",
     "uvicorn>=0.30",
     "httpx>=0.27",
@@ -17,6 +18,11 @@ dependencies = [
 
 [project.scripts]
 nff-mock-controller = "nff_mock_controller.server:main"
+
+# nff-mock-core is a sibling path package in this monorepo (../core). The Docker image
+# installs it explicitly before this package; uv resolves it from here for local dev.
+[tool.uv.sources]
+nff-mock-core = { path = "../core", editable = true }
 
 [project.optional-dependencies]
 dev = [

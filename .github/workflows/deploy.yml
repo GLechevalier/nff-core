@@ -83,11 +83,11 @@ jobs:
     strategy:
       matrix:
         include:
+          # Both need the nff-mock/ ROOT as context so the shared core/ is in scope
+          # (controller/Dockerfile + device/Dockerfile COPY both core/ and their own dir).
           - component: controller
-            context: controller
+            context: .
             dockerfile: controller/Dockerfile
-          # device needs the nff-mock/ ROOT as context so the shared ../core is in
-          # scope (see device/Dockerfile: it COPYs both core/ and device/).
           - component: device
             context: .
             dockerfile: device/Dockerfile

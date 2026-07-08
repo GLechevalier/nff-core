@@ -88,31 +88,17 @@ class CrashInjector:
             return
         sid, sc = scenarios.resolve(d.nvs.get_str("crash_scenario"))
         uptime_ms = d.nvs.get_u32("crash_uptime")
-        raw = scenarios.build_raw(sc, fw=d.fw_version, build_id=d.build_id, uptime_ms=uptime_ms)
-        report = {
-            "type": "crash",
-            "id": d.cfg.device_id,
-            # Field names below match nff-fleet's db.ingest_crash so crash_reports +
-            # backtrace_frames + rtc_log_lines all populate. (id/fw/build kept for any
-            # legacy consumer of the retained payload.)
-            "fw": d.fw_version,
-            "fw_version": d.fw_version,
-            "build": d.build_id,
-            "build_id": d.build_id,
-            "reason": sc.get("reason", "unknown"),
-            "exception_cause": sc.get("exception_cause"),
-            "pc": sc.get("pc"),
-            "fault_addr": sc.get("fault_addr"),
-            "task_name": sc.get("task_name"),
-            "panic_type": sc.get("panic_type", "guru_meditation"),
-            "crash_count": d.nvs.get_u32("crash_count"),
-            "uptime_ms": uptime_ms,
-            # Rich {address, resolved} frames so the dashboard backtrace is symbolicated.
-            # nff-fleet's ingest also accepts bare address strings (a real ESP32's report).
-            "backtrace": scenarios.backtrace_frames(sc),
-            "rtc_log": scenarios.rtc_log_objects(sc),
-            "raw": raw,
-        }
+        # Shared builder (nff_mock_core.scenarios) so a self-reported crash and a
+        # controller-injected one are the identical wire shape.
+        report = scenarios.build_crash_report(
+            d.cfg.device_id,
+            sid,
+            sc,
+            fw=d.fw_version,
+            build_id=d.build_id,
+            uptime_ms=uptime_ms,
+            crash_count=d.nvs.get_u32("crash_count"),
+        )
         # Retained QoS-1 — the broker holds it so fleet_get_crash works offline.
         await d.publish(topic_crash(d.cfg.project_id, d.cfg.device_id), report, retain=True)
         # Clear per-crash keys; keep cumulative crash_count and any persistent fault.

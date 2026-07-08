@@ -255,6 +255,61 @@ async def _renew_mock(request: Request) -> JSONResponse:
     return JSONResponse({"ok": True, "device_id": device_id, "expires_at": deadline.isoformat()})
 
 
+async def _inject_crash(request: Request) -> JSONResponse:
+    """Inject a prerecorded crash for a device (the instant-crash self-heal demo).
+
+    A real L2 QEMU device has no `crash` command and would otherwise have to slowly
+    crash-loop to produce a report. Instead the dashboard posts a scenario id here; we build
+    the full crash wire payload from the shared catalog (``nff_mock_core.scenarios``, the same
+    builder the L1 device self-reports with) and forward it to fleet's ``/internal/inject-crash``,
+    which caches it (fleet_get_crash / the agent read it) and writes the durable crash_reports row.
+
+        Body: {device_id, project_id, scenario, build_id, fw_version, crash_count?, uptime_ms?}
+    """
+    if not _secret_ok(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    try:
+        body: dict[str, Any] = await request.json()
+    except Exception:
+        return JSONResponse({"error": "invalid JSON body"}, status_code=400)
+
+    device_id = body.get("device_id")
+    project_id = body.get("project_id")
+    if not isinstance(device_id, str) or not device_id:
+        return JSONResponse({"error": "device_id is required"}, status_code=400)
+    if not isinstance(project_id, str) or not project_id:
+        return JSONResponse({"error": "project_id is required"}, status_code=400)
+
+    fw_version = body.get("fw_version")
+    if not isinstance(fw_version, str) or not fw_version:
+        return JSONResponse({"error": "fw_version is required"}, status_code=400)
+    build_id = body.get("build_id")
+    if not isinstance(build_id, str) or not build_id:
+        return JSONResponse({"error": "build_id is required"}, status_code=400)
+
+    try:
+        crash_count = int(body.get("crash_count") or 1)
+        uptime_ms = int(body.get("uptime_ms") or 4200)
+    except (TypeError, ValueError):
+        return JSONResponse({"error": "crash_count/uptime_ms must be integers"}, status_code=400)
+
+    from nff_mock_core import scenarios
+
+    sid, sc = scenarios.resolve(body.get("scenario"))
+    payload = scenarios.build_crash_report(
+        device_id, sid, sc,
+        fw=fw_version, build_id=build_id, uptime_ms=uptime_ms, crash_count=crash_count,
+    )
+    try:
+        await provision._post(
+            "/internal/inject-crash",
+            {"device_id": device_id, "project_id": project_id, "payload": payload},
+        )
+    except provision.ProvisionError as exc:
+        return JSONResponse({"error": f"fleet inject-crash failed: {exc}"}, status_code=502)
+    return JSONResponse({"device_id": device_id, "scenario": sid, "injected": True})
+
+
 async def _health(request: Request) -> JSONResponse:
     return JSONResponse({"status": "ok"})
 
@@ -277,6 +332,7 @@ app = Starlette(
         # matched as literals, not treated as a device id.
         Route("/mocks/presence", _presence, methods=["POST"]),
         Route("/mocks/renew", _renew_mock, methods=["POST"]),
+        Route("/mocks/inject-crash", _inject_crash, methods=["POST"]),
         Route("/mocks/{device_id}", _delete_mock, methods=["DELETE"]),
     ],
 )

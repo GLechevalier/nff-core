@@ -163,7 +163,19 @@ fi
 
 cd "$PROJ"
 . "$IDF_PATH/export.sh" >/dev/null 2>&1
-idf.py set-target esp32
+# `idf.py set-target` has an implicit `fullclean` dependency, so running it unconditionally on a
+# PERSISTENT $PROJ/build (the /bcache cache) is a footgun: if build/ exists but isn't a valid CMake
+# build dir (a prior build was interrupted before CMake configured, or a toolchain bump corrupted it),
+# fullclean *refuses* to delete it — "doesn't seem to be a CMake build directory. Refusing to
+# automatically delete files" — and the whole compile dies before it starts. So only set-target when
+# build/ hasn't already been configured for esp32; a valid warm cache skips it (no needless fullclean),
+# and a missing/corrupt build/ (no CMakeCache.txt) falls through to a clean reconfigure via `idf.py
+# build`. NFF_L2_BUILD_CLEAN=1 (above) still forces a from-scratch rebuild when you want one.
+if [ ! -f "$PROJ/build/CMakeCache.txt" ] || \
+   ! grep -q "^IDF_TARGET:STRING=esp32$" "$PROJ/build/CMakeCache.txt" 2>/dev/null; then
+  rm -rf "$PROJ/build"   # drop any partial/corrupt dir so set-target's fullclean has nothing to refuse
+  idf.py set-target esp32
+fi
 idf.py build
 
 # Stage 4: produce the artifacts nff-github's compile-source route collects — a merged flash image
