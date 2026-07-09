@@ -24,6 +24,12 @@ FLEET_SECRET="${FLEET_SECRET:-dev-fleet-secret}"
 FW_VERSION="${FW_VERSION:-1.0.0}"
 IDF_IMAGE="${IDF_IMAGE:-espressif/idf:v5.3.1}"
 ARDUINO_VER="${ARDUINO_VER:-~3.1.0}"
+# Persistent caches — the SAME named volumes the runtime compile path mounts
+# (nff-github/config.py: l2_build_cache_volume / l2_ccache_volume). Sharing them means the dev seed
+# reuses the warm ninja build dir instead of a from-scratch build: cold ~15 min → warm ~1 min. Set
+# either to "" to opt back into a fully ephemeral (cold) build.
+BUILD_CACHE_VOLUME="${BUILD_CACHE_VOLUME:-nff-l2-builddir}"
+CCACHE_VOLUME="${CCACHE_VOLUME:-nff-l2-ccache}"
 
 # nff-ota's build_id contract: sha256 of the source string, first 16 hex chars.
 BUILD_ID="$(sha256sum "$SKETCH_INO" | cut -c1-16)"
@@ -32,10 +38,19 @@ echo ">> build_id=$BUILD_ID  fw=$FW_VERSION  sketch=$SKETCH_INO"
 WORK="$(mktemp -d)"
 cp "$SKETCH_INO" "$WORK/sketch.ino"
 
-echo ">> compiling (arduino-shim, ${IDF_IMAGE}) — first build ~15 min…"
+# PROJ lives on the persistent /bcache volume (warm ninja rebuild); ARTIFACT_DIR copies the
+# collectable artifacts back onto the ephemeral /work mount so the MERGED/ELF globs below still find
+# them. Empty volume names fall back to the old ephemeral PROJ under /work (a fresh cold build).
+cache_mounts=""
+proj="/work/out/ardproj"; artifact_env=""
+if [ -n "$BUILD_CACHE_VOLUME" ]; then
+  cache_mounts="-v $BUILD_CACHE_VOLUME:/bcache"; proj="/bcache/ardproj"; artifact_env="ARTIFACT_DIR=/work/out/ardproj "
+fi
+[ -n "$CCACHE_VOLUME" ] && cache_mounts="$cache_mounts -v $CCACHE_VOLUME:/ccache"
+echo ">> compiling (arduino-shim, ${IDF_IMAGE}) — cold ~15 min, warm ~1 min (reuses ${BUILD_CACHE_VOLUME:-<none>})…"
 docker run --rm -e NFF_BUILD_ID="$BUILD_ID" -e NFF_FW_VERSION="$FW_VERSION" \
-  -v "$REPO":/repo:ro -v "$WORK":/work "$IDF_IMAGE" \
-  bash -lc "SKETCH_DIR=/work ARDUINO_VER=\"$ARDUINO_VER\" PROJ=/work/out/ardproj \
+  -v "$REPO":/repo:ro -v "$WORK":/work $cache_mounts "$IDF_IMAGE" \
+  bash -lc "SKETCH_DIR=/work ARDUINO_VER=\"$ARDUINO_VER\" PROJ=$proj ${artifact_env}\
             bash /repo/nff-mock/qemu/l2/example-arduino/build_arduino_shim.sh"
 
 MERGED="$WORK/out/ardproj/merged.bin"

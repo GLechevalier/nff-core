@@ -39,6 +39,22 @@ ARDUINO_VER=${ARDUINO_VER:-"~3.1.0"}   # pin to the arduino-esp32 line matching 
 export CCACHE_DIR="${CCACHE_DIR:-/ccache}"
 export CCACHE_MAXSIZE="${CCACHE_MAXSIZE:-5G}"
 mkdir -p "$CCACHE_DIR" 2>/dev/null || true
+# ESP-IDF only routes the compiler through ccache when THIS is set — the CCACHE_DIR/MAXSIZE above are
+# otherwise inert (idf.py never consults ccache), which is why a warm /ccache volume showed 0 hits and
+# every cold build still recompiled the whole arduino-esp32 core (~3100 TUs) from scratch (~15 min).
+# With it enabled those become cache hits: cold rebuilds drop to ~2-3 min, and a warm build's forced
+# per-build-id recompiles (the NFF_BUILD_ID token below changes every build) resolve as near-instant
+# hits for every TU that doesn't actually reference the token. Overridable with IDF_CCACHE_ENABLE=0.
+export IDF_CCACHE_ENABLE="${IDF_CCACHE_ENABLE:-1}"
+
+# Write stdin to $1 only when the content differs, so an unchanged generated file keeps its old mtime
+# and CMake/ninja don't treat it as touched (a `cat >` rewrites the mtime every run → a needless
+# reconfigure / relink). Used for the project-level CMakeLists.txt + sdkconfig.defaults below.
+_write_if_changed() {
+  local dest="$1" tmp; tmp="$(mktemp)"
+  cat > "$tmp"
+  if [ -f "$dest" ] && cmp -s "$tmp" "$dest"; then rm -f "$tmp"; else mv "$tmp" "$dest"; fi
+}
 
 git config --global --add safe.directory /repo 2>/dev/null || true
 # One-shot clean-rebuild escape hatch: wipe the persisted build state (e.g. after a toolchain bump,
@@ -50,28 +66,40 @@ mkdir -p "$PROJ"
 rm -rf "$PROJ/main"; mkdir -p "$PROJ/main" "$PROJ/components"
 
 # ---- top-level project (NFF_QEMU project-wide so it reaches the nff SDK component) ----
-cat > "$PROJ/CMakeLists.txt" <<'EOF'
+_write_if_changed "$PROJ/CMakeLists.txt" <<'EOF'
 cmake_minimum_required(VERSION 3.16)
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 project(nff_l2_arduino)
 idf_build_set_property(COMPILE_DEFINITIONS "NFF_QEMU=1" APPEND)
 EOF
 # Firmware identity (NFF_BUILD_ID_TOKEN / NFF_FW_VERSION_TOKEN) is baked per-COMPONENT below (main +
-# nff SDK), NOT project-wide. These tokens change every build (build_id = sha256(source)), so a
-# project-wide COMPILE_DEFINITION would put a per-build value on all ~3100 TUs (arduino-esp32 core,
-# IDF, mbedtls) and defeat ccache entirely — every object misses. Only the sketch and the nff SDK
-# (nff.h #undefs the creds default and stringifies these bare tokens) actually reference them, so
-# scoping the defines to those two components lets the big unchanged core hit the ccache across builds.
-# Emitted after each component's idf_component_register (needs ${COMPONENT_LIB}). Without NFF_BUILD_ID
-# the device's crash build_id won't match the stored ELF and backtraces won't resolve.
-_fw_ident_defs() {  # $1 = path to a component CMakeLists.txt to append target_compile_definitions to
+# nff SDK + nff_l2_net), NOT project-wide. These tokens change every build (build_id = sha256(source)),
+# so a project-wide COMPILE_DEFINITION would put a per-build value on all ~3100 TUs (arduino-esp32 core,
+# IDF, mbedtls) and defeat ccache entirely — every object misses. Only the sketch, the nff SDK and
+# nff_l2_net (nff.h #undefs the creds default and stringifies these bare tokens) actually reference
+# them, so scoping the defines to those components lets the big unchanged core hit the ccache.
+#
+# nff_l2_net is NOT optional: components/nff_l2_net/nvs_creds.c is the ONLY place that assigns
+# cfg->fw_version and cfg->build_id (from NFF_FW_VERSION / NFF_BUILD_ID), and those are what the SDK
+# publishes in every heartbeat and crash report. Omitting it silently falls back to that file's
+# "0.0.0-l2" / "" defaults, so the device reports a STATIC non-semver version forever: OTA still
+# lands, but no version-anchored recovery check (migration 0080's semver_gt, the dashboard's
+# demoBrokenActive) can ever observe it, and crash backtraces lose the build_id that joins them to
+# the stored ELF.
+#
+# Emitted after each component's idf_component_register (needs ${COMPONENT_LIB}).
+_fw_ident_lines() {  # emit the identity target_compile_definitions on stdout
   [ -n "$NFF_BUILD_ID" ] && \
-    echo "target_compile_definitions(\${COMPONENT_LIB} PRIVATE \"NFF_BUILD_ID_TOKEN=$NFF_BUILD_ID\")" >> "$1"
+    echo "target_compile_definitions(\${COMPONENT_LIB} PRIVATE \"NFF_BUILD_ID_TOKEN=$NFF_BUILD_ID\")"
   [ -n "$NFF_FW_VERSION" ] && \
-    echo "target_compile_definitions(\${COMPONENT_LIB} PRIVATE \"NFF_FW_VERSION_TOKEN=$NFF_FW_VERSION\")" >> "$1"
+    echo "target_compile_definitions(\${COMPONENT_LIB} PRIVATE \"NFF_FW_VERSION_TOKEN=$NFF_FW_VERSION\")"
+  return 0   # `set -e`: a false [ -n ] test must not abort a token-less (bare demo) build
+}
+_fw_ident_defs() {  # $1 = path to a component CMakeLists.txt to append target_compile_definitions to
+  _fw_ident_lines >> "$1"
 }
 
-cat > "$PROJ/sdkconfig.defaults" <<'EOF'
+_write_if_changed "$PROJ/sdkconfig.defaults" <<'EOF'
 CONFIG_IDF_TARGET="esp32"
 CONFIG_ETH_USE_OPENETH=y
 CONFIG_AUTOSTART_ARDUINO=y
@@ -112,7 +140,8 @@ CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
 # report). This is what makes the stack_overflow fault-taxonomy scenario reportable on QEMU.
 CONFIG_FREERTOS_WATCHPOINT_END_OF_STACK=y
 EOF
-cp "$PROJDIR/partitions.csv" "$PROJ/partitions.csv"
+# cmp-guard: only recopy when it actually changed so its mtime (→ a reconfigure) stays put.
+cmp -s "$PROJDIR/partitions.csv" "$PROJ/partitions.csv" 2>/dev/null || cp "$PROJDIR/partitions.csv" "$PROJ/partitions.csv"
 
 # ---- main: the UNMODIFIED customer sketch (.ino -> .cpp) + its creds + the shim, force-included ----
 cp "$SKETCH_DIR"/*.ino "$PROJ/main/$(basename "$SKETCH_DIR" | tr - _).cpp"
@@ -132,8 +161,19 @@ dependencies:
     version: "$ARDUINO_VER"
 EOF
 
-# ---- shared openeth component (the shim calls nff_l2_openeth_up) ----
-rm -rf "$PROJ/components/nff_l2_net"; cp -r "$L2NET" "$PROJ/components/nff_l2_net"
+# ---- shared openeth + NVS-identity component (the shim calls nff_l2_openeth_up) ----
+# diff-guard on the SOURCES only: leaving them untouched when unchanged keeps their mtimes and ninja
+# skips recompiling openeth.c on a warm build. CMakeLists.txt is excluded because we regenerate it
+# below with the per-build identity tokens, so it can never match the pristine source copy.
+if ! diff -rq --exclude=CMakeLists.txt "$L2NET" "$PROJ/components/nff_l2_net" >/dev/null 2>&1; then
+  rm -rf "$PROJ/components/nff_l2_net"; cp -r "$L2NET" "$PROJ/components/nff_l2_net"
+fi
+# nvs_creds.c assigns cfg->fw_version / cfg->build_id from these tokens (see _fw_ident_lines), so this
+# component must get them too — otherwise every L2 heartbeats the "0.0.0-l2" fallback. Only the 2 TUs
+# here recompile per build; the arduino/IDF core still ccache-hits. _write_if_changed keeps the mtime
+# stable when the tokens are unchanged, so a re-run with the same build_id doesn't force a reconfigure.
+{ cat "$L2NET/CMakeLists.txt"; _fw_ident_lines; } \
+  | _write_if_changed "$PROJ/components/nff_l2_net/CMakeLists.txt"
 
 # ---- nff SDK as an Arduino library (arduino port .cpp + IDF REQUIRES it needs) ----
 rm -rf "$PROJ/components/nff"; mkdir -p "$PROJ/components/nff"
