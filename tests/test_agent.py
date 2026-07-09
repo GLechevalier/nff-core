@@ -106,6 +106,16 @@ def test_consume_parses_stream_and_captures_reply():
     assert replies == ["all good"]
 
 
+def test_render_handles_the_edit_kind_and_never_captures_it_as_a_reply(capsys):
+    # `edit` is the worker's blue "wrote this file" line. It must render (not fall through the
+    # kind branches and vanish) and must not be mistaken for the agent's answer.
+    replies: list = []
+    payload = json.dumps({"kind": "edit", "content": "nff edit blink [a.ino] (+2 −1)"})
+    assert agent_cmd._render("agent", payload, no_stream=False, replies=replies) is True
+    assert replies == []
+    assert "nff edit blink [a.ino] (+2 −1)" in capsys.readouterr().out
+
+
 def test_consume_stops_on_done_without_processing_trailing():
     # Anything after a `done` frame must be ignored (stream is over).
     body = (

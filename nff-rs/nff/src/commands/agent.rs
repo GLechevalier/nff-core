@@ -72,6 +72,8 @@ fn render(event: &str, payload: &str, no_stream: bool, replies: &mut Vec<String>
             match kind {
                 "reply" => println!("{}", style(format!("✓ agent: {content}")).green()),
                 "command" => println!("{}", style(format!("→ agent: {content}")).cyan()),
+                // A command that wrote source. The one line worth spotting in a run.
+                "edit" => println!("{}", style(format!("✎ agent: {content}")).blue()),
                 "error" => eprintln!("{}", style(format!("✗ {content}")).red()),
                 "output" | "info" => println!("{}", style(format!("  {content}")).dim()),
                 _ => {}
@@ -290,5 +292,15 @@ mod tests {
         let s = "event: agent\r\ndata: {\"kind\":\"reply\",\"content\":\"crlf\"}\r\n\r\n";
         let replies = consume_reader(Cursor::new(s), true);
         assert_eq!(replies, vec!["crlf".to_string()]);
+    }
+
+    #[test]
+    fn renders_the_edit_kind_and_never_captures_it_as_a_reply() {
+        // `edit` is the worker's blue "wrote this file" line. It must render (not fall through
+        // the match arm and vanish) and must not be mistaken for the agent's answer.
+        let mut replies = Vec::new();
+        let payload = "{\"kind\":\"edit\",\"content\":\"nff edit blink [a.ino] (+2 −1)\"}";
+        assert!(render("agent", payload, false, &mut replies));
+        assert!(replies.is_empty());
     }
 }

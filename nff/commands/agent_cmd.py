@@ -80,6 +80,10 @@ def _render(event: str, payload: str, no_stream: bool, replies: list) -> bool:
         elif kind == "command":
             if not no_stream:
                 _echo(click.style(f"→ agent: {content}", fg="cyan"))
+        elif kind == "edit":
+            # A command that wrote source. The one line worth spotting in a run.
+            if not no_stream:
+                _echo(click.style(f"✎ agent: {content}", fg="blue"))
         elif kind == "error":
             if not no_stream:
                 _echo(click.style(f"✗ {content}", fg="red"), err=True)
