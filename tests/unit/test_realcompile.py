@@ -85,12 +85,13 @@ async def test_real_build_and_deploy(mock_supabase, monkeypatch):
 
 
 async def test_real_build_and_deploy_reuses_existing_artifact(mock_supabase, monkeypatch):
-    # A build_id already present in firmware_versions must SKIP the compile+upload+store entirely
-    # (the reuse-before-compile fast path that keeps a re-seed instant) and still record the
-    # revision + roll out. Any compile/upload/store call would be a bug, so they raise.
+    # A build_id already present in firmware_versions AND built for the SAME release_version must
+    # SKIP the compile+upload+store entirely (the reuse-before-compile fast path that keeps a re-seed
+    # instant) and still record the revision + roll out. Any compile/upload/store call would be a bug.
     bid = _build_id(SRC)
     catalog = "mock-l2-2.0.0"
-    resp_existing = MagicMock(data=[{"version": catalog}])   # firmware_versions has this build_id
+    # release_version must match the requested version: the image has it BAKED IN (NFF_FW_VERSION).
+    resp_existing = MagicMock(data=[{"version": catalog, "release_version": "2.0.0"}])
     resp_insert = MagicMock(data=[{}])                       # revision insert
     mock_supabase.table.return_value.execute = AsyncMock(side_effect=[resp_existing, resp_insert])
 
@@ -198,3 +199,71 @@ async def test_build_and_deploy_routes_qemu_to_realcompile(mock_supabase, monkey
     assert captured["kwargs"]["device_type"] == "nff-qemu-esp32"
     assert captured["kwargs"]["project_id"] == "p"
     assert captured["kwargs"]["group_id"] == "g"
+
+
+async def test_same_source_at_new_version_recompiles_with_salted_build_id(mock_supabase, monkeypatch):
+    """The agent resubmits an identical fix at a higher semver (the documented retry path).
+
+    build_id hashes the SOURCE ONLY, but the image has the release version baked into it
+    (NFF_FW_VERSION -> nvs_creds.c -> every heartbeat). Reusing the cached artifact would boot a
+    device reporting the OLD version, so it could never climb past the anti-downgrade / demo anchor
+    and would look like it never healed. Expect: a real recompile under a version-salted build_id.
+    """
+    unsalted = _build_id(SRC)
+    salted = _build_id(f"{SRC}\n// nff-build version=3.0.0\n")
+    assert salted != unsalted
+
+    # 1st select: the 2.0.0 artifact for this source. 2nd select (salted id): nothing yet.
+    resp_existing = MagicMock(data=[{"version": "mock-l2-2.0.0", "release_version": "2.0.0"}])
+    resp_none = MagicMock(data=[])
+    resp_insert = MagicMock(data=[{}])
+    mock_supabase.table.return_value.execute = AsyncMock(
+        side_effect=[resp_existing, resp_none, resp_insert]
+    )
+
+    calls = {}
+
+    async def fake_compile_source(source, build_id, fw_version, device_type, sketch_name="sketch"):
+        calls["compile"] = (build_id, fw_version)
+        return {
+            "ok": True,
+            "artifact_b64": base64.b64encode(b"APP").decode(),
+            "merged_b64": base64.b64encode(b"MERGED").decode(),
+            "elf_b64": base64.b64encode(b"ELF").decode(),
+            "build_id": build_id, "sha256": "x", "size_bytes": 3, "logs": "ok",
+        }
+
+    async def fake_upload(params):
+        calls["upload"] = params
+        return MagicMock(error=None)
+
+    async def fake_store(build_id, b64):
+        calls.setdefault("stored", []).append(build_id)
+        return {}
+
+    async def fake_create(params):
+        calls["target_version"] = params.target_version
+        return MagicMock(error=None, deployment=MagicMock(id="dep-salt"))
+
+    async def fake_start(deployment_id):
+        return MagicMock(delivered=1)
+
+    monkeypatch.setattr(realcompile.github, "compile_source", fake_compile_source)
+    monkeypatch.setattr(realcompile, "upload_artifact", fake_upload)
+    monkeypatch.setattr(realcompile.fleet, "store_elf", fake_store)
+    monkeypatch.setattr(realcompile.fleet, "store_bin", fake_store)
+    monkeypatch.setattr(realcompile, "create_deployment", fake_create)
+    monkeypatch.setattr(realcompile, "start_deployment", fake_start)
+
+    res = await realcompile.real_build_and_deploy(
+        "mock-l2", "3.0.0", SRC, "agent",
+        project_id="p", group_id="g", device_type="nff-qemu-esp32",
+    )
+
+    assert res.error is None
+    # It compiled (did not reuse), and baked the REQUESTED version under the salted id.
+    assert calls["compile"] == (salted, "3.0.0")
+    assert calls["upload"].build_id == salted
+    assert calls["upload"].release_version == "3.0.0"
+    assert calls["stored"] == [salted, salted]          # ELF + merged staged under the new id
+    assert calls["target_version"] == "mock-l2-3.0.0"   # a fresh catalog row, not the reused one

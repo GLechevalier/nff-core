@@ -59,15 +59,36 @@ async def real_build_and_deploy(
     #    uploaded+staged on the first build. Skipping the compile makes a re-seed near-instant, which
     #    also avoids a multi-minute silently-blocking HTTP request that Docker Desktop's port-proxy
     #    would drop as idle. A fresh source falls through to the real compile.
-    existing = (
-        await client.table("firmware_versions")
-        .select("version")
-        .eq("build_id", build_id)
-        .limit(1)
-        .execute()
-    )
-    if existing.data:
-        catalog_version = existing.data[0]["version"]
+    #
+    #    But build_id hashes the SOURCE ONLY, while the image has the release version BAKED INTO IT
+    #    (NFF_FW_VERSION → nvs_creds.c → every heartbeat). So the same source at a DIFFERENT version —
+    #    the agent resubmitting an identical fix at a higher semver after a failed build — must not
+    #    reuse: the device would boot an image reporting the OLD version, never climb past the
+    #    anti-downgrade/demo anchor, and look like it never healed. Reuse only on an exact release
+    #    match; otherwise salt the id with the version so the distinct firmware identity gets a
+    #    distinct build_id (and doesn't collide on the UNIQUE index).
+    async def _artifact_for(bid: str) -> dict | None:
+        res = (
+            await client.table("firmware_versions")
+            .select("version, release_version")
+            .eq("build_id", bid)
+            .limit(1)
+            .execute()
+        )
+        return res.data[0] if res.data else None
+
+    row = await _artifact_for(build_id)
+    if row is not None and row.get("release_version") != version:
+        build_id = build_id_for(f"{source}\n// nff-build version={version}\n")
+        logger.info(
+            "source already built as %s (release_version=%s) but %s was requested — "
+            "salting build_id to %s and recompiling",
+            row.get("version"), row.get("release_version"), version, build_id,
+        )
+        row = await _artifact_for(build_id)
+
+    if row is not None and row.get("release_version") == version:
+        catalog_version = row["version"]
         logger.info("reusing existing artifact %s for build_id=%s (skipping compile)", catalog_version, build_id)
     else:
         # Real compile (the regex analyzer's L2 replacement).
