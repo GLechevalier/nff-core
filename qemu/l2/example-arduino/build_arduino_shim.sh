@@ -145,7 +145,17 @@ cmp -s "$PROJDIR/partitions.csv" "$PROJ/partitions.csv" 2>/dev/null || cp "$PROJ
 
 # ---- main: the UNMODIFIED customer sketch (.ino -> .cpp) + its creds + the shim, force-included ----
 cp "$SKETCH_DIR"/*.ino "$PROJ/main/$(basename "$SKETCH_DIR" | tr - _).cpp"
-[ -f "$SKETCH_DIR/credentials.h" ] && cp "$SKETCH_DIR/credentials.h" "$PROJ/main/"
+# A real-hardware sketch #includes the per-device credentials.h that `nff provision new-device`
+# generated. On QEMU one image serves every mock, so nff_wifi_shim.h rewrites NFF_CONFIG/nff_init to
+# read the identity from the spliced NVS partition instead — nothing references the NFF_*_DER symbols
+# and a stub satisfies the #include. Copy a real one when the sketch ships it (it is then inert).
+if [ -f "$SKETCH_DIR/credentials.h" ]; then
+  cp "$SKETCH_DIR/credentials.h" "$PROJ/main/"
+else
+  _write_if_changed "$PROJ/main/credentials.h" <<'EOF'
+/* stub — on L2 (QEMU) the device identity comes from NVS; see shim/nff_wifi_shim.h. */
+EOF
+fi
 cp "$SHIM/nff_wifi_shim.h" "$SHIM/nff_wifi_shim.cpp" "$PROJ/main/"
 cat > "$PROJ/main/CMakeLists.txt" <<'EOF'
 file(GLOB SK "*.cpp")

@@ -69,4 +69,40 @@ extern NffWiFiShim nffWiFiShim;
  * (WiFiClass, WiFiClient, WiFiClientSecure, WiFiGeneric) are distinct identifiers and untouched. */
 #define WiFi nffWiFiShim
 
+/* ---- identity: credentials.h -> NVS -------------------------------------------------------
+ *
+ * A real-hardware sketch bakes its identity in at compile time: NFF_CONFIG() expands to a
+ * nff_config_t literal filled from the per-device credentials.h that `nff provision new-device`
+ * generated, and nff_init() takes that struct verbatim (it never reads NVS — see
+ * nff-sdk-c/src/nff_core.c).
+ *
+ * On QEMU there is no per-device image: ONE build serves every mock, and the supervisor splices
+ * each device's certs into the NVS partition at launch (nff-mock/qemu/nff_mock_l2/credentials.py).
+ * So the two tokens that would bake in an identity are rewritten here to read it from NVS instead,
+ * and the sketch — which must stay byte-identical to what you would flash on a real ESP32 — is
+ * none the wiser.
+ *
+ * Because NFF_CONFIG no longer expands to the initializer, nothing references the NFF_*_DER symbols
+ * and the sketch's credentials.h may be an empty stub (build_arduino_shim.sh writes one when the
+ * sketch dir has none).
+ *
+ * `var` MUST keep static storage: nff_init() retains the pointer long after setup() returns, so a
+ * stack local would dangle and corrupt the heartbeat-topic format. */
+#undef NFF_CONFIG
+#define NFF_CONFIG(var, id, host) static nff_config_t var
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+/* Fill cfg from the spliced NVS partition (and set the clock, which QEMU has no RTC for), then hand
+ * it to the real nff_init(). Returns NFF_OK, or NFF_ERR_INVALID_ARG when NVS carries no identity. */
+int nff_l2_init_from_nvs(nff_config_t *cfg);
+#ifdef __cplusplus
+}
+#endif
+
+/* The sketch's `nff_init(&g_cfg)` routes through the wrapper above. nff_wifi_shim.cpp reaches the
+ * real function as `(nff_init)(cfg)` — a parenthesised identifier is not a macro invocation. */
+#define nff_init(cfg) nff_l2_init_from_nvs(cfg)
+
 #endif /* NFF_WIFI_SHIM_H */

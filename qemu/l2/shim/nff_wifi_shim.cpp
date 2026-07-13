@@ -87,3 +87,17 @@ void NffWiFiShim::deliverEvent(arduino_event_id_t id, const arduino_event_info_t
         if (cb) cb(id, info);
     }
 }
+
+/* The sketch's nff_init(&g_cfg) lands here (nff_wifi_shim.h rewrites the token). Populate the config
+ * the sketch declared but never initialized — NFF_CONFIG is rewritten to a bare declaration — from
+ * the NVS partition the L2 supervisor spliced in, then call the real nff_init().
+ *
+ * The clock has to be set BEFORE any TLS handshake: QEMU has no RTC, so without it mbedTLS rejects
+ * every broker cert as "not yet valid" (MBEDTLS_X509_BADCERT_FUTURE). On real hardware that line
+ * doesn't exist, which is exactly why it lives in the shim and not in the sketch. */
+extern "C" int nff_l2_init_from_nvs(nff_config_t *cfg) {
+    if (!cfg) return NFF_ERR_INVALID_ARG;
+    nff_l2_set_clock_from_nvs();
+    if (nff_l2_load_config_from_nvs(cfg) != 0) return NFF_ERR_INVALID_ARG;
+    return (nff_init)(cfg);   /* parenthesised: the real function, not the macro above */
+}
