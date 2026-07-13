@@ -292,6 +292,8 @@ _ALL_TOOL_NAMES = {
     "get_variables", "expand_variable", "get_registers", "get_memory",
     "evaluate", "set_breakpoint", "pause_execution", "continue_execution",
     "step", "gdb_command",
+    # energy measurement (nff-power-meter)
+    "power_status", "power_measure",
 }
 
 

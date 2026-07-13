@@ -17,6 +17,7 @@ from nff.commands.mcp_cmd import mcp
 from nff.commands.monitor import monitor
 from nff.commands.ota import ota
 from nff.commands.pi import pi
+from nff.commands.power import power
 from nff.commands.provision import provision
 from nff.commands.repair import repair
 
@@ -44,3 +45,4 @@ cli.add_command(deauth, name="deauth")
 cli.add_command(repair)
 cli.add_command(agent)
 cli.add_command(pi, name="pi")
+cli.add_command(power, name="power")

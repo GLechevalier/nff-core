@@ -154,6 +154,32 @@ def check_debug_tools() -> Check:
     )
 
 
+def check_power_meter() -> Check:
+    """Optional: is an nff-power-meter attached, and calibrated?
+
+    Only meaningful for `nff power` / the power_* MCP tools — most benches have no meter,
+    so this never flips the exit code.
+    """
+    from nff.tools import power as power_tools
+    result = power_tools.status()
+    if not result.get("attached"):
+        return Check(
+            passed=False,
+            detail="no power meter (energy measurement unavailable)",
+            fix="Flash nff-power-meter/ to a Nucleo: `pio run -t upload` in that directory",
+            optional=True,
+        )
+    ohms = result["shunt_uohm"] / 1_000_000
+    if not result.get("calibrated"):
+        return Check(
+            passed=False,
+            detail=f"meter on {result['port']} — UNCALIBRATED (assuming {ohms:.4f} Ω)",
+            fix="Run `nff power calibrate` — an uncalibrated joules figure is a guess",
+            optional=True,
+        )
+    return Check(passed=True, detail=f"meter on {result['port']} · shunt {ohms:.4f} Ω")
+
+
 def check_login() -> Check:
     """Signed in to the nff platform? The MCP tools are gated behind this token."""
     token = config.get_diagnosis_config().get("access_token")
@@ -204,6 +230,7 @@ def doctor():
     checks += [
         ("Device", check_device()),
         ("Debug tools", check_debug_tools()),
+        ("Power meter", check_power_meter()),
         ("Login", check_login()),
         ("MCP server", check_mcp_server()),
         ("Claude Desktop", check_claude_desktop()),

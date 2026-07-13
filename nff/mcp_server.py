@@ -475,6 +475,46 @@ async def gdb_command(command: str) -> Any:
 
 
 # ---------------------------------------------------------------------------
+# Energy measurement (nff-power-meter)
+# ---------------------------------------------------------------------------
+
+
+async def power_status() -> dict:
+    from nff.tools import power as power_module
+    try:
+        return power_module.status()
+    except Exception as exc:  # pragma: no cover - defensive; serial surprises
+        return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+
+
+async def power_measure(
+    during: Optional[str] = None,
+    duration_s: Optional[float] = None,
+    baseline_s: float = 5.0,
+    max_joules: Optional[float] = None,
+) -> dict:
+    from nff.tools import power as power_module
+
+    def _run() -> dict:
+        return power_module.measure(
+            during=during,
+            duration_s=duration_s,
+            baseline_s=baseline_s,
+            max_joules=max_joules,
+        ).to_dict()
+
+    # A measurement blocks for the whole baseline + the child command — an OTA is tens of
+    # seconds. Every other handler here runs inline on the uvicorn loop (see `flash`), which
+    # would stall the entire MCP server for the duration. Offload it, as complete_authentication
+    # does with its blocking socket wait.
+    loop = asyncio.get_running_loop()
+    try:
+        return await loop.run_in_executor(None, _run)
+    except Exception as exc:  # pragma: no cover - defensive
+        return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+
+
+# ---------------------------------------------------------------------------
 # MCP server wiring
 # ---------------------------------------------------------------------------
 
@@ -600,6 +640,33 @@ _TOOLS = [
                      "structured results; plain console commands return text output.",
          inputSchema={"type": "object", "properties": {
              "command": {"type": "string"}}, "required": ["command"]}),
+    Tool(name="power_status",
+         description="Is an energy meter (nff-power-meter on an STM32 Nucleo) attached, and is it "
+                     "calibrated? Call this before power_measure. Returns JSON: "
+                     "{ok, attached, port, calibrated, shunt_uohm}. An UNCALIBRATED meter still "
+                     "measures, but its joules figure is only as good as a guessed shunt value.",
+         inputSchema={"type": "object", "properties": {}}),
+    Tool(name="power_measure",
+         description="Measure what a command costs the DEVICE in energy — e.g. joules per OTA. Runs "
+                     "during= as a subprocess while the meter accumulates, samples an idle baseline "
+                     "first, and subtracts it, so marginal_energy_j is the energy the command cost "
+                     "over and above the device merely being powered on. Use max_joules= as a "
+                     "regression gate (within_budget=false when exceeded). Returns JSON: "
+                     "{ok, marginal_energy_j, energy_j, duration_s, mean_current_ma, peak_current_ma, "
+                     "samples, overruns, within_budget, error, warnings}. "
+                     "ok=false means NO trustworthy figure was obtained (meter missing, samples "
+                     "dropped, or the measured command itself failed) — do not treat the joules "
+                     "fields as meaningful in that case. Only works for operations that need no USB "
+                     "to the ESP32 (nff ota, yes; nff flash/monitor, no — USB shorts the shunt).",
+         inputSchema={"type": "object", "properties": {
+             "during": {"type": "string",
+                        "description": 'Command to measure, e.g. "nff ota --version 1.2.3"'},
+             "duration_s": {"type": "number",
+                            "description": "Measure for a fixed time instead of around a command"},
+             "baseline_s": {"type": "number", "default": 5,
+                            "description": "Idle sampling time, subtracted to give marginal energy"},
+             "max_joules": {"type": "number",
+                            "description": "Regression gate: within_budget=false if marginal energy exceeds this"}}}),
 ]
 
 _DISPATCH = {
@@ -631,6 +698,8 @@ _DISPATCH = {
     "continue_execution": continue_execution,
     "step": step,
     "gdb_command": gdb_command,
+    "power_status": power_status,
+    "power_measure": power_measure,
 }
 
 # In-memory OAuth handshake state. These dicts only hold a request mid-flight (the

@@ -37,6 +37,20 @@ _DEFAULT = {
     # package cache (else PATH), openocd_config from the chip's built-in-JTAG board file,
     # and interface for an external JTAG probe (classic esp32 / esp32s2 need this).
     "debug": {"openocd_path": None, "gdb_path": None, "openocd_config": None, "interface": None},
+    # Energy measurement (`nff power` / the power_* MCP tools) via the nff-power-meter
+    # Nucleo. The HOST owns the calibration and pushes it to the meter on every connect,
+    # so the meter stays stateless across resets. shunt_uohm is the *effective* resistance
+    # of the ground path — resistor tolerance, ADC gain error and breadboard contact
+    # resistance are not separable, so `nff power calibrate` solves for all of them at once
+    # against a multimeter reading. `calibrated` stays False until it has been run, and
+    # `measure` warns loudly while it is.
+    "power": {
+        "port": None,
+        "shunt_uohm": 1000000,  # 1 Ω nominal
+        "kdiv_milli": 2000,  # 1k/1k supply divider -> ratio 2.000
+        "vdda_mv": 3300,
+        "calibrated": False,
+    },
 }
 
 
@@ -226,3 +240,31 @@ def get_debug_config() -> dict:
         return cfg
     except ConfigError:
         return copy.deepcopy(_DEFAULT["debug"])
+
+
+def get_power_config() -> dict:
+    """Power-meter config, merged over defaults so older config files (written before this
+    section existed) still return every key."""
+    try:
+        cfg = copy.deepcopy(_DEFAULT["power"])
+        cfg.update(load().get("power", {}))
+        return cfg
+    except ConfigError:
+        return copy.deepcopy(_DEFAULT["power"])
+
+
+def set_power_calibration(shunt_uohm: int, port=None) -> None:
+    data = load() if exists() else copy.deepcopy(_DEFAULT)
+    data.setdefault("power", copy.deepcopy(_DEFAULT["power"]))
+    data["power"]["shunt_uohm"] = int(shunt_uohm)
+    data["power"]["calibrated"] = True
+    if port:
+        data["power"]["port"] = port
+    save(data)
+
+
+def set_power_port(port) -> None:
+    data = load() if exists() else copy.deepcopy(_DEFAULT)
+    data.setdefault("power", copy.deepcopy(_DEFAULT["power"]))
+    data["power"]["port"] = port
+    save(data)
