@@ -56,6 +56,11 @@ pub struct InitArgs {
         help = "Build backend: platformio (default, board-universal) or arduino."
     )]
     pub backend: Option<String>,
+    #[arg(
+        long,
+        help = "Skip cloud sign-in; configure for local build/flash/monitor/debug only."
+    )]
+    pub offline: bool,
 }
 
 #[derive(Args)]
