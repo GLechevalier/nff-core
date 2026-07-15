@@ -217,19 +217,34 @@ def test_parse_rejects_non_frames(line):
 # ------------------------------------------------------------------------- calibration
 
 
-def test_solve_shunt_recovers_the_true_resistance():
-    """The meter thinks it has 1 Ω and reads 99.9 mA. The multimeter says the load really
-    draws 50 mA — so the ground path is really ~2 Ω, and that is what we should store."""
-    f = make_frame(q=124, u=3103, n=100_000)
-    solved = power_tools.solve_shunt_uohm(f, true_current_ma=50.0)
+def test_solve_shunt_is_differential_and_cancels_the_device():
+    """THE correctness property. The shunt carries the ESP32's current AND the load's, but the
+    multimeter in series with the load sees only the load's. Solving against the meter's TOTAL
+    would divide by the wrong current and yield a badly wrong resistance — badly, because the
+    ESP32 draws more than the load does. The difference has to cancel the device out.
+
+    Here: idle = 62 counts, loaded = 124 counts, so the load added 62 counts = 50 mV. If the
+    multimeter says that load really draws 25 mA, the ground path is 50 mV / 25 mA = 2 Ω.
+    """
+    idle = make_frame(q=62, u=3103, n=100_000)
+    loaded = make_frame(q=124, u=3103, n=100_000)
+
+    solved = power_tools.solve_shunt_uohm(loaded, 25.0, frame_without_load=idle)
     assert solved == pytest.approx(2_000_000, rel=1e-2)
 
+    # Non-differential would have used the TOTAL 124 counts against the load's 25 mA and
+    # come out at 4 Ω — double, and confidently so. That is the bug this guards.
+    naive = power_tools.solve_shunt_uohm(loaded, 25.0)
+    assert naive == pytest.approx(4_000_000, rel=1e-2)
 
-def test_solve_shunt_rejects_a_dead_reading():
-    """A shorted shunt (ESP32 still on PC USB) reads zero counts — refuse rather than
-    solving for an absurd resistance."""
-    with pytest.raises(PowerError, match="no current"):
-        power_tools.solve_shunt_uohm(make_frame(q=0, u=3103, n=100_000), 33.0)
+
+def test_solve_shunt_rejects_a_load_the_meter_cannot_see():
+    """If switching the load in doesn't move the shunt voltage, the load isn't going through the
+    shunt (hung off the Nucleo's 3V3 instead of the device's). Refuse — don't divide by ~0 and
+    report an absurd resistance."""
+    same = make_frame(q=62, u=3103, n=100_000)
+    with pytest.raises(PowerError, match="did not raise the shunt voltage"):
+        power_tools.solve_shunt_uohm(same, 33.0, frame_without_load=same)
 
 
 def test_solve_shunt_rejects_nonpositive_reference():
@@ -568,13 +583,31 @@ def test_cli_devices_flags_an_uncalibrated_meter(isolated_config, monkeypatch):
 
 
 def test_cli_calibrate_persists_the_solved_shunt(calibrated, monkeypatch):
-    monkeypatch.setattr(power_tools, "sample",
-                        lambda seconds, port=None: make_frame(q=124, u=3103, n=100_000))
+    """Two readings, idle then loaded; the load's 62 counts (50 mV) against a real 25 mA is 2 Ω."""
+    frames = iter([
+        make_frame(q=62, u=3103, n=100_000),    # idle
+        make_frame(q=124, u=3103, n=100_000),   # loaded
+    ])
+    monkeypatch.setattr(power_tools, "sample", lambda seconds, port=None: next(frames))
+
     result = CliRunner().invoke(
-        power, ["calibrate", "--load", "100", "--actual-ma", "50"]
+        power, ["calibrate", "--load", "100", "--actual-ma", "25"], input="y\ny\n"
     )
     assert result.exit_code == 0, result.output
-    # Meter read 99.9 mA but the multimeter says 50 mA => the real path is ~2 Ω.
+
     saved = cfg_module.get_power_config()
     assert saved["calibrated"] is True
     assert saved["shunt_uohm"] == pytest.approx(2_000_000, rel=1e-2)
+
+
+def test_cli_set_shunt_does_not_claim_calibration(isolated_config):
+    """A resistance read off the resistor is better than the default, but it is NOT a
+    calibration — it misses the contact resistance, which is the same order as the gap
+    between a 1.0 and a 1.1 Ω part."""
+    result = CliRunner().invoke(power, ["set-shunt", "1.1"])
+    assert result.exit_code == 0, result.output
+
+    saved = cfg_module.get_power_config()
+    assert saved["shunt_uohm"] == 1_100_000
+    assert saved["calibrated"] is False
+    assert "Still uncalibrated" in result.output

@@ -253,11 +253,19 @@ def get_power_config() -> dict:
         return copy.deepcopy(_DEFAULT["power"])
 
 
-def set_power_calibration(shunt_uohm: int, port=None) -> None:
+def set_power_calibration(shunt_uohm: int, port=None, calibrated: bool = True) -> None:
+    """Record the shunt resistance.
+
+    ``calibrated=False`` is for a value you merely *measured off the resistor* — it is better
+    than the 1 Ω default but still not the effective resistance of the ground path, which also
+    contains breadboard contact resistance (10-100 mΩ per contact, several in series, i.e. the
+    same order as the difference between a 1.0 and a 1.1 Ω resistor). Only a solve against a
+    known current earns ``calibrated=True``.
+    """
     data = load() if exists() else copy.deepcopy(_DEFAULT)
     data.setdefault("power", copy.deepcopy(_DEFAULT["power"]))
     data["power"]["shunt_uohm"] = int(shunt_uohm)
-    data["power"]["calibrated"] = True
+    data["power"]["calibrated"] = bool(calibrated)
     if port:
         data["power"]["port"] = port
     save(data)

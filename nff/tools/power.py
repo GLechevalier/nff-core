@@ -1,7 +1,7 @@
 """Energy measurement — drives the nff-power-meter (see ../../../nff-power-meter/).
 
 An STM32 Nucleo watches a 1 Ω low-side shunt in the ESP32's ground return, accumulates
-charge and energy at 100 kSps, and reports raw integer sums. This module converts those
+charge and energy at 200 kSps, and reports raw integer sums. This module converts those
 sums to joules and wraps a subprocess so you can ask what `nff ota` cost the device.
 
 Shared layer: both ``commands/power.py`` and ``mcp_server.py`` call in here — neither
@@ -587,6 +587,69 @@ def check_wiring(frame: MeterFrame) -> Optional[str]:
     return None
 
 
+def selftest(
+    seconds: float = 25.0,
+    window_s: float = 0.5,
+    port: Optional[str] = None,
+    emit: Optional[Callable[[str], None]] = None,
+) -> dict:
+    """Prove the shunt is really wired, by watching a load that MOVES.
+
+    The connectivity probe answers "is something holding this pin?". This answers the question
+    that actually matters: "does the current we report track the current the device draws?"
+
+    Flash esp32-loadtest/ to the ESP32 first. It walks a four-step staircase — idle, CPU,
+    radio, scan — spanning roughly 40 mA to 200 mA. A correctly wired meter follows it. A
+    floating PA0 sits flat at whatever charge it happens to hold, which during bring-up was a
+    wholly convincing 57 mA — indistinguishable from a real idle ESP32 until you make the load
+    move.
+    """
+    swing_floor_ma = 25.0  # the staircase spans >100 mA; anything under this is not following it
+
+    with open_calibrated(port) as meter:
+        meter.zero()
+        samples = []
+        deadline = time.monotonic() + seconds
+        last = 0.0
+        while time.monotonic() < deadline:
+            meter.zero()
+            time.sleep(window_s)
+            f = meter.snap()
+            ma = f.mean_current_a * 1000
+            samples.append(ma)
+            if emit and abs(ma - last) > 1.0:
+                bar = "#" * max(1, int(ma / 4))
+                emit(f"  {ma:6.1f} mA  {bar}")
+                last = ma
+            rail = f.mean_supply_v
+            ovr = f.ovr
+
+    if not samples:
+        return {"ok": False, "error": "no samples — is the meter attached?"}
+
+    lo, hi = min(samples), max(samples)
+    swing = hi - lo
+    wired = swing >= swing_floor_ma
+
+    result = {
+        "ok": bool(wired),
+        "min_ma": round(lo, 1),
+        "max_ma": round(hi, 1),
+        "swing_ma": round(swing, 1),
+        "rail_v": round(rail, 2),
+        "overruns": ovr,
+        "windows": len(samples),
+    }
+    if not wired:
+        result["error"] = (
+            f"the reported current barely moved ({swing:.1f} mA swing, {lo:.1f}-{hi:.1f} mA) while "
+            "the ESP32 should have been stepping across ~40-200 mA. The meter is NOT following the "
+            "load. Either PA0 is not on the shunt's ESP32-GND leg, or esp32-loadtest is not running "
+            "(is the ESP32 powered from the Nucleo's 5V pin, with its own USB unplugged?)."
+        )
+    return result
+
+
 def sample(duration_s: float, port: Optional[str] = None) -> MeterFrame:
     """Accumulate for `duration_s` and return the cumulative frame."""
     with open_calibrated(port) as meter:
@@ -623,9 +686,15 @@ def measure(
     cfg = get_config()
     warnings = []
     if not cfg.get("calibrated"):
+        # Say what is actually unknown, and what it does and does not affect. "It's a guess" is
+        # both wrong (the resistor's value IS known) and useless (it doesn't say what to distrust).
+        nominal = int(cfg.get("shunt_uohm") or 1_000_000) / 1_000_000
         warnings.append(
-            "meter is UNCALIBRATED — the shunt value is a guess and the joules figure "
-            "is only as good as it. Run `nff power calibrate`."
+            f"UNCALIBRATED — using a nominal {nominal:.2f} Ω shunt. The real ground path is that "
+            "resistor plus breadboard contact resistance (~0.1-0.4 Ω), so the ABSOLUTE energy may "
+            "be off by ~10-30%. RELATIVE comparisons on this same, un-rewired rig are unaffected "
+            "— which is all --max-joules regression gating needs. Run `nff power calibrate` if you "
+            "need a defensible absolute figure."
         )
 
     try:
@@ -776,18 +845,46 @@ def measure(
     )
 
 
-def solve_shunt_uohm(frame: MeterFrame, true_current_ma: float) -> int:
-    """Calibration: given what the meter measured and what the multimeter actually read,
-    solve for the effective resistance in the ground path.
+def solve_shunt_uohm(
+    frame_with_load: MeterFrame,
+    load_current_ma: float,
+    frame_without_load: Optional[MeterFrame] = None,
+) -> int:
+    """Solve for the effective resistance of the ground path, against a known current.
 
-    That one constant absorbs the resistor's tolerance, the ±2% VDDA regulator error, the
-    ADC gain error AND the breadboard contact resistance — none of which are separable, and
-    all of which move when you re-seat a jumper.
+    DIFFERENTIAL, and it has to be. The shunt carries the device's own current *plus* the
+    calibration load's, while the multimeter in series with that load sees only the load's. So
+    comparing the meter's total against the multimeter's load-only reading solves for the wrong
+    resistance — badly wrong, because the ESP32 draws more than the load does. Take the
+    difference instead, and the device's contribution cancels:
+
+        R_eff = (V_shunt_with_load - V_shunt_idle) / I_load
+
+    The one constant this yields absorbs the resistor's tolerance, the ±2% VDDA regulator error,
+    the ADC gain error AND the breadboard contact resistance — none of which are separable, and
+    all of which move when a jumper is re-seated.
+
+    Passing no `frame_without_load` falls back to the absolute form, which is only valid when the
+    load is the ONLY thing drawing through the shunt.
     """
-    if true_current_ma <= 0:
+    if load_current_ma <= 0:
         raise PowerError("the reference current must be positive")
-    if not frame.n or not frame.sq:
-        raise PowerError("the meter read no current — check the shunt is in the ground return")
-    mean_counts = frame.sq / frame.n
-    v_shunt = mean_counts * frame.volts_per_count
-    return int(round(v_shunt / (true_current_ma / 1000.0) * 1_000_000))
+    if not frame_with_load.n:
+        raise PowerError("the meter returned no samples")
+
+    def _v(f: MeterFrame) -> float:
+        return (f.sq / f.n) * f.volts_per_count
+
+    v_load = _v(frame_with_load)
+    if frame_without_load is not None:
+        if not frame_without_load.n:
+            raise PowerError("the idle reference frame has no samples")
+        v_load -= _v(frame_without_load)
+
+    if v_load <= 0:
+        raise PowerError(
+            "switching the load in did not raise the shunt voltage — the meter is not seeing it. "
+            "Check the load really is drawing through the shunt (across the DEVICE's 3V3 and GND, "
+            "not the Nucleo's)."
+        )
+    return int(round(v_load / (load_current_ma / 1000.0) * 1_000_000))
