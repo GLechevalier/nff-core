@@ -67,10 +67,11 @@ arduino-cli core install esp8266:esp8266
 ```bash
 nff init                      # default PlatformIO backend (board-universal)
 nff init --backend arduino    # opt into the arduino-cli backend instead
+nff init --offline            # local-only: skip cloud sign-in entirely
 ```
 
 This single command:
-- **Signs you in** to the nff platform (browser login) — required, because the MCP tools are gated behind your account
+- **Optionally signs you in** to the nff platform (browser login) to enable cloud features (`repair`, `agent`, device onboarding). Sign-in is **not required** — if it's skipped or times out, init continues in local mode. See [Local / offline mode](#local--offline-mode) below.
 - Detects your board by USB vendor/product ID
 - Writes `~/.nff/config.json` (default device + build backend/board)
 - Installs the active backend's toolchain if missing (PlatformIO Core, or arduino-cli)
@@ -90,6 +91,17 @@ This single command:
 
 > The background server runs until you reboot or stop it. After a reboot, run `nff mcp`
 > (or just re-run `nff init`) to bring it back up — `nff doctor` will tell you if it's down.
+
+#### Local / offline mode
+
+You don't need an nff account to **compile, flash, monitor, or debug** a board — those run
+entirely on your machine. Run `nff init --offline` (or set `NFF_OFFLINE=1`) to configure the bench
+without any cloud sign-in; even a plain `nff init` no longer blocks on login — if it fails or times
+out, init just continues in local mode. `nff doctor` reports a clean bill of health for a
+local-only setup (sign-in shows as an informational warning, not a failure).
+
+Only the cloud features need an account: `nff repair`, `nff agent`, and device onboarding. Run
+`nff auth login` whenever you want to enable them — that also lifts offline mode automatically.
 
 ### 4. Verify
 
@@ -253,7 +265,7 @@ not yet implemented. Full detail and the plan behind the roadmap items live in
 
 | Command | State | Notes |
 |---|---|---|
-| `nff init` | stable | Detects the board, writes config, registers + starts the MCP server (currently requires cloud login) |
+| `nff init` | stable | Detects the board, writes config, registers + starts the MCP server. Cloud sign-in is optional — use `nff init --offline` for local-only build/flash/monitor |
 | `nff compile` | stable | PlatformIO (default) + arduino backends; no board/port needed |
 | `nff flash` | stable | Compile and upload |
 | `nff monitor` | stable | Stream serial output |
@@ -274,7 +286,7 @@ not yet implemented. Full detail and the plan behind the roadmap items live in
 
 | Command | Description |
 |---|---|
-| `nff init` | Sign in, detect board, write config, register + start the MCP server |
+| `nff init` | Detect board, write config, register + start the MCP server (optionally sign in; `--offline` skips it) |
 | `nff compile <path>` | Compile a sketch to verify it builds (no board/port needed) |
 | `nff flash <path>` | Compile and upload a sketch directory |
 | `nff monitor` | Stream serial output (Ctrl+C to exit) |

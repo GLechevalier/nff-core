@@ -70,22 +70,25 @@ at minimum stop tracking them going forward.)
 
 ---
 
-## P1 — Offline / local mode (highest-value product change)
+## P1 — Offline / local mode ✅ done (highest-value product change)
 
-### 4. Decouple local bench tools from cloud login
-`commands/init.rs:10` calls `require_login()` **before anything else** and
-`std::process::exit(1)` (`init.rs:106`) if it fails. A user who only wants to compile, flash, and
-monitor a board is blocked at the door.
+### 4. Decouple local bench tools from cloud login — **shipped**
+`nff init` used to call `require_login()` before anything else and `exit(1)` on failure, blocking
+anyone who only wanted to compile, flash, and monitor. That gate is gone.
 
-- Add `nff init --offline` (and/or auto-detect no network) that configures the board, toolchain,
-  and MCP registration but **skips** the browser OAuth.
-- Local tools (`compile`, `flash`, `monitor`, `debug`) require **no** token; only cloud features
-  (`repair`, `agent`, diagnosis) do. Only prompt for login when a cloud feature is actually invoked.
-- In `doctor.rs:175` (`check_login`), downgrade "Not signed in" from **✗ fail** to **⚠ warn**
-  ("cloud features disabled") when running offline, so `nff doctor` stays green for a local-only
-  setup.
+- **`nff init --offline`** (or `NFF_OFFLINE=1`) skips the browser OAuth and marks the bench local;
+  the choice is persisted (`config.offline`, cleared automatically on a successful `nff auth login`).
+- A plain `nff init` no longer hard-requires login — a failure/timeout **falls back to local mode**
+  instead of aborting. Toolchain install, MCP registration, and the background server still run.
+- Local tools (`compile`/`flash`/`monitor`/`debug`) never needed a token (verified) and the MCP
+  Bearer gate is off by default, so local use is fully tokenless.
+- `doctor`'s login check is now a **⚠ warning**, not a ✗ failure; the Rust Claude-Desktop check was
+  also downgraded to a warning (parity with Python) so `nff doctor` **exits 0** for a local-only
+  bench. Signing in re-enables cloud features and flips the login check back to ✓.
 
-This is the single change that most improves the first-run impression.
+Implemented in both Rust (`config.rs`, `cli.rs`, `commands/{init,doctor,auth}.rs`) and Python
+(`config.py`, `commands/{init,doctor,auth_cmd}.py`). This is the single change that most improves
+the first-run impression.
 
 ---
 
