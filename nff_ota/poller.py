@@ -40,9 +40,12 @@ async def poll_once() -> int:
     client = get_client()
     now = datetime.now(timezone.utc)
 
+    # Project only what this sweep reads (start_deployment re-fetches the full row itself). This
+    # runs every deployment_poller_interval; selecting * re-egressed every column of every
+    # scheduled/active deployment on each tick.
     resp = (
         await client.table("deployments")
-        .select("*")
+        .select("id, status, start_time, target_version, device_group_id")
         .in_("status", ["scheduled", "active"])
         .execute()
     )

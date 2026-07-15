@@ -118,11 +118,15 @@ async def claim_next() -> dict | None:
 
     The claim is a conditional update (``status == 'pending'``): if another worker won the
     race the update matches no row and we return None so the caller moves on.
+
+    The probe selects only ``id, attempts`` — this runs every ``fix_worker_interval`` (~3s),
+    and the full row carries the firmware ``source`` blob, which we must not re-egress on every
+    idle tick. The heavy row is fetched once, only after a claim is actually won.
     """
     client = get_client()
     resp = (
         await client.table("firmware_fix_jobs")
-        .select("*")
+        .select("id, attempts")
         .eq("status", "pending")
         .order("created_at")
         .limit(1)
@@ -147,7 +151,18 @@ async def claim_next() -> dict | None:
     )
     if not upd.data:
         return None  # lost the race to another worker
-    return {**job, "status": "running"}
+    # We won the claim — now (and only now) read the full row, including the ``source`` the
+    # worker needs to compile. status is already 'running' in the DB after the update above.
+    full = (
+        await client.table("firmware_fix_jobs")
+        .select("*")
+        .eq("id", job["id"])
+        .limit(1)
+        .execute()
+    )
+    if not full.data:
+        return None  # vanished between claim and read (extremely unlikely) — let the caller retry
+    return full.data[0]
 
 
 async def finish(

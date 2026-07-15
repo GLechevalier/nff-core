@@ -110,10 +110,19 @@ async def _supervise_one(dep: dict) -> None:
 async def sweep_once() -> int:
     """Supervise every active phased deployment. Returns how many were processed."""
     client = get_client()
+    # Only phased deployments have anything to supervise. Filter server-side (phases IS NOT NULL)
+    # and project just the columns _supervise_one / _deliver_wave read — this sweeps every
+    # supervisor_interval, and pulling every active deployment's full row (most single-shot ones
+    # only to discard them in Python) was pure egress. The Python guard below stays as a
+    # belt-and-suspenders against an empty-string phases value.
     resp = (
         await client.table("deployments")
-        .select("*")
+        .select(
+            "id, status, target_version, phases, current_phase, failure_threshold, "
+            "soak_seconds, phase_entered_at, max_devices_in_flight, project_id, rate_limit_override"
+        )
         .eq("status", "active")
+        .not_.is_("phases", "null")
         .execute()
     )
     deployments = [d for d in (resp.data or []) if d.get("phases")]

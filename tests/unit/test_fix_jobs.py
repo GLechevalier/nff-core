@@ -81,10 +81,10 @@ async def test_worker_claims_runs_and_finishes(mock_supabase, monkeypatch):
         "id": "job-1", "device_id": "dev-1", "version": "2.0.0", "source": SRC,
         "author": "agent", "parent_version": "1.0.0", "changelog": None, "attempts": 0,
     }
-    # reclaim_stale (running select) → none; claim select → the job; claim update → success;
-    # finish update → ignored.
+    # reclaim_stale (running select) → none; claim probe (id,attempts) → the job; claim update →
+    # success; claim full-row re-fetch (with source) → the job; finish update → ignored.
     mock_supabase.table.return_value.execute = AsyncMock(
-        side_effect=[_resp([]), _resp([job]), _resp([job]), _resp([{}])]
+        side_effect=[_resp([]), _resp([job]), _resp([job]), _resp([job]), _resp([{}])]
     )
 
     seen = {}
@@ -124,8 +124,10 @@ async def test_worker_records_build_error(mock_supabase, monkeypatch):
         "id": "job-1", "device_id": "dev-1", "version": "2.0.0", "source": SRC,
         "author": "agent", "parent_version": None, "changelog": None, "attempts": 0,
     }
+    # reclaim → none; claim probe → job; claim update → success; full-row re-fetch → job.
+    # (jobs.finish is monkeypatched below, so it issues no execute of its own.)
     mock_supabase.table.return_value.execute = AsyncMock(
-        side_effect=[_resp([]), _resp([job]), _resp([job]), _resp([{}])]
+        side_effect=[_resp([]), _resp([job]), _resp([job]), _resp([job])]
     )
     finished = {}
 

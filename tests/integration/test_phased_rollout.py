@@ -24,8 +24,11 @@ def _recording_tables(responses: dict[str, list[list[dict]]]):
 
     def side_effect(name):
         t = MagicMock()
-        for m in ("select", "eq", "in_", "neq", "order", "limit", "lt", "lte", "gt"):
+        for m in ("select", "eq", "in_", "neq", "order", "limit", "lt", "lte", "gt", "is_"):
             getattr(t, m).return_value = t
+        # PostgREST's negation reads `.not_.is_(col, val)`; `not_` is a property returning the
+        # same builder, so mirror the chain back onto t.
+        t.not_ = t
 
         def _update(payload):
             writes["update"].append((name, payload))
