@@ -227,3 +227,8 @@ wokwi.toml
 
 renderer/
 **tmp*.json
+
+# Build artifacts / large media / tool caches
+*.pdb
+public/videos/
+graphify-out/
