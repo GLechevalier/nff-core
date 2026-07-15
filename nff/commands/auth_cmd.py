@@ -53,6 +53,8 @@ def login(email, password, server):
         raise click.ClickException("Provide both --email and --password, or neither for browser login")
 
     config.set_diagnosis_tokens(tokens.access_token, tokens.refresh_token)
+    # Signing in re-enables cloud features — leave local/offline mode.
+    config.set_offline(False)
     click.echo("OK: authenticated")
 
 

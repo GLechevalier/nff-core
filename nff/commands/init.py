@@ -65,18 +65,20 @@ def _ensure_logged_in() -> bool:
     return True
 
 
-def _require_login() -> None:
-    """Login is mandatory: the MCP tools are gated behind it, and signing in is how
-    nff counts who's using it. Block until login succeeds (with one retry) or abort
-    init — there's no point configuring a bench whose tools stay locked."""
-    if _ensure_logged_in():
+def _resolve_login(offline_flag: bool) -> None:
+    """Decide how to handle sign-in without ever blocking init. Offline mode (the
+    `--offline` flag or a truthy NFF_OFFLINE) skips the browser flow entirely and marks the
+    bench local. Otherwise attempt a browser login, but a failure/timeout falls back to
+    local mode — compile/flash/monitor/debug work without an account."""
+    if offline_flag or config.is_offline():
+        config.set_offline(True)
+        click.echo("  Offline mode — local build/flash/monitor/debug work without an account.")
+        click.echo("  Cloud features (repair, agent, device onboarding) stay disabled "
+                   "until you run `nff auth login`.")
         return
-    if click.confirm("\nLogin is required to use nff. Try again?", default=True):
-        if _ensure_logged_in():
-            return
-    click.echo("\nCouldn't sign in — nff's tools stay locked until you're logged in.")
-    click.echo("Run `nff auth login` once you're online, then re-run `nff init`.")
-    raise SystemExit(1)
+    if not _ensure_logged_in():
+        click.echo("  Continuing in local mode — run `nff auth login` later to enable "
+                   "cloud features (repair, agent).")
 
 
 def _resolve_wifi() -> tuple[str, str]:
@@ -185,7 +187,9 @@ def _onboard_platform(device) -> None:
 @click.option("--force", is_flag=True)
 @click.option("--backend", type=click.Choice(["arduino", "platformio"]), default=None,
               help="Build backend to use (default: keep current / arduino)")
-def init(port, baud, force, backend):
+@click.option("--offline", is_flag=True,
+              help="Skip cloud sign-in; configure for local build/flash/monitor/debug only.")
+def init(port, baud, force, backend, offline):
     """Interactive setup — detect board and configure nff."""
     if backend:
         config.set_build_backend(backend)
@@ -194,9 +198,10 @@ def init(port, baud, force, backend):
 
     click.echo("Welcome to nff init!\n")
 
-    # Sign in first — the MCP tools are gated behind a valid token, so a bench that
-    # isn't logged in can't do anything. Aborts init if login fails.
-    _require_login()
+    # Sign-in is optional: local build/flash/monitor/debug need no account, and the MCP
+    # tools aren't gated by default. Only cloud features need a token — never block init.
+    _resolve_login(offline)
+    offline_mode = offline or config.is_offline()
 
     if is_pio:
         click.echo("Build backend: PlatformIO (board-universal)\n")
@@ -245,7 +250,10 @@ def init(port, baud, force, backend):
         except Exception as exc:
             click.echo(f"Warning: could not install arduino-cli: {exc}")
 
-    if is_pio:
+    if offline_mode:
+        click.echo("\nOffline mode — skipping cloud platform onboarding. "
+                   "Your board is configured for local build/flash/monitor.")
+    elif is_pio:
         click.echo("\nCloud platform onboarding currently runs on the arduino "
                    "backend; skipping. Your board is configured for PlatformIO builds.")
     else:

@@ -51,6 +51,9 @@ _DEFAULT = {
         "vdda_mv": 3300,
         "calibrated": False,
     },
+    # Local/offline mode: `nff init` skips the cloud sign-in and only local
+    # build/flash/monitor/debug are enabled. Sticky once set; cleared on a successful login.
+    "offline": False,
 }
 
 
@@ -229,6 +232,28 @@ def set_build_board(board) -> None:
     data.setdefault("build", copy.deepcopy(_DEFAULT["build"]))
     data["build"]["board"] = board
     save(data)
+
+
+def set_offline(offline: bool) -> None:
+    data = load() if exists() else copy.deepcopy(_DEFAULT)
+    data["offline"] = bool(offline)
+    data.setdefault("version", "1")
+    save(data)
+
+
+def is_offline() -> bool:
+    """Whether nff is in local/offline mode: cloud sign-in is skipped and only local
+    build/flash/monitor/debug are enabled. Precedence: NFF_OFFLINE env var (truthy:
+    1/true/yes/on) → `offline` in config → False. Mirrors NFF_BUILD_BACKEND's env override."""
+    env = os.environ.get("NFF_OFFLINE", "").strip().lower()
+    if env in ("1", "true", "yes", "on"):
+        return True
+    if env in ("0", "false", "no", "off"):
+        return False
+    try:
+        return bool(load().get("offline", False))
+    except ConfigError:
+        return False
 
 
 def get_debug_config() -> dict:
