@@ -36,6 +36,10 @@ pub struct Config {
     /// The most recent successful build artifact, recorded by `compile`/`flash`.
     #[serde(default)]
     pub last_build: Option<LastBuild>,
+    /// Count of CLI invocations seen, used to pace the "star the repo / go Pro" nudge
+    /// (shown every Nth run). Persisted so the cadence survives across separate CLI processes.
+    #[serde(default)]
+    pub nudge_count: u64,
 }
 
 /// The most recent successful build artifact, recorded by `compile`/`flash` so
@@ -190,6 +194,7 @@ impl Default for Config {
             debug: DebugConfig::default(),
             offline: false,
             last_build: None,
+            nudge_count: 0,
         }
     }
 }
@@ -360,6 +365,22 @@ pub fn get_last_build() -> Result<Option<LastBuild>, ConfigError> {
     Ok(load()?.last_build)
 }
 
+/// Increment and persist the CLI nudge counter, returning the new value. Used to pace the
+/// "star the repo / go Pro" reminder (shown every Nth CLI run). Best-effort: on any config
+/// read/write error it returns 0 so the caller simply skips the nudge this run.
+pub fn bump_nudge_count() -> u64 {
+    let mut config = match load() {
+        Ok(c) => c,
+        Err(_) => return 0,
+    };
+    config.nudge_count = config.nudge_count.saturating_add(1);
+    let next = config.nudge_count;
+    if save(&config).is_err() {
+        return 0;
+    }
+    next
+}
+
 /// Current unix time in seconds (0 if the clock is somehow before the epoch).
 pub fn now_unix() -> i64 {
     std::time::SystemTime::now()
@@ -455,6 +476,27 @@ mod tests {
         }"#;
         let parsed: Config = serde_json::from_str(legacy).unwrap();
         assert!(!parsed.offline);
+    }
+
+    #[test]
+    fn nudge_count_defaults_zero_and_round_trips() {
+        let mut config = Config::default();
+        assert_eq!(config.nudge_count, 0);
+        config.nudge_count = 42;
+        let json = serde_json::to_string_pretty(&config).unwrap();
+        let parsed: Config = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.nudge_count, 42);
+    }
+
+    #[test]
+    fn nudge_count_absent_in_legacy_config() {
+        // A config.json written before the nudge_count field existed must still parse.
+        let legacy = r#"{
+            "version": "1",
+            "default_device": {"port": null, "board": null, "fqbn": null, "baud": 9600}
+        }"#;
+        let parsed: Config = serde_json::from_str(legacy).unwrap();
+        assert_eq!(parsed.nudge_count, 0);
     }
 
     #[test]

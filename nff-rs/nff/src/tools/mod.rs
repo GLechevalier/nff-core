@@ -5,6 +5,7 @@ pub mod config;
 pub mod daemon;
 pub mod debug;
 pub mod installer;
+pub mod nudge;
 pub mod pi;
 pub mod pio;
 pub mod retry;

@@ -58,6 +58,9 @@ _DEFAULT = {
     # `nff status` can report what's on the bench. kind = "elf" or "bin"; built_at is
     # unix seconds. None until the first successful build.
     "last_build": None,
+    # Count of CLI invocations seen, used to pace the "star the repo / go Pro" nudge
+    # (shown every Nth run). Persisted so the cadence survives across CLI processes.
+    "nudge_count": 0,
 }
 
 
@@ -259,6 +262,20 @@ def get_last_build() -> dict:
         return load().get("last_build") or {}
     except ConfigError:
         return {}
+
+
+def bump_nudge_count() -> int:
+    """Increment and persist the CLI nudge counter, returning the new value. Used to pace the
+    "star the repo / go Pro" reminder (shown every Nth CLI run). Best-effort: on any config
+    read/write error it returns 0 so the caller simply skips the nudge this run."""
+    try:
+        data = load() if exists() else copy.deepcopy(_DEFAULT)
+        data["nudge_count"] = int(data.get("nudge_count") or 0) + 1
+        data.setdefault("version", "1")
+        save(data)
+        return data["nudge_count"]
+    except (ConfigError, ValueError, TypeError):
+        return 0
 
 
 def now_unix() -> int:

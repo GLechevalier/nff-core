@@ -29,6 +29,17 @@ def cli():
     """nff — Claude Code IoT Bridge."""
 
 
+@cli.result_callback()
+def _after_command(*_args, **_kwargs):
+    """After a subcommand finishes, maybe show the periodic 'star the repo / go Pro' nudge.
+
+    Skips the long-running `mcp` server, whose lifetime isn't a discrete invocation."""
+    from nff.tools import nudge
+
+    subcommand = click.get_current_context().invoked_subcommand
+    nudge.maybe_show_cli(skip=(subcommand == "mcp"))
+
+
 cli.add_command(init)
 cli.add_command(compile_cmd)
 cli.add_command(flash)
