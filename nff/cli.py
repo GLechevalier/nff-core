@@ -17,8 +17,10 @@ from nff.commands.mcp_cmd import mcp
 from nff.commands.monitor import monitor
 from nff.commands.ota import ota
 from nff.commands.pi import pi
+from nff.commands.power import power
 from nff.commands.provision import provision
 from nff.commands.repair import repair
+from nff.commands.status import status
 
 
 @click.group()
@@ -27,11 +29,23 @@ def cli():
     """nff — Claude Code IoT Bridge."""
 
 
+@cli.result_callback()
+def _after_command(*_args, **_kwargs):
+    """After a subcommand finishes, maybe show the periodic 'star the repo / go Pro' nudge.
+
+    Skips the long-running `mcp` server, whose lifetime isn't a discrete invocation."""
+    from nff.tools import nudge
+
+    subcommand = click.get_current_context().invoked_subcommand
+    nudge.maybe_show_cli(skip=(subcommand == "mcp"))
+
+
 cli.add_command(init)
 cli.add_command(compile_cmd)
 cli.add_command(flash)
 cli.add_command(monitor)
 cli.add_command(doctor)
+cli.add_command(status)
 cli.add_command(clean)
 cli.add_command(connect)
 cli.add_command(debug)
@@ -44,3 +58,4 @@ cli.add_command(deauth, name="deauth")
 cli.add_command(repair)
 cli.add_command(agent)
 cli.add_command(pi, name="pi")
+cli.add_command(power, name="power")

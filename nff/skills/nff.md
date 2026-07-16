@@ -216,6 +216,46 @@ touching hardware.
 
 ---
 
+## Energy measurement (`nff power`)
+
+Answers *"what did that OTA cost the device, in joules?"* — and lets you gate on it, so a
+firmware change that quietly doubles the energy of an OTA gets caught.
+
+Needs the **nff-power-meter** rig: an STM32 Nucleo watching a 1 Ω low-side shunt in the ESP32's
+ground return. Build and wiring in `nff-power-meter/README.md`. No PPK2, no INA219 — a resistor.
+
+```
+nff power devices                            # is a meter attached, and calibrated?
+nff power calibrate --load 100               # once, against a multimeter. Do not skip.
+nff power measure --during "nff ota ..."     # joules per OTA
+nff power measure --during "..." --max-joules 12   # regression gate: exit 1 if over
+nff power monitor                            # live mA
+```
+
+MCP tools: `power_status` (attached? calibrated?) and `power_measure` (returns
+`marginal_energy_j`, `mean_current_ma`, `peak_current_ma`, `within_budget`, …).
+
+**Read `ok` before you read the joules.** `ok: false` means no trustworthy figure was obtained,
+and the energy fields are deliberately left empty rather than reported wrong. It refuses when:
+samples were dropped; the accumulation window doesn't match the command (a lost `ZERO`); the rig
+isn't actually wired (an active drive-and-release probe, because a floating ADC pin reads a
+confident 590 mA and a plausible 4.94 V rail); or the measured command itself failed.
+
+Three constraints worth knowing before you trust a number:
+
+- **The ESP32 must not be on the PC's USB.** Its ground would short the shunt and you would read
+  ~0 mA. So `nff ota` can be profiled (WiFi, no USB) but `nff flash` and `nff monitor` cannot.
+- **An uncalibrated meter is guessing.** Breadboard contact resistance is not negligible against
+  1 Ω. `nff power calibrate` solves for the whole ground path against a multimeter reading;
+  re-run it after any rewiring.
+- **Deep sleep is not measurable on this rig** (10 µA × 1 Ω = 10 µV, well under the noise floor).
+  Active-mode energy is.
+
+`measure` reports *marginal* energy — it samples an idle baseline and subtracts it, so the number
+is what the command cost over and above the device merely being powered on.
+
+---
+
 ## Key File Locations
 
 | File | Purpose |

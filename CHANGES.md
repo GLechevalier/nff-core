@@ -8,12 +8,34 @@ The board-universal **PlatformIO backend** — previously only in the Python pro
 - **First-build package flakes self-heal.** A transient PlatformIO `package-manager-ioerror` (or a half-installed framework surfacing as a missing `pins_arduino.h`) is classified as transient, and the broken platform is pruned + reinstalled on retry.
 - **`nff clean` clears PlatformIO output too** (`nff_pio` temp root, including the heavy `.pio/build`), not just the arduino temp dir.
 
+### Local / offline mode — sign-in is no longer mandatory
+- **You don't need an nff account to compile, flash, monitor, or debug.** Those run entirely on your machine. `nff init --offline` (or `NFF_OFFLINE=1`) configures the bench with no cloud sign-in at all, and even a plain `nff init` no longer blocks on login — if the browser flow fails or times out, init continues in local mode instead of aborting. Previously init hard-exited when login failed, leaving the bench unusable.
+- **`nff doctor` treats a signed-out bench as healthy.** Sign-in is now an informational warning (`optional`), not a failed check, so a local-only setup gets a clean bill of health. Only the cloud features — `nff repair`, `nff agent`, and device onboarding — actually need an account.
+- **`nff auth login` lifts offline mode automatically.** Signing in re-enables cloud features and clears the local-only flag.
+
+### New commands
+- **`nff status`** — a read-only snapshot of the bench (build backend, detected board, MCP server up/down + URL, auth state, last successful build). Unlike `nff doctor`'s pass/fail health check, it just reports current state and always exits 0. `compile`/`flash` now record the last build artifact for it to display.
+- **`nff mcp` is now a command group.** Bare `nff mcp` still starts the server; new `nff mcp stop` / `restart` / `logs` manage the background server that `nff init` launched (with a clear message when a running server has no pidfile because it wasn't started by nff).
+- **`nff power`** — measure the energy an nff operation costs the device, in joules. Needs the **nff-power-meter** rig (an STM32 Nucleo watching a 1 Ω low-side shunt in the ESP32's ground return — no PPK2, no INA219). Subcommands: `devices` (attached? calibrated?), `calibrate` (solve the whole ground path against a multimeter reading), `selftest` (prove the shunt is wired by watching a load that moves), `set-shunt`, `measure --during "<cmd>"` (marginal joules, with `--max-joules` as a regression gate that exits 1 when over), and `monitor` (live mA). Exposed to MCP as `power_status` and `power_measure`.
+  - **Honest by construction:** `power_measure` returns `ok: false` and leaves the energy fields empty rather than reporting a wrong number when samples are dropped, the accumulation window doesn't match the command, the rig isn't actually wired (a floating ADC pin otherwise reads a confident ~590 mA), or the measured command itself failed. `nff doctor` gained an optional power-meter check that never flips the exit code.
+
+### Honest command surface
+- **Stubs are no longer announced as features.** `nff connect` and `nff ota` are unimplemented; their output and the README now say so and point at the new **`docs/ROADMAP.md`**. The README gained a **Command status** table marking every command `stable` vs `🚧 roadmap`, so nothing that doesn't work looks like it does.
+
+### Nudges
+- **Periodic "star the repo / go Pro" reminder.** After a command finishes (except the long-running `mcp` server) nff occasionally prints a one-line nudge to stderr — every 5th invocation by default. Tunable with `NFF_NUDGE_EVERY=N` and fully silenced with `NFF_NO_NUDGE=1`.
+
+### Internals & packaging
+- **Centralized config.** A single `nff/config.py` module now owns `~/.nff/config.json` (default device, backend, tokens, offline flag, last build, nudge counter, power calibration), replacing scattered reads/writes.
+- **Rust parity.** Offline mode, `nff status`, the `nff mcp` management subcommands, and the nudge live in the shipped Rust binary too, in lockstep with the Python reference.
+- **CI/packaging.** `pyproject.toml` gained the runtime libraries (`click`, `requests`, `pyserial`, `rich`, `mcp`, …) the Python *reference* package imports under `[dev]`, so `pip install -e .[dev]` + pytest no longer aborts at collection in a clean environment. Committed build cruft was removed from the repo (a stale `graphify-out/` cache, `nff.pdb`, and the large `public/videos/*.mp4`).
+
 ### Tooling
 - **`nff doctor`** shows the active backend and checks PlatformIO Core; under the PlatformIO backend a missing arduino-cli/esptool is informational, not a failure.
 - **`nff install-deps`** auto-installs PlatformIO Core.
 - **`nff init --backend <platformio|arduino>`** persists the backend and seeds the PlatformIO board id from the detected device.
 
-> **Note:** Verified end-to-end against real PlatformIO + ESP32; 105 cargo tests pass and `cargo clippy -- -D warnings` is clean. (Wokwi simulation has moved to the separate `nff-sim` package.)
+> **Note:** Verified end-to-end against real PlatformIO + ESP32; 105 cargo tests pass and `cargo clippy -- -D warnings` is clean. (Wokwi simulation has moved to the separate `nff-sim` package.) New Python test suites cover config, offline `init`, nudges, and power (`tests/test_config.py`, `tests/test_init.py`, `tests/test_nudge.py`, `tests/test_power.py`).
 
 ---
 

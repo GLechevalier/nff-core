@@ -5,9 +5,10 @@ use std::io::{self, BufRead, Write};
 use which::which;
 
 pub fn run(args: &InitArgs) -> Result<()> {
-    // Sign in first — the MCP tools are gated behind a valid token, so a bench that
-    // isn't logged in can't do anything. Aborts init if login fails.
-    require_login()?;
+    // Sign-in is optional: local build/flash/monitor/debug need no account, and the MCP
+    // tools aren't gated by default. Only cloud features (repair, agent, onboarding) need a
+    // token — so never block init on login.
+    resolve_login(args.offline)?;
 
     // Persist an explicit backend choice up front so the rest of init — and every
     // later build — honours it (default stays platformio).
@@ -83,27 +84,29 @@ pub fn run(args: &InitArgs) -> Result<()> {
     Ok(())
 }
 
-/// Login is mandatory: the MCP tools are gated behind it, and signing in is how nff
-/// counts who's using it. Block until login succeeds (with one retry) or abort init —
-/// there's no point configuring a bench whose tools stay locked.
-fn require_login() -> Result<()> {
-    if ensure_logged_in() {
+/// Decide how to handle sign-in without ever blocking init. Offline mode (the `--offline`
+/// flag or a truthy `NFF_OFFLINE`) skips the browser flow entirely and marks the bench local.
+/// Otherwise we attempt a browser login, but a failure/timeout falls back to local mode
+/// instead of aborting — compile/flash/monitor/debug work without an account.
+fn resolve_login(offline_flag: bool) -> Result<()> {
+    if offline_flag || config::is_offline() {
+        // Persist the choice so subsequent `nff init` runs stay quiet and `nff doctor`/
+        // `nff status` can report the mode.
+        let _ = config::set_offline(true);
+        println!(
+            "  Offline mode — local build/flash/monitor/debug work without an account."
+        );
+        println!(
+            "  Cloud features (repair, agent, device onboarding) stay disabled until you run `nff auth login`."
+        );
         return Ok(());
     }
-    print!("\nLogin is required to use nff. Try again? [Y/n]: ");
-    io::stdout().flush()?;
-    let line = io::stdin()
-        .lock()
-        .lines()
-        .next()
-        .unwrap_or_else(|| Ok(String::new()))?;
-    let ans = line.trim().to_lowercase();
-    if (ans.is_empty() || ans == "y" || ans == "yes") && ensure_logged_in() {
-        return Ok(());
+    if !ensure_logged_in() {
+        println!(
+            "  Continuing in local mode — run `nff auth login` later to enable cloud features (repair, agent)."
+        );
     }
-    println!("\nCouldn't sign in — nff's tools stay locked until you're logged in.");
-    println!("Run `nff auth login` once you're online, then re-run `nff init`.");
-    std::process::exit(1);
+    Ok(())
 }
 
 /// Make sure we hold a platform token; trigger the browser login if not. Mirrors the

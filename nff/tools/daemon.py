@@ -6,11 +6,14 @@ detached background process. It stays up until the machine reboots or the proces
 killed; `nff doctor` detects a down server.
 """
 
+import os
+import signal
 import socket
 import subprocess
 import sys
 import urllib.request
 from pathlib import Path
+from typing import Optional
 
 from nff import config
 
@@ -19,6 +22,10 @@ DEFAULT_PORT = 3010
 
 # Detached background process logs here so a crash is diagnosable.
 LOG_PATH = config.CONFIG_DIR / "mcp.log"
+# The background server records its PID here so `nff mcp stop`/`restart` can find it.
+# A bound port only proves *something* is listening; the pidfile is what lets us stop
+# specifically the process nff spawned.
+PID_PATH = config.CONFIG_DIR / "mcp.pid"
 
 
 def is_running(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT) -> bool:
@@ -73,10 +80,13 @@ def start_background(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT) -> bool
         kwargs["close_fds"] = True
 
     try:
-        subprocess.Popen(cmd, **kwargs)
+        proc = subprocess.Popen(cmd, **kwargs)
     except Exception:
         log.close()
         return False
+
+    # The spawned child *is* the server process, so its PID is what `stop` kills.
+    _write_pid(proc.pid)
 
     # Give uvicorn a moment to bind, then confirm.
     for _ in range(30):
@@ -84,6 +94,66 @@ def start_background(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT) -> bool
             return True
         _sleep(0.1)
     return is_running(host, port)
+
+
+def stop() -> bool:
+    """Stop the background MCP server via its recorded PID. Returns True if a process
+    was signalled, False if there was no pidfile to act on (e.g. the server was started
+    manually in the foreground, or nothing is running). Removes the pidfile either way."""
+    pid = _read_pid()
+    if pid is None:
+        return False
+    killed = _kill_pid(pid)
+    try:
+        PID_PATH.unlink()
+    except OSError:
+        pass
+    return killed
+
+
+def restart(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT) -> bool:
+    """Stop (if running) then start a fresh detached server. Returns whether it's up after."""
+    stop()
+    # Wait for the old process to release the port before rebinding.
+    for _ in range(30):
+        if not is_running(host, port):
+            break
+        _sleep(0.1)
+    return start_background(host, port)
+
+
+def _kill_pid(pid: int) -> bool:
+    """Force-kill a PID using the platform's own tool — no extra dependency."""
+    if sys.platform == "win32":
+        try:
+            subprocess.run(
+                ["taskkill", "/PID", str(pid), "/F"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+            )
+            return True
+        except Exception:
+            return False
+    try:
+        os.kill(pid, signal.SIGTERM)
+        return True
+    except OSError:
+        return False
+
+
+def _write_pid(pid: int) -> None:
+    try:
+        PID_PATH.write_text(str(pid), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def _read_pid() -> Optional[int]:
+    try:
+        return int(PID_PATH.read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        return None
 
 
 def _sleep(seconds: float) -> None:
@@ -94,3 +164,7 @@ def _sleep(seconds: float) -> None:
 
 def log_path() -> Path:
     return LOG_PATH
+
+
+def pid_path() -> Path:
+    return PID_PATH

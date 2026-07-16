@@ -1,0 +1,96 @@
+name: CI
+
+# Fast pre-merge gate, publish-free. The publish path (bump → wheels → binaries → PyPI + GitHub
+# Release) lives in release.yml and fires on push to main only; this workflow runs the cross-platform
+# test/lint gate that release.yml lacks. main is deliberately excluded here — release.yml's `test`
+# job already runs cargo test there before publishing, so re-running it would be redundant.
+on:
+  pull_request:
+  push:
+    branches-ignore: [main]
+
+jobs:
+  # ── Rust: the shipped product — cargo test + clippy across all three OSes ────
+  rust:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - name: Cache Cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            nff-rs/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('nff-rs/**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+      - name: Install system dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libudev-dev
+      - name: cargo test
+        run: cargo test
+        working-directory: nff-rs
+      - name: cargo clippy (deny warnings)
+        run: cargo clippy --all-targets -- -D warnings
+        working-directory: nff-rs
+
+  # ── Python: the reference implementation — pytest across all three OSes ──────
+  python:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install system dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libudev-dev
+      - name: Install the package with dev extras
+        run: pip install -e ".[dev]"
+      - name: pytest
+        run: pytest
+
+  # ── Windows install smoke test (#9) ─────────────────────────────────────────
+  # A Windows wheel is built and published by release.yml, but nothing there runs it.
+  # Build the wheel, pip-install it, and confirm the installed `nff` command runs — this
+  # is what catches wheel-tag / MSVC-runtime / PATH / entry-point breakage on Windows.
+  windows-smoke:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the Windows wheel
+        uses: PyO3/maturin-action@v1
+        with:
+          # Pin an exact maturin so the action downloads that release directly instead of
+          # resolving `maturin>=1.7,<2.0` from pyproject via GitHub's releases API — that
+          # resolution call intermittently 500s (GitHub's "Unicorn" error page). Bump manually.
+          maturin-version: v1.13.3
+          command: build
+          args: --release --out dist
+          target: x86_64-pc-windows-msvc
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install the built wheel
+        shell: pwsh
+        run: pip install --no-index --find-links dist nff
+      - name: nff --version (hard gate)
+        run: nff --version
+      # `nff doctor` exits 1 on a bare runner (no PlatformIO, no config, MCP server down are
+      # non-optional failures). Run it for signal only — it surfaces first-run toolchain state in
+      # the log without failing the canary. The wheel installing + `nff --version` running is the
+      # actual pass condition.
+      - name: nff doctor (informational)
+        continue-on-error: true
+        run: nff doctor

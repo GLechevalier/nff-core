@@ -37,6 +37,30 @@ _DEFAULT = {
     # package cache (else PATH), openocd_config from the chip's built-in-JTAG board file,
     # and interface for an external JTAG probe (classic esp32 / esp32s2 need this).
     "debug": {"openocd_path": None, "gdb_path": None, "openocd_config": None, "interface": None},
+    # Energy measurement (`nff power` / the power_* MCP tools) via the nff-power-meter
+    # Nucleo. The HOST owns the calibration and pushes it to the meter on every connect,
+    # so the meter stays stateless across resets. shunt_uohm is the *effective* resistance
+    # of the ground path — resistor tolerance, ADC gain error and breadboard contact
+    # resistance are not separable, so `nff power calibrate` solves for all of them at once
+    # against a multimeter reading. `calibrated` stays False until it has been run, and
+    # `measure` warns loudly while it is.
+    "power": {
+        "port": None,
+        "shunt_uohm": 1000000,  # 1 Ω nominal
+        "kdiv_milli": 2000,  # 1k/1k supply divider -> ratio 2.000
+        "vdda_mv": 3300,
+        "calibrated": False,
+    },
+    # Local/offline mode: `nff init` skips the cloud sign-in and only local
+    # build/flash/monitor/debug are enabled. Sticky once set; cleared on a successful login.
+    "offline": False,
+    # The most recent successful build artifact, recorded by `compile`/`flash` so
+    # `nff status` can report what's on the bench. kind = "elf" or "bin"; built_at is
+    # unix seconds. None until the first successful build.
+    "last_build": None,
+    # Count of CLI invocations seen, used to pace the "star the repo / go Pro" nudge
+    # (shown every Nth run). Persisted so the cadence survives across CLI processes.
+    "nudge_count": 0,
 }
 
 
@@ -217,6 +241,65 @@ def set_build_board(board) -> None:
     save(data)
 
 
+def set_offline(offline: bool) -> None:
+    data = load() if exists() else copy.deepcopy(_DEFAULT)
+    data["offline"] = bool(offline)
+    data.setdefault("version", "1")
+    save(data)
+
+
+def set_last_build(path: str, kind: str, built_at: int) -> None:
+    """Record the most recent successful build artifact for `nff status` to report."""
+    data = load() if exists() else copy.deepcopy(_DEFAULT)
+    data["last_build"] = {"path": path, "kind": kind, "built_at": int(built_at)}
+    data.setdefault("version", "1")
+    save(data)
+
+
+def get_last_build() -> dict:
+    """The most recent successful build artifact, or {} if none recorded yet."""
+    try:
+        return load().get("last_build") or {}
+    except ConfigError:
+        return {}
+
+
+def bump_nudge_count() -> int:
+    """Increment and persist the CLI nudge counter, returning the new value. Used to pace the
+    "star the repo / go Pro" reminder (shown every Nth CLI run). Best-effort: on any config
+    read/write error it returns 0 so the caller simply skips the nudge this run."""
+    try:
+        data = load() if exists() else copy.deepcopy(_DEFAULT)
+        data["nudge_count"] = int(data.get("nudge_count") or 0) + 1
+        data.setdefault("version", "1")
+        save(data)
+        return data["nudge_count"]
+    except (ConfigError, ValueError, TypeError):
+        return 0
+
+
+def now_unix() -> int:
+    """Current unix time in seconds."""
+    import time
+
+    return int(time.time())
+
+
+def is_offline() -> bool:
+    """Whether nff is in local/offline mode: cloud sign-in is skipped and only local
+    build/flash/monitor/debug are enabled. Precedence: NFF_OFFLINE env var (truthy:
+    1/true/yes/on) → `offline` in config → False. Mirrors NFF_BUILD_BACKEND's env override."""
+    env = os.environ.get("NFF_OFFLINE", "").strip().lower()
+    if env in ("1", "true", "yes", "on"):
+        return True
+    if env in ("0", "false", "no", "off"):
+        return False
+    try:
+        return bool(load().get("offline", False))
+    except ConfigError:
+        return False
+
+
 def get_debug_config() -> dict:
     """On-chip debug config, merged over defaults so older config files (written before
     this section existed) still return every key — all optional overrides."""
@@ -226,3 +309,39 @@ def get_debug_config() -> dict:
         return cfg
     except ConfigError:
         return copy.deepcopy(_DEFAULT["debug"])
+
+
+def get_power_config() -> dict:
+    """Power-meter config, merged over defaults so older config files (written before this
+    section existed) still return every key."""
+    try:
+        cfg = copy.deepcopy(_DEFAULT["power"])
+        cfg.update(load().get("power", {}))
+        return cfg
+    except ConfigError:
+        return copy.deepcopy(_DEFAULT["power"])
+
+
+def set_power_calibration(shunt_uohm: int, port=None, calibrated: bool = True) -> None:
+    """Record the shunt resistance.
+
+    ``calibrated=False`` is for a value you merely *measured off the resistor* — it is better
+    than the 1 Ω default but still not the effective resistance of the ground path, which also
+    contains breadboard contact resistance (10-100 mΩ per contact, several in series, i.e. the
+    same order as the difference between a 1.0 and a 1.1 Ω resistor). Only a solve against a
+    known current earns ``calibrated=True``.
+    """
+    data = load() if exists() else copy.deepcopy(_DEFAULT)
+    data.setdefault("power", copy.deepcopy(_DEFAULT["power"]))
+    data["power"]["shunt_uohm"] = int(shunt_uohm)
+    data["power"]["calibrated"] = bool(calibrated)
+    if port:
+        data["power"]["port"] = port
+    save(data)
+
+
+def set_power_port(port) -> None:
+    data = load() if exists() else copy.deepcopy(_DEFAULT)
+    data.setdefault("power", copy.deepcopy(_DEFAULT["power"]))
+    data["power"]["port"] = port
+    save(data)

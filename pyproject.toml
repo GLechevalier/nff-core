@@ -38,6 +38,18 @@ dev = [
     "ruff",
     # On-chip debug bridge (nff/nff/tools/debug.py) drives GDB via the MI protocol.
     "pygdbmi>=0.11",
+    # Runtime libraries the Python *reference* package imports. The shipped wheel is the
+    # self-contained Rust binary and needs NO runtime deps, but importing/pytest-ing the
+    # reference modules under `nff/` does — without these, `pip install -e .[dev]` + pytest
+    # aborts at collection (ModuleNotFoundError) in a clean environment like CI.
+    "click",         # CLI framework (nff/nff/cli.py and every command)
+    "requests",      # HTTP client (auth, installer, agent, provisioning)
+    "pyserial",      # `import serial` — board enumeration + serial I/O
+    "rich",          # styled terminal output (compile/flash/power/agent)
+    "mcp",           # MCP SDK — the reference MCP server (nff/nff/mcp_server.py)
+    "httpx",         # used by the MCP transport tests (tests/test_mcp.py)
+    "uvicorn",       # ASGI server hosting the reference MCP server
+    "starlette",     # ASGI types used by the reference MCP server
 ]
 
 [tool.maturin]

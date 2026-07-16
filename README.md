@@ -67,10 +67,11 @@ arduino-cli core install esp8266:esp8266
 ```bash
 nff init                      # default PlatformIO backend (board-universal)
 nff init --backend arduino    # opt into the arduino-cli backend instead
+nff init --offline            # local-only: skip cloud sign-in entirely
 ```
 
 This single command:
-- **Signs you in** to the nff platform (browser login) — required, because the MCP tools are gated behind your account
+- **Optionally signs you in** to the nff platform (browser login) to enable cloud features (`repair`, `agent`, device onboarding). Sign-in is **not required** — if it's skipped or times out, init continues in local mode. See [Local / offline mode](#local--offline-mode) below.
 - Detects your board by USB vendor/product ID
 - Writes `~/.nff/config.json` (default device + build backend/board)
 - Installs the active backend's toolchain if missing (PlatformIO Core, or arduino-cli)
@@ -90,6 +91,17 @@ This single command:
 
 > The background server runs until you reboot or stop it. After a reboot, run `nff mcp`
 > (or just re-run `nff init`) to bring it back up — `nff doctor` will tell you if it's down.
+
+#### Local / offline mode
+
+You don't need an nff account to **compile, flash, monitor, or debug** a board — those run
+entirely on your machine. Run `nff init --offline` (or set `NFF_OFFLINE=1`) to configure the bench
+without any cloud sign-in; even a plain `nff init` no longer blocks on login — if it fails or times
+out, init just continues in local mode. `nff doctor` reports a clean bill of health for a
+local-only setup (sign-in shows as an informational warning, not a failure).
+
+Only the cloud features need an account: `nff repair`, `nff agent`, and device onboarding. Run
+`nff auth login` whenever you want to enable them — that also lifts offline mode automatically.
 
 ### 4. Verify
 
@@ -245,20 +257,47 @@ All bench tools fall back to the default device in `~/.nff/config.json` when `po
 
 ## CLI Reference
 
+### Command status
+
+What actually ships on the Rust binary today. `stable` = works; `roadmap` = present but a stub /
+not yet implemented. Full detail and the plan behind the roadmap items live in
+[docs/ROADMAP.md](docs/ROADMAP.md).
+
+| Command | State | Notes |
+|---|---|---|
+| `nff init` | stable | Detects the board, writes config, registers + starts the MCP server. Cloud sign-in is optional — use `nff init --offline` for local-only build/flash/monitor |
+| `nff compile` | stable | PlatformIO (default) + arduino backends; no board/port needed |
+| `nff flash` | stable | Compile and upload |
+| `nff monitor` | stable | Stream serial output |
+| `nff debug` | stable | On-chip debugging (OpenOCD + GDB) |
+| `nff doctor` | stable | Dependency + config health check |
+| `nff status` | stable | Snapshot: build backend, board, MCP server, auth, last build |
+| `nff clean` | stable | |
+| `nff install-deps` | stable | |
+| `nff mcp` | stable | Bare `nff mcp` starts the server; `stop` / `restart` / `logs` manage the background one |
+| `nff auth` / `deauth` | stable | Browser OAuth or headless login |
+| `nff repair` | stable | Cloud diagnosis (needs login) |
+| `nff agent` | stable | Cloud agent over SSE (needs login) |
+| `nff provision batch` | stable | Fleet batch enrollment |
+| `nff pi probe` | stable | Raspberry-Pi reachability probe |
+| `nff connect` | 🚧 roadmap | Autonomous log-analysis + repair loop — not yet implemented |
+| `nff ota` | 🚧 roadmap | Over-the-air firmware update — not yet implemented |
+
 ### Real hardware
 
 | Command | Description |
 |---|---|
-| `nff init` | Sign in, detect board, write config, register + start the MCP server |
+| `nff init` | Detect board, write config, register + start the MCP server (optionally sign in; `--offline` skips it) |
 | `nff compile <path>` | Compile a sketch to verify it builds (no board/port needed) |
 | `nff flash <path>` | Compile and upload a sketch directory |
 | `nff monitor` | Stream serial output (Ctrl+C to exit) |
-| `nff connect` | Attach to a device, continuously analyse its logs, autonomously repair detected issues |
+| `nff connect` | 🚧 (roadmap — not yet implemented) Attach to a device, continuously analyse its logs, autonomously repair detected issues |
 | `nff debug` | Live on-chip debugging (OpenOCD + GDB over JTAG/SWD); `nff debug check` reports the tools/chip without hardware, `nff debug start` opens an interactive session |
 | `nff repair` | Send captured serial/crash output to the diagnosis server for a structured root-cause |
 | `nff auth login` | Authenticate with the diagnosis server (browser OAuth or email/password) |
 | `nff doctor` | Check all dependencies and configuration |
-| `nff mcp` | Start the MCP server (streamable HTTP on `127.0.0.1:3010`; started in the background by `nff init`) |
+| `nff status` | Snapshot of the bench: build backend, detected board, MCP server up/down, auth state, and last build artifact |
+| `nff mcp` | Start the MCP server (streamable HTTP on `127.0.0.1:3010`; started in the background by `nff init`). `nff mcp stop` / `restart` / `logs` manage that background server |
 
 ```bash
 nff flash sketches/sensor_init
@@ -270,6 +309,9 @@ nff monitor --port COM10 --baud 115200 --timeout 15
 ```
 
 ### nff connect — Autonomous log analysis and repair
+
+> 🚧 **Not yet implemented** — planned. See [docs/ROADMAP.md](docs/ROADMAP.md). The design below
+> describes the intended behaviour.
 
 `nff connect` keeps a live serial connection to your device and routes each batch of output to Claude for analysis. When Claude detects an error, a hang, or a recoverable fault, it rewrites the sketch, recompiles, reflashes, and resumes monitoring — closing the repair loop without manual intervention.
 
@@ -412,7 +454,7 @@ Skill files live at `nff/skills/` (the source of truth — edit them there) so t
 
 ```
 nff/
-├── nff/                         # Python package — the LIVE implementation
+├── nff/                         # Python package — reference / prototyping implementation
 │   ├── cli.py                   # Click CLI — wires every subcommand
 │   ├── config.py                # ~/.nff/config.json read/write
 │   ├── mcp_server.py            # streamable-HTTP MCP server (Bearer-authed /mcp)

@@ -1,15 +1,25 @@
-"""nff mcp — launch the MCP server (streamable-HTTP transport)."""
+"""nff mcp — launch the MCP server (streamable-HTTP transport) or manage it."""
 
 import asyncio
 
 import click
 
 
-@click.command("mcp")
+@click.group("mcp", invoke_without_command=True)
 @click.option("--host", default="127.0.0.1", show_default=True, help="Bind address")
 @click.option("--port", default=3010, type=int, show_default=True, help="Bind port")
-def mcp(host, port):
-    """Start the nff MCP server (HTTP on host:port/mcp)."""
+@click.pass_context
+def mcp(ctx, host, port):
+    """Start the nff MCP server (HTTP on host:port/mcp), or manage it.
+
+    Run bare `nff mcp` to start it; use `stop`/`restart`/`logs` to manage the
+    background server that `nff init` launched."""
+    ctx.obj = {"host": host, "port": port}
+    if ctx.invoked_subcommand is None:
+        _start(host, port)
+
+
+def _start(host, port):
     from nff import mcp_server
     from nff.tools import daemon
 
@@ -19,3 +29,49 @@ def mcp(host, port):
         click.echo(f"nff MCP server already running on http://{host}:{port}/mcp")
         return
     asyncio.run(mcp_server.run_server(host=host, port=port))
+
+
+@mcp.command("stop")
+def stop():
+    """Stop the background MCP server (started by `nff init`)."""
+    from nff.tools import daemon
+
+    was_running = daemon.is_running()
+    if daemon.stop():
+        click.echo("nff MCP server stopped.")
+    elif was_running:
+        click.echo(
+            f"nff MCP server is running but wasn't started by nff "
+            f"(no pidfile at {daemon.pid_path()}) — stop it manually."
+        )
+    else:
+        click.echo("nff MCP server is not running.")
+
+
+@mcp.command("restart")
+@click.pass_context
+def restart(ctx):
+    """Stop then start a fresh background MCP server."""
+    from nff.tools import daemon
+
+    host, port = ctx.obj["host"], ctx.obj["port"]
+    if daemon.restart(host, port):
+        click.echo(f"nff MCP server restarted on http://{host}:{port}/mcp")
+    else:
+        raise click.ClickException(f"failed to restart MCP server; see {daemon.log_path()}")
+
+
+@mcp.command("logs")
+@click.option("--lines", "-n", "lines", default=None, type=int, help="Show only the last N lines.")
+def logs(lines):
+    """Print the background MCP server's log."""
+    from nff.tools import daemon
+
+    path = daemon.log_path()
+    try:
+        content = path.read_text(encoding="utf-8")
+    except OSError:
+        raise click.ClickException(f"no MCP log at {path} yet")
+    if lines is not None:
+        content = "\n".join(content.splitlines()[-lines:])
+    click.echo(content)

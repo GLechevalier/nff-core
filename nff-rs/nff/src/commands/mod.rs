@@ -14,3 +14,4 @@ pub mod ota;
 pub mod pi;
 pub mod provision;
 pub mod repair;
+pub mod status;

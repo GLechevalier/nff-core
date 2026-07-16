@@ -16,6 +16,8 @@ pub fn run_login(args: &AuthLoginArgs) -> Result<()> {
         // Headless / CI path — direct credential exchange
         let tokens = tools::auth::direct_login(&server_url, email, password)?;
         tools::config::set_diagnosis_tokens(&tokens.access_token, &tokens.refresh_token)?;
+        // Signing in re-enables cloud features — leave local/offline mode.
+        let _ = tools::config::set_offline(false);
         println!("Authenticated as {email}");
         return Ok(());
     }
@@ -41,6 +43,8 @@ pub fn run_login(args: &AuthLoginArgs) -> Result<()> {
     let tokens = tools::auth::wait_for_callback(listener, 300)?;
 
     tools::config::set_diagnosis_tokens(&tokens.access_token, &tokens.refresh_token)?;
+    // Signing in re-enables cloud features — leave local/offline mode.
+    let _ = tools::config::set_offline(false);
     println!("Authenticated successfully.");
     Ok(())
 }

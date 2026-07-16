@@ -106,6 +106,10 @@ jobs:
       - name: Build wheel
         uses: PyO3/maturin-action@v1
         with:
+          # Pin an exact maturin so the action downloads that release directly instead of
+          # resolving `maturin>=1.7,<2.0` from pyproject via GitHub's releases API — that
+          # resolution call intermittently 500s (GitHub's "Unicorn" error page). Bump manually.
+          maturin-version: v1.13.3
           command: build
           args: --release --out dist
           target: ${{ matrix.target }}

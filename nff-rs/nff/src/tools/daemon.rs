@@ -27,6 +27,23 @@ pub fn log_path() -> PathBuf {
     nff_dir().join("mcp.log")
 }
 
+/// The background server records its PID here so `nff mcp stop`/`restart` can find it.
+/// A bound port only proves *something* is listening; the pidfile is what lets us stop
+/// specifically the process nff spawned.
+pub fn pid_path() -> PathBuf {
+    nff_dir().join("mcp.pid")
+}
+
+fn write_pid(pid: u32) {
+    let _ = fs::write(pid_path(), pid.to_string());
+}
+
+fn read_pid() -> Option<u32> {
+    fs::read_to_string(pid_path())
+        .ok()
+        .and_then(|s| s.trim().parse::<u32>().ok())
+}
+
 /// True if a server is listening on the MCP port. A bound port means the server is up
 /// (and that a fresh `nff mcp` would fail to bind anyway), so this is the signal that
 /// guards against double-starting. Use `health_ok()` to confirm it's specifically ours.
@@ -103,8 +120,10 @@ pub fn start_background(host: &str, port: u16) -> bool {
         cmd.process_group(0);
     }
 
-    if cmd.spawn().is_err() {
-        return false;
+    match cmd.spawn() {
+        // The spawned child *is* the server process, so its PID is what `stop` kills.
+        Ok(child) => write_pid(child.id()),
+        Err(_) => return false,
     }
 
     // Give the server a moment to bind, then confirm.
@@ -115,4 +134,51 @@ pub fn start_background(host: &str, port: u16) -> bool {
         std::thread::sleep(Duration::from_millis(100));
     }
     is_running(host, port)
+}
+
+/// Stop the background MCP server via its recorded PID. Returns `true` if a process was
+/// signalled, `false` if there was no pidfile to act on (e.g. the server was started
+/// manually in the foreground, or nothing is running). Removes the pidfile either way.
+pub fn stop() -> bool {
+    let pid = match read_pid() {
+        Some(p) => p,
+        None => return false,
+    };
+    let killed = kill_pid(pid);
+    let _ = fs::remove_file(pid_path());
+    killed
+}
+
+/// Stop (if running) then start a fresh detached server. Returns whether it's up after.
+pub fn restart(host: &str, port: u16) -> bool {
+    stop();
+    // Wait for the old process to release the port before rebinding.
+    for _ in 0..30 {
+        if !is_running(host, port) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    start_background(host, port)
+}
+
+/// Force-kill a PID using the platform's own tool — avoids pulling in a signals crate.
+fn kill_pid(pid: u32) -> bool {
+    #[cfg(windows)]
+    let mut cmd = {
+        let mut c = Command::new("taskkill");
+        c.args(["/PID", &pid.to_string(), "/F"]);
+        c
+    };
+    #[cfg(unix)]
+    let mut cmd = {
+        let mut c = Command::new("kill");
+        c.arg(pid.to_string());
+        c
+    };
+    cmd.stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
 }

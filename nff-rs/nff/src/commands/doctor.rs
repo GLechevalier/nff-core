@@ -173,14 +173,23 @@ fn check_device() -> Check {
 }
 
 fn check_login() -> Check {
-    // Signed in to the nff platform? The MCP tools are gated behind this token.
+    // Sign-in is optional — local build/flash/monitor/debug need no account. Only cloud
+    // features (repair, agent) do, so a signed-out bench is a warning, not a failure.
     let signed_in = config::load()
         .map(|c| c.diagnosis.access_token.is_some())
         .unwrap_or(false);
     if signed_in {
         Check::ok("Signed in to the nff platform")
+    } else if config::is_offline() {
+        Check::warn(
+            "Local/offline mode — cloud features disabled",
+            "Run `nff auth login` to enable repair + agent",
+        )
     } else {
-        Check::fail("Not signed in", "Run `nff auth login` (or `nff init`) to sign in")
+        Check::warn(
+            "Not signed in — cloud features (repair, agent) disabled",
+            "Run `nff auth login` to enable them (not needed for local build/flash/monitor)",
+        )
     }
 }
 
@@ -201,31 +210,40 @@ fn check_mcp_server() -> Check {
 }
 
 fn check_claude_desktop() -> Check {
+    // Claude integration is a convenience, not a local-hardware capability — build/flash/
+    // monitor/debug work without it. So a missing/incomplete registration is a warning, not
+    // a failure. (The `claude mcp add --transport http` flow nff init uses registers with the
+    // Claude Code CLI, which does not populate the legacy Claude Desktop config below.)
     let cfg_path = dirs::home_dir()
         .unwrap_or_default()
         .join(".claude")
         .join("claude_desktop_config.json");
 
     if !cfg_path.exists() {
-        return Check::fail("Claude Desktop config not found", "Run: nff init");
+        return Check::warn(
+            "Claude Desktop config not found (fine if you use the Claude Code CLI)",
+            "Run `nff init` to register, or add nff to Claude manually",
+        );
     }
     let raw = match std::fs::read_to_string(&cfg_path) {
         Ok(r) => r,
-        Err(e) => return Check::fail(format!("Claude Desktop config unreadable: {e}"), ""),
+        Err(e) => {
+            return Check::warn(format!("Claude Desktop config unreadable: {e}"), "")
+        }
     };
     let data: serde_json::Value = match serde_json::from_str(&raw) {
         Ok(v) => v,
         Err(e) => {
-            return Check::fail(
+            return Check::warn(
                 format!("Claude Desktop config invalid JSON: {e}"),
                 "Fix the file manually",
             )
         }
     };
     if data["mcpServers"]["nff"].is_null() {
-        return Check::fail(
-            "nff not registered in Claude Desktop config",
-            "Run: nff init",
+        return Check::warn(
+            "nff not in Claude Desktop config (fine if you use the Claude Code CLI)",
+            "Run `nff init` to register",
         );
     }
     Check::ok(format!(
