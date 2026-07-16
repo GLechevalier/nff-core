@@ -57,21 +57,23 @@ pub fn nudge_for_count(count: u64, n: u64) -> Option<String> {
     Some(message_for(count / n - 1))
 }
 
-/// CLI hook: after a command finishes, maybe print a nudge to stderr. Skips when disabled, when
-/// not attended by a human (piped/redirected output stays clean for agents and scripts), and when
-/// `skip` is set — the caller passes `true` for the long-running `mcp` server, whose lifetime
-/// isn't a discrete "invocation". Increments the persisted counter each attended run so cadence
-/// tracks real interactive use.
+/// CLI hook: after a command finishes, maybe print a nudge to stderr. Skips when disabled and
+/// when `skip` is set — the caller passes `true` for the long-running `mcp` server, whose
+/// lifetime isn't a discrete "invocation". The message goes to stderr (so it never corrupts
+/// stdout / machine-readable output) and is deliberately NOT gated on a TTY: nff is usually
+/// driven by Claude Code, which runs `nff` as a subprocess (no TTY) and relays stderr back to
+/// the user — the whole point of the nudge. Rate-limiting (every Nth run) plus `NFF_NO_NUDGE`
+/// keep it from being noisy. Increments the persisted counter each run so cadence tracks use.
 pub fn maybe_show_cli(skip: bool) {
-    // We print to stderr, so gate on stderr being a terminal — this still shows the nudge when
-    // stdout is redirected (e.g. `nff compile > out.txt`) but stays silent for pipes/agents.
-    if skip || disabled() || !console::user_attended_stderr() {
+    if skip || disabled() {
         return;
     }
     let count = crate::tools::config::bump_nudge_count();
     if let Some(msg) = nudge_for_count(count, every()) {
+        // cyan reads as a bright blue and stays legible on light and dark terminals; console
+        // auto-strips the color when stderr isn't a terminal, so piped output stays clean.
         eprintln!();
-        eprintln!("{}", console::style(msg).dim());
+        eprintln!("{}", console::style(msg).cyan());
     }
 }
 

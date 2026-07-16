@@ -69,29 +69,34 @@ def test_disabled_reads_truthy_env(monkeypatch):
 # maybe_show_cli() — gating
 # ---------------------------------------------------------------------------
 
-def test_maybe_show_cli_silent_when_not_a_tty(monkeypatch, capsys):
-    # Not attended (pytest captures stderr → isatty() False) → nothing printed, no bump.
-    called = {"bump": False}
-    monkeypatch.setattr("nff.config.bump_nudge_count",
-                        lambda: called.__setitem__("bump", True) or 1)
-    monkeypatch.setenv("NFF_NUDGE_EVERY", "1")
-    nudge.maybe_show_cli(skip=False)
-    assert capsys.readouterr().err == ""
-    assert called["bump"] is False
-
-
-def test_maybe_show_cli_shows_when_attended(monkeypatch, capsys):
-    monkeypatch.setattr("sys.stderr.isatty", lambda: True)
+def test_maybe_show_cli_shows_even_without_a_tty(monkeypatch, capsys):
+    # No TTY gate: the nudge must show (to stderr) even when stderr is captured/piped, so it
+    # reaches Claude Code when it drives nff as a subprocess.
     monkeypatch.setattr("nff.config.bump_nudge_count", lambda: 1)
     monkeypatch.setenv("NFF_NUDGE_EVERY", "1")
     monkeypatch.delenv("NFF_NO_NUDGE", raising=False)
     nudge.maybe_show_cli(skip=False)
-    assert "Star the repo" in capsys.readouterr().err
+    captured = capsys.readouterr()
+    assert "Star the repo" in captured.err
+    assert captured.out == ""  # never on stdout
 
 
 def test_maybe_show_cli_respects_skip(monkeypatch, capsys):
-    monkeypatch.setattr("sys.stderr.isatty", lambda: True)
-    monkeypatch.setattr("nff.config.bump_nudge_count", lambda: 1)
+    called = {"bump": False}
+    monkeypatch.setattr("nff.config.bump_nudge_count",
+                        lambda: called.__setitem__("bump", True) or 1)
     monkeypatch.setenv("NFF_NUDGE_EVERY", "1")
     nudge.maybe_show_cli(skip=True)
     assert capsys.readouterr().err == ""
+    assert called["bump"] is False  # skipped before touching the counter
+
+
+def test_maybe_show_cli_respects_no_nudge_env(monkeypatch, capsys):
+    called = {"bump": False}
+    monkeypatch.setattr("nff.config.bump_nudge_count",
+                        lambda: called.__setitem__("bump", True) or 1)
+    monkeypatch.setenv("NFF_NUDGE_EVERY", "1")
+    monkeypatch.setenv("NFF_NO_NUDGE", "1")
+    nudge.maybe_show_cli(skip=False)
+    assert capsys.readouterr().err == ""
+    assert called["bump"] is False

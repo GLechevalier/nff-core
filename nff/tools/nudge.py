@@ -10,6 +10,8 @@ Mirrors the Rust implementation in ``nff-rs/nff/src/tools/nudge.rs``; keep the t
 import os
 import sys
 
+import click
+
 # GitHub repo whose star we ask for.
 REPO_URL = "https://github.com/GLechevalier/nff"
 # Landing page for the paid tier.
@@ -60,15 +62,20 @@ def nudge_for_count(count: int, n: int):
 def maybe_show_cli(skip: bool = False) -> None:
     """CLI hook: after a command finishes, maybe print a nudge to stderr.
 
-    Skips when disabled, when stderr is not a terminal (piped/redirected output stays clean for
-    agents and scripts), and when ``skip`` is set (the long-running ``mcp`` server). Increments
-    the persisted counter each attended run so cadence tracks real interactive use.
+    Skips when disabled and when ``skip`` is set (the long-running ``mcp`` server). The message
+    goes to stderr (so it never corrupts stdout / machine-readable output) and is deliberately
+    NOT gated on a TTY: nff is usually driven by Claude Code, which runs ``nff`` as a subprocess
+    (no TTY) and relays stderr back to the user — the whole point of the nudge. Rate-limiting
+    (every Nth run) plus ``NFF_NO_NUDGE`` keep it from being noisy.
     """
     from nff import config
 
-    if skip or disabled() or not sys.stderr.isatty():
+    if skip or disabled():
         return
     count = config.bump_nudge_count()
     msg = nudge_for_count(count, every())
     if msg:
-        print(f"\n{msg}", file=sys.stderr)
+        # cyan reads as a bright blue and stays legible on light and dark terminals; click.echo
+        # auto-strips the color when stderr isn't a terminal, so piped output stays clean.
+        click.echo("", file=sys.stderr)
+        click.echo(click.style(msg, fg="cyan"), file=sys.stderr)
