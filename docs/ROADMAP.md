@@ -128,32 +128,36 @@ already give, called up front in `flash` (both languages).
 
 ---
 
-## P3 — CI, Windows, security (market-readiness)
+## P3 — CI, Windows, security (market-readiness) ✅ done
 
-### 8. Split CI from release
-`.github/workflows/release.yml` is the only workflow: it triggers on **push to main only**
-(no PR CI), runs **`cargo test` on ubuntu only**, has **no `pytest`** and **no clippy gate**, yet
+### 8. Split CI from release — **shipped**
+`.github/workflows/release.yml` used to be the only workflow: it triggers on **push to main only**
+(no PR CI), runs **`cargo test` on ubuntu only**, had **no `pytest`** and **no clippy gate**, yet
 every main push auto-publishes to PyPI.
-- Add `ci.yml` on `pull_request` + push: `cargo test` **and** `cargo clippy -- -D warnings`
-  (currently only a manual gate per `CLAUDE.md`) across a `{ubuntu, windows, macos}` matrix.
-- Add `pytest` for the Python package as long as it is maintained.
-- Keep `release.yml` for the publish path only.
+- New `.github/workflows/ci.yml` runs on `pull_request` + push (`branches-ignore: [main]`, since
+  `release.yml`'s `test` job already covers main before publishing):
+  - `rust` job — `cargo test` **and** `cargo clippy --all-targets -- -D warnings` (promotes the
+    manual clippy gate from `CLAUDE.md` into an enforced check) across a `{ubuntu, windows, macos}`
+    matrix.
+  - `python` job — `pytest` across the same 3-OS matrix (hardware-free; `tests/conftest.py` isolates
+    config to `tmp_path`).
+- `release.yml` is unchanged — it stays the publish-only path.
 
-### 9. Reproduce and fix the Windows install
+### 9. Reproduce and fix the Windows install — **shipped**
 The reviewer tried Windows first and had to fall back to Ubuntu. A Windows wheel *is* built, but
-nothing in CI runs on Windows. Add a Windows CI job that does `pip install` of the built wheel,
-then `nff --version` + `nff doctor` as a smoke test. `tools/installer.rs` already handles the
-Windows PATH via `winreg`; the failure is most likely first-run toolchain install, which the smoke
-test will surface.
+nothing in CI ran on Windows. `ci.yml`'s `windows-smoke` job now builds the wheel with
+`maturin-action`, `pip install`s it, and runs **`nff --version` as a hard gate** — this catches the
+wheel-tag / MSVC-runtime / PATH / entry-point breakage the reviewer hit. `nff doctor` runs
+`continue-on-error` (informational): it exits 1 on a bare runner (no PlatformIO/config/MCP server),
+so it surfaces first-run toolchain state in the log without failing the canary.
 
-### 10. Security posture (CRA-aware)
-Document in `SECURITY.md`:
-- the MCP server binds `127.0.0.1` only;
+### 10. Security posture (CRA-aware) — **shipped**
+`SECURITY.md` now documents the MCP-server security contract:
+- the MCP server binds `127.0.0.1` only (`/health` always unauthenticated);
 - the Bearer gate (`NFF_MCP_REQUIRE_AUTH`, OFF by default per `CLAUDE.md`) and when to enable it;
-- an explicit "do not expose the MCP server beyond localhost without authentication" warning.
-
-Note EU Cyber Resilience Act (CRA) relevance if `nff` is ever distributed as a market product —
-a tool that talks to real hardware will eventually need a clear security contract.
+- an explicit "do not expose the MCP server beyond localhost without authentication" warning;
+- an EU Cyber Resilience Act (CRA) note — a tool that talks to real hardware needs a clear security
+  contract if ever distributed as a market product.
 
 ---
 
@@ -163,4 +167,4 @@ a tool that talks to real hardware will eventually need a clear security contrac
    (Done except purging the tracked demo videos — see P0 #3.)
 2. **P1 #4** ✅ — the offline mode. Changes the product's first impression the most.
 3. **P2 #5–7** ✅ — `nff status`, `nff mcp` subcommands, better error messages.
-4. **P3** — CI split, Windows smoke test, security doc. ← next
+4. **P3** ✅ — CI split, Windows smoke test, security doc.
