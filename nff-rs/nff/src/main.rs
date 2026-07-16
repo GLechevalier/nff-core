@@ -12,6 +12,11 @@ use cli::{
 fn main() {
     let cli = Cli::parse();
 
+    // `nff mcp` runs (or manages) the long-lived server rather than a discrete one-shot command,
+    // so it never counts toward or shows the periodic nudge. (matches! borrows, so `cli.command`
+    // is still available for the dispatch below.)
+    let skip_nudge = matches!(cli.command, Commands::Mcp(_));
+
     let result = match cli.command {
         Commands::Init(args) => commands::init::run(&args),
         Commands::Compile(args) => commands::compile::run(&args),
@@ -65,6 +70,10 @@ fn main() {
             }),
         },
     };
+
+    // Periodic "star the repo / go Pro" nudge — shown on stderr every Nth attended CLI run,
+    // regardless of whether the command succeeded.
+    tools::nudge::maybe_show_cli(skip_nudge);
 
     if let Err(e) = result {
         eprintln!("error: {e}");

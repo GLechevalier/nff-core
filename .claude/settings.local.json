@@ -24,7 +24,8 @@
       "PowerShell(cargo clippy *)",
       "PowerShell(python -m pytest tests/test_boards.py -q 2>&1 | Select-Object -Last 40)",
       "PowerShell(python -m pytest tests/test_mcp.py tests/test_init.py -q 2>&1 | Select-Object -Last 40)",
-      "PowerShell(cargo build *)"
+      "PowerShell(cargo build *)",
+      "PowerShell(nff monitor *)"
     ]
   },
   "enabledMcpjsonServers": [

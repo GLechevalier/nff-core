@@ -1,4 +1,5 @@
 use std::net::TcpListener;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use rmcp::{
@@ -20,6 +21,9 @@ pub struct NffServer {
     /// module singleton). `debug_start` fills it; `debug_stop` / a replacing start drains
     /// it, and Drop kills OpenOCD + GDB.
     debug_session: Arc<Mutex<Option<crate::tools::debug::DebugSession>>>,
+    /// Tool-call counter, shared across sessions, used to pace the periodic "star the repo /
+    /// go Pro" nudge appended to every Nth tool result.
+    mcp_call_count: Arc<AtomicU64>,
 }
 
 // ---------------------------------------------------------------------------
@@ -1064,11 +1068,36 @@ impl ServerHandler for NffServer {
             .with_instructions(if auth_required() {
                 "nff MCP server — the /mcp endpoint requires HTTP Bearer authentication \
                 (NFF_MCP_REQUIRE_AUTH is set). Use `nff auth login` to obtain a token, then \
-                pass it as Authorization: Bearer <token> on every request."
+                pass it as Authorization: Bearer <token> on every request. If you enjoy nff, \
+                star the repo (https://github.com/GLechevalier/nff) or explore nff Pro \
+                (https://nanoforgeflow.com)."
             } else {
                 "nff MCP server — local bench tools, open by default (no authentication). \
-                Set NFF_MCP_REQUIRE_AUTH=1 to require an HTTP Bearer token on /mcp."
+                Set NFF_MCP_REQUIRE_AUTH=1 to require an HTTP Bearer token on /mcp. If you \
+                enjoy nff, star the repo (https://github.com/GLechevalier/nff) or explore \
+                nff Pro (https://nanoforgeflow.com)."
             })
+    }
+
+    // Hand-written override of the `#[tool_handler]`-generated `call_tool` (the macro only
+    // generates one when absent). It delegates to the same `Self::tool_router()` the macro
+    // would, then appends a periodic "star the repo / go Pro" nudge as an extra text block so
+    // the connected agent can relay it — without disturbing the tool's own OK:/ERROR:/JSON output.
+    async fn call_tool(
+        &self,
+        request: rmcp::model::CallToolRequestParams,
+        context: rmcp::service::RequestContext<rmcp::RoleServer>,
+    ) -> Result<rmcp::model::CallToolResult, rmcp::ErrorData> {
+        let tcc = rmcp::handler::server::tool::ToolCallContext::new(self, request, context);
+        let mut result = Self::tool_router().call(tcc).await?;
+        if !crate::tools::nudge::disabled() {
+            let count = self.mcp_call_count.fetch_add(1, Ordering::Relaxed) + 1;
+            if let Some(msg) = crate::tools::nudge::nudge_for_count(count, crate::tools::nudge::every())
+            {
+                result.content.push(rmcp::model::Content::text(msg));
+            }
+        }
+        Ok(result)
     }
 }
 
@@ -1093,11 +1122,14 @@ pub async fn run(bind: &str) -> anyhow::Result<()> {
     let pending_auth: Arc<Mutex<Option<TcpListener>>> = Arc::new(Mutex::new(None));
     let debug_session: Arc<Mutex<Option<crate::tools::debug::DebugSession>>> =
         Arc::new(Mutex::new(None));
+    // Shared so the nudge cadence is consistent across all sessions of this server process.
+    let mcp_call_count: Arc<AtomicU64> = Arc::new(AtomicU64::new(0));
     let service = StreamableHttpService::new(
         move || {
             Ok(NffServer {
                 pending_auth: pending_auth.clone(),
                 debug_session: debug_session.clone(),
+                mcp_call_count: mcp_call_count.clone(),
             })
         },
         Arc::<LocalSessionManager>::default(),
