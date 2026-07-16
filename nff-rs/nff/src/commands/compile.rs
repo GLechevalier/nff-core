@@ -1,5 +1,5 @@
 use crate::cli::CompileArgs;
-use crate::tools::toolchain;
+use crate::tools::{config, toolchain};
 
 /// `nff compile <file>` — compile a sketch only (no upload, no port required).
 pub fn run(args: &CompileArgs) -> anyhow::Result<()> {
@@ -13,6 +13,14 @@ pub fn run(args: &CompileArgs) -> anyhow::Result<()> {
 
     let result = toolchain::compile_only(&fqbn, None, Some(&args.file))
         .map_err(|e| anyhow::anyhow!("{e}"))?;
+
+    // Record the artifact so `nff status` can report the last build.
+    if result.ok {
+        if let Some(path) = result.elf().or_else(|| result.image()) {
+            let kind = if result.elf().is_some() { "elf" } else { "bin" };
+            let _ = config::set_last_build(&path.display().to_string(), kind, config::now_unix());
+        }
+    }
 
     if args.json {
         println!("{}", serde_json::to_string_pretty(&result.to_json())?);

@@ -47,6 +47,13 @@ def flash(file, board, port, baud, manual_reset):
     if not resolved_port:
         raise click.ClickException("No port — pass --port or run `nff init`")
 
+    # Fail early with actionable guidance if the backend's build tool is missing,
+    # instead of the bare "Executable not found: pio" the stream layer would raise.
+    try:
+        toolchain.ensure_build_tool()
+    except toolchain.ToolchainError as exc:
+        raise click.ClickException(str(exc))
+
     if manual_reset:
         click.pause("Press Enter after manually resetting the board…")
 
@@ -75,3 +82,13 @@ def flash(file, board, port, baud, manual_reset):
     if rc != 0:
         raise click.ClickException("Upload failed")
     console.print("[green]Flash complete[/green]")
+
+    # Record the freshly-built artifact so `nff status` can report it.
+    artifacts = toolchain.discover_artifacts(sketch_dir, fqbn)
+    if "elf" in artifacts:
+        config.set_last_build(str(artifacts["elf"]), "elf", config.now_unix())
+    else:
+        for kind in ("merged_bin", "bin", "hex"):
+            if kind in artifacts:
+                config.set_last_build(str(artifacts[kind]), "bin", config.now_unix())
+                break

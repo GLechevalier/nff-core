@@ -20,6 +20,7 @@ from nff.commands.pi import pi
 from nff.commands.power import power
 from nff.commands.provision import provision
 from nff.commands.repair import repair
+from nff.commands.status import status
 
 
 @click.group()
@@ -33,6 +34,7 @@ cli.add_command(compile_cmd)
 cli.add_command(flash)
 cli.add_command(monitor)
 cli.add_command(doctor)
+cli.add_command(status)
 cli.add_command(clean)
 cli.add_command(connect)
 cli.add_command(debug)

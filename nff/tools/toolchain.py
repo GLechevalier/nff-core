@@ -252,6 +252,18 @@ def _require_arduino_cli() -> str:
     return cli
 
 
+def ensure_build_tool() -> None:
+    """Raise a ToolchainError with actionable `nff install-deps` guidance if the active
+    backend's build tool is missing — so the streaming flash path fails with the same
+    hint `compile_only`/`doctor` give, not a bare 'Executable not found: pio'."""
+    if _pio_active():
+        from nff.tools.backends import platformio as _pio
+        if _pio.find_platformio() is None:
+            raise ToolchainError("platformio not found — run `nff install-deps`")
+    elif find_arduino_cli() is None:
+        raise ToolchainError("arduino-cli not found — run `nff install-deps`")
+
+
 def _run(cmd: list[str], timeout: int = _RUN_TIMEOUT) -> RunResult:
     try:
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)

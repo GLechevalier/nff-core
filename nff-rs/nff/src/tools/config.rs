@@ -29,6 +29,23 @@ pub struct Config {
     pub build: BuildConfig,
     #[serde(default)]
     pub debug: DebugConfig,
+    /// Local/offline mode: `nff init` skips the cloud sign-in and only local
+    /// build/flash/monitor/debug are enabled. Sticky once set; cleared on a successful login.
+    #[serde(default)]
+    pub offline: bool,
+    /// The most recent successful build artifact, recorded by `compile`/`flash`.
+    #[serde(default)]
+    pub last_build: Option<LastBuild>,
+}
+
+/// The most recent successful build artifact, recorded by `compile`/`flash` so
+/// `nff status` can report what's on the bench. `kind` is "elf" or "bin";
+/// `built_at` is unix seconds.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct LastBuild {
+    pub path: String,
+    pub kind: String,
+    pub built_at: i64,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -171,6 +188,8 @@ impl Default for Config {
             agent: AgentConfig::default(),
             build: BuildConfig::default(),
             debug: DebugConfig::default(),
+            offline: false,
+            last_build: None,
         }
     }
 }
@@ -320,6 +339,50 @@ pub fn set_build_board(board: Option<&str>) -> Result<(), ConfigError> {
     save(&config)
 }
 
+pub fn set_offline(offline: bool) -> Result<(), ConfigError> {
+    let mut config = load()?;
+    config.offline = offline;
+    save(&config)
+}
+
+/// Record the most recent successful build artifact for `nff status` to report.
+pub fn set_last_build(path: &str, kind: &str, built_at: i64) -> Result<(), ConfigError> {
+    let mut config = load()?;
+    config.last_build = Some(LastBuild {
+        path: path.into(),
+        kind: kind.into(),
+        built_at,
+    });
+    save(&config)
+}
+
+pub fn get_last_build() -> Result<Option<LastBuild>, ConfigError> {
+    Ok(load()?.last_build)
+}
+
+/// Current unix time in seconds (0 if the clock is somehow before the epoch).
+pub fn now_unix() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+/// Whether nff is in local/offline mode: cloud sign-in is skipped and only local
+/// build/flash/monitor/debug are enabled. Precedence: `NFF_OFFLINE` env var (truthy:
+/// `1`/`true`/`yes`/`on`, case-insensitive) → `offline` in config → false. Mirrors the
+/// env→config→default shape of `active_backend`.
+pub fn is_offline() -> bool {
+    if let Ok(env) = std::env::var("NFF_OFFLINE") {
+        match env.trim().to_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => return true,
+            "0" | "false" | "no" | "off" => return false,
+            _ => {}
+        }
+    }
+    load().map(|c| c.offline).unwrap_or(false)
+}
+
 /// Normalize a backend name to "arduino" or "platformio". "pio" aliases platformio;
 /// only an explicit "arduino"/"arduino-cli" selects the arduino-cli backend.
 fn normalize_backend(name: &str) -> String {
@@ -371,6 +434,27 @@ mod tests {
         }"#;
         let parsed: Config = serde_json::from_str(legacy).unwrap();
         assert_eq!(parsed.build.backend, "platformio");
+    }
+
+    #[test]
+    fn offline_defaults_false_and_round_trips() {
+        let mut config = Config::default();
+        assert!(!config.offline);
+        config.offline = true;
+        let json = serde_json::to_string_pretty(&config).unwrap();
+        let parsed: Config = serde_json::from_str(&json).unwrap();
+        assert!(parsed.offline);
+    }
+
+    #[test]
+    fn offline_absent_in_legacy_config() {
+        // A config.json written before the offline field existed must still parse.
+        let legacy = r#"{
+            "version": "1",
+            "default_device": {"port": null, "board": null, "fqbn": null, "baud": 9600}
+        }"#;
+        let parsed: Config = serde_json::from_str(legacy).unwrap();
+        assert!(!parsed.offline);
     }
 
     #[test]

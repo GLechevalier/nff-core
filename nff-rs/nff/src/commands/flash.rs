@@ -47,6 +47,10 @@ pub fn run(args: &FlashArgs) -> Result<()> {
         port
     );
 
+    // Fail early with actionable guidance if the backend's build tool is missing,
+    // instead of the bare "Executable not found: pio" the stream layer would emit.
+    toolchain::ensure_build_tool().map_err(|e| anyhow::anyhow!("{e}"))?;
+
     // Non-blocking: warn if a local nff-sdk-c checkout is newer than the synced
     // Arduino library, so "flash to test the fix" never silently builds old code.
     if let Some(w) = arduino_lib::local_sdk_newer_than_synced() {
@@ -93,6 +97,21 @@ pub fn run(args: &FlashArgs) -> Result<()> {
         bail!("Upload failed (exit {rc})");
     }
     println!("  ✓ Upload complete");
+
+    // Record the freshly-built artifact so `nff status` can report it.
+    let artifacts = toolchain::discover_artifacts(&sketch_dir, &fqbn);
+    let (kind, path) = match artifacts.get("elf") {
+        Some(elf) => ("elf", Some(elf)),
+        None => (
+            "bin",
+            ["merged_bin", "bin", "hex"]
+                .iter()
+                .find_map(|k| artifacts.get(*k)),
+        ),
+    };
+    if let Some(p) = path {
+        let _ = config::set_last_build(&p.display().to_string(), kind, config::now_unix());
+    }
 
     Ok(())
 }

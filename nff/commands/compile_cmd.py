@@ -5,6 +5,7 @@ import pathlib
 import click
 from rich.console import Console
 
+from nff import config
 from nff.tools import toolchain
 
 console = Console()
@@ -29,6 +30,13 @@ def compile_cmd(file, board, as_json):
         result = toolchain.compile_only(fqbn, source=pathlib.Path(file))
     except toolchain.ToolchainError as exc:
         raise click.ClickException(str(exc))
+
+    # Record the artifact so `nff status` can report the last build.
+    if result.ok:
+        artifact = result.elf or result.image
+        if artifact:
+            kind = "elf" if result.elf else "bin"
+            config.set_last_build(str(artifact), kind, config.now_unix())
 
     if as_json:
         import json
