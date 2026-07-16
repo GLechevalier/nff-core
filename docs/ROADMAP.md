@@ -21,11 +21,12 @@ Keep this table honest and in sync with `README.md`. `stable` = works on the shi
 | `nff compile` | stable | PlatformIO (default) + arduino backends |
 | `nff flash` | stable | |
 | `nff monitor` | stable | |
-| `nff doctor` | stable | Health-check; complements `nff status` (P2 #5) |
+| `nff doctor` | stable | Pass/fail health-check; `nff status` is the read-only snapshot |
+| `nff status` | stable | Snapshot: backend, board, MCP server, auth, last build |
 | `nff clean` | stable | |
 | `nff debug` | stable | OpenOCD + GDB on-chip debug |
 | `nff install-deps` | stable | |
-| `nff mcp` | stable | Start-only today; `stop/restart/logs` in P2 #6 |
+| `nff mcp` | stable | Bare `nff mcp` starts it; `stop` / `restart` / `logs` manage the background server |
 | `nff auth` / `deauth` | stable | Browser OAuth + headless login |
 | `nff repair` | stable | Cloud diagnosis (needs login) |
 | `nff agent` | stable | Cloud agent over SSE (needs login) |
@@ -33,11 +34,10 @@ Keep this table honest and in sync with `README.md`. `stable` = works on the shi
 | `nff pi probe` | stable | Raspberry-Pi reachability probe |
 | `nff connect` | **roadmap** | Stub in **both** Rust (`commands/connect.rs`) and Python (`nff/commands/connect.py`) |
 | `nff ota` | **roadmap** | Stub in **both** Rust (`commands/ota.rs`) and Python (`nff/commands/ota.py`) |
-| `nff status` | **roadmap** | Not yet implemented — P2 #5 |
 
 ---
 
-## P0 — Truth-in-docs & repo hygiene
+## P0 — Truth-in-docs & repo hygiene ✅ done (history rewrite optional)
 
 *Hours of work, zero risk. Resolves the "between two states" and "repo cleanup" feedback.*
 
@@ -55,18 +55,23 @@ repair loop, with no caveat. Both `nff connect` and `nff ota` are stubs everywhe
 - Make the stub output point somewhere useful, e.g.
   `nff connect: not yet implemented — see docs/ROADMAP.md`.
 
-### 3. Purge tracked binaries from the repo
-Currently tracked (≈76 MB of binary junk in a 191-file repo):
+### 3. Purge tracked binaries from the repo — **done (going-forward)**
+These are no longer tracked in `HEAD` and are `.gitignore`d (`*.pdb`, `public/videos/`,
+`graphify-out/`), so they can't be re-added by accident:
 - `public/videos/FirstVideoGithub.mp4` (35 MB) and `public/videos/SecondVideoGithub.mp4` (37 MB)
 - `nff.pdb` (3.6 MB debug symbols)
 - `nff-rs/nff/graphify-out/` (committed AST cache)
 
-Keep the referenced README images (`public/images/tumbnail.png` banner and
-`public/images/PlatformScreen.jpg`).
+The README images are kept (`public/images/tumbnail.png` banner and
+`public/images/PlatformScreen.jpg`), and nothing in the tree references the videos, so there are
+no broken links.
 
-Action: `git rm --cached` these, add them to `.gitignore`, and host the demo videos as GitHub
-Release assets or an external link referenced from the README. (Full history rewrite is optional;
-at minimum stop tracking them going forward.)
+**Still optional / out-of-band:**
+- **History rewrite** — the ~76 MB blobs still live in past commits. Reclaiming that space needs a
+  `git filter-repo`/BFG pass + force-push and is deliberately deferred (the roadmap marked it
+  optional; the working-tree fix above is what matters day-to-day).
+- **Hosting the demo videos** — if the videos should be shown again, upload them as GitHub Release
+  assets and link them from the README (an external step, not a repo change).
 
 ---
 
@@ -92,31 +97,34 @@ the first-run impression.
 
 ---
 
-## P2 — Requested commands (small, high satisfaction)
+## P2 — Requested commands (small, high satisfaction) ✅ done
 
-### 5. `nff status`
-New `Status` variant in `cli.rs` + `commands/status.rs`. Unlike `doctor` (pass/fail health-check),
-`status` is a snapshot:
-- active build backend — `config::active_backend()`
+Shipped in both Rust (`nff-rs/nff/src/`) and Python (`nff/`).
+
+### 5. `nff status` — **shipped**
+New `Status` variant in `cli.rs` + `commands/status.rs` (Python: `commands/status.py`). Unlike
+`doctor` (pass/fail health-check), `status` is a read-only snapshot that always exits 0:
+- active build backend — `config::active_backend()` / `toolchain.active_backend()`
 - detected board — `boards::list_devices()`
 - MCP server up/down + URL — `daemon::is_running()`
-- auth state — cloud logged-in vs. offline
-- **last build artifact** — requires a small addition: persist the last ELF/bin path + timestamp in
-  config on each `compile`/`flash` (nothing records this today).
+- auth state — signed in vs. offline (local mode) vs. signed out
+- **last build artifact** — a new `last_build` config record (path + kind + unix timestamp) is now
+  written by `compile`/`flash` on success and rendered here as `path (kind, N ago)`.
 
-### 6. `nff mcp stop | restart | logs`
-Turn `McpArgs` in `cli.rs` into an `McpCommand` subcommand enum. The primitives already exist in
-`tools/daemon.rs` (`is_running`, `start_background`, `log_path`):
-- `stop` — kill the pid bound on `DEFAULT_PORT`
-- `restart` — stop + `start_background`
-- `logs` — tail `daemon::log_path()`
+### 6. `nff mcp stop | restart | logs` — **shipped**
+`McpArgs` now carries an optional `McpSubcommands` enum (bare `nff mcp` still starts the server;
+Python uses a `@click.group(invoke_without_command=True)`). `start_background` writes the child
+PID to `~/.nff/mcp.pid`; the new daemon primitives are:
+- `stop` — kill the PID in the pidfile (`taskkill /F` on Windows, `kill`/`SIGTERM` on Unix), then
+  remove the pidfile; a graceful message when there's no pidfile or nothing is running
+- `restart` — `stop` + wait for the port to free + `start_background`
+- `logs` — print `daemon::log_path()` (`--lines N` / `-n N` for the tail)
 
-Low effort because the daemon layer is already built; only wiring and a stop primitive are missing.
-
-### 7. Better missing-dependency errors
-`doctor.rs` already prints actionable `→ fix` hints. Propagate that pattern into the **runtime**
-paths: when `compile`/`flash` fail because `arduino-cli`, `platformio`, or `esptool` is missing,
-surface the same "Run: nff install-deps" guidance instead of a raw subprocess error.
+### 7. Better missing-dependency errors — **shipped**
+The streaming **flash** path used to surface a bare `Executable not found: pio`. A new
+`toolchain::ensure_build_tool()` pre-checks the active backend's tool and raises the same
+actionable ``"<tool> not found — run `nff install-deps`"`` hint that `compile_only`/`doctor`
+already give, called up front in `flash` (both languages).
 
 ---
 
@@ -152,6 +160,7 @@ a tool that talks to real hardware will eventually need a clear security contrac
 ## Suggested sequencing
 
 1. **P0** — one afternoon, pure docs + hygiene. Removes the biggest sources of confusion.
-2. **P1 #4** — the offline mode. Changes the product's first impression the most.
-3. **P2 #5–7** — `nff status`, `nff mcp` subcommands, better error messages.
-4. **P3** — CI split, Windows smoke test, security doc.
+   (Done except purging the tracked demo videos — see P0 #3.)
+2. **P1 #4** ✅ — the offline mode. Changes the product's first impression the most.
+3. **P2 #5–7** ✅ — `nff status`, `nff mcp` subcommands, better error messages.
+4. **P3** — CI split, Windows smoke test, security doc. ← next

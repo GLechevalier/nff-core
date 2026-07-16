@@ -33,6 +33,19 @@ pub struct Config {
     /// build/flash/monitor/debug are enabled. Sticky once set; cleared on a successful login.
     #[serde(default)]
     pub offline: bool,
+    /// The most recent successful build artifact, recorded by `compile`/`flash`.
+    #[serde(default)]
+    pub last_build: Option<LastBuild>,
+}
+
+/// The most recent successful build artifact, recorded by `compile`/`flash` so
+/// `nff status` can report what's on the bench. `kind` is "elf" or "bin";
+/// `built_at` is unix seconds.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct LastBuild {
+    pub path: String,
+    pub kind: String,
+    pub built_at: i64,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -176,6 +189,7 @@ impl Default for Config {
             build: BuildConfig::default(),
             debug: DebugConfig::default(),
             offline: false,
+            last_build: None,
         }
     }
 }
@@ -329,6 +343,29 @@ pub fn set_offline(offline: bool) -> Result<(), ConfigError> {
     let mut config = load()?;
     config.offline = offline;
     save(&config)
+}
+
+/// Record the most recent successful build artifact for `nff status` to report.
+pub fn set_last_build(path: &str, kind: &str, built_at: i64) -> Result<(), ConfigError> {
+    let mut config = load()?;
+    config.last_build = Some(LastBuild {
+        path: path.into(),
+        kind: kind.into(),
+        built_at,
+    });
+    save(&config)
+}
+
+pub fn get_last_build() -> Result<Option<LastBuild>, ConfigError> {
+    Ok(load()?.last_build)
+}
+
+/// Current unix time in seconds (0 if the clock is somehow before the epoch).
+pub fn now_unix() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
 }
 
 /// Whether nff is in local/offline mode: cloud sign-in is skipped and only local

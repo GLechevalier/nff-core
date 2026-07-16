@@ -271,9 +271,10 @@ not yet implemented. Full detail and the plan behind the roadmap items live in
 | `nff monitor` | stable | Stream serial output |
 | `nff debug` | stable | On-chip debugging (OpenOCD + GDB) |
 | `nff doctor` | stable | Dependency + config health check |
+| `nff status` | stable | Snapshot: build backend, board, MCP server, auth, last build |
 | `nff clean` | stable | |
 | `nff install-deps` | stable | |
-| `nff mcp` | stable | Start the MCP server (start-only today) |
+| `nff mcp` | stable | Bare `nff mcp` starts the server; `stop` / `restart` / `logs` manage the background one |
 | `nff auth` / `deauth` | stable | Browser OAuth or headless login |
 | `nff repair` | stable | Cloud diagnosis (needs login) |
 | `nff agent` | stable | Cloud agent over SSE (needs login) |
@@ -295,7 +296,8 @@ not yet implemented. Full detail and the plan behind the roadmap items live in
 | `nff repair` | Send captured serial/crash output to the diagnosis server for a structured root-cause |
 | `nff auth login` | Authenticate with the diagnosis server (browser OAuth or email/password) |
 | `nff doctor` | Check all dependencies and configuration |
-| `nff mcp` | Start the MCP server (streamable HTTP on `127.0.0.1:3010`; started in the background by `nff init`) |
+| `nff status` | Snapshot of the bench: build backend, detected board, MCP server up/down, auth state, and last build artifact |
+| `nff mcp` | Start the MCP server (streamable HTTP on `127.0.0.1:3010`; started in the background by `nff init`). `nff mcp stop` / `restart` / `logs` manage that background server |
 
 ```bash
 nff flash sketches/sensor_init

@@ -19,6 +19,8 @@ pub enum Commands {
     Flash(FlashArgs),
     Monitor(MonitorArgs),
     Doctor,
+    #[command(about = "Snapshot of the bench: backend, board, MCP server, auth, last build.")]
+    Status,
     Clean,
     Test,
     Connect,
@@ -130,6 +132,9 @@ pub struct InstallDepsArgs {
 
 #[derive(Args)]
 pub struct McpArgs {
+    /// Optional: bare `nff mcp` (no subcommand) starts the server in the foreground.
+    #[command(subcommand)]
+    pub sub: Option<McpSubcommands>,
     #[arg(
         long,
         default_value = "127.0.0.1",
@@ -144,6 +149,22 @@ pub struct McpArgs {
         help = "Port to listen on."
     )]
     pub port: u16,
+}
+
+#[derive(Subcommand)]
+pub enum McpSubcommands {
+    #[command(about = "Stop the background MCP server (started by `nff init`).")]
+    Stop,
+    #[command(about = "Stop then start a fresh background MCP server.")]
+    Restart,
+    #[command(about = "Print the background MCP server's log.")]
+    Logs(McpLogsArgs),
+}
+
+#[derive(Args, Default)]
+pub struct McpLogsArgs {
+    #[arg(long, value_name = "N", help = "Show only the last N lines.")]
+    pub lines: Option<usize>,
 }
 
 // ── auth ────────────────────────────────────────────────────────────────────

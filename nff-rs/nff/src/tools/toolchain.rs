@@ -210,6 +210,25 @@ fn require_arduino_cli() -> Result<PathBuf, ToolchainError> {
     })
 }
 
+/// Ensure the active backend's build tool is installed, returning an actionable
+/// "run `nff install-deps`" error if not. Callers on the streaming flash path use
+/// this to pre-empt the bare "Executable not found: pio" that a missing tool would
+/// otherwise surface — matching the guidance `compile_only`/`doctor` already give.
+pub fn ensure_build_tool() -> Result<(), ToolchainError> {
+    if pio_active() {
+        if crate::tools::pio::find_platformio().is_none() {
+            return Err(ToolchainError::Invalid(
+                "platformio not found — run `nff install-deps`".into(),
+            ));
+        }
+    } else if find_arduino_cli().is_none() {
+        return Err(ToolchainError::Invalid(
+            "arduino-cli not found — run `nff install-deps`".into(),
+        ));
+    }
+    Ok(())
+}
+
 /// Return the path to the compiled ELF, handling arduino-cli's content-hash cache.
 ///
 /// arduino-cli >=1.4 only copies artifacts to `--output-dir` on a cache miss.

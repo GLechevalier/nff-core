@@ -6,7 +6,7 @@ mod tools;
 use clap::Parser;
 use cli::{
     AuthLoginArgs, AuthSubcommands, Cli, Commands, DebugStartArgs, DebugSubcommands,
-    PiSubcommands, ProvisionSubcommands,
+    McpSubcommands, PiSubcommands, ProvisionSubcommands,
 };
 
 fn main() {
@@ -18,6 +18,7 @@ fn main() {
         Commands::Flash(args) => commands::flash::run(&args),
         Commands::Monitor(args) => commands::monitor::run(&args),
         Commands::Doctor => commands::doctor::run(),
+        Commands::Status => commands::status::run(),
         Commands::Clean => commands::clean::run(),
         Commands::Test => {
             // The test suite is a development-only command; the shipped binary carries
@@ -28,9 +29,15 @@ fn main() {
         Commands::Connect => commands::connect::run(),
         Commands::Ota => commands::ota::run(),
         Commands::InstallDeps(args) => commands::install_deps::run(&args),
-        Commands::Mcp(args) => tokio::runtime::Runtime::new()
-            .expect("failed to create tokio runtime")
-            .block_on(commands::mcp::run(&args)),
+        Commands::Mcp(args) => match args.sub {
+            Some(McpSubcommands::Stop) => commands::mcp::run_stop(),
+            Some(McpSubcommands::Restart) => commands::mcp::run_restart(&args.host, args.port),
+            Some(McpSubcommands::Logs(ref a)) => commands::mcp::run_logs(a),
+            // Bare `nff mcp` → start the server in the foreground.
+            None => tokio::runtime::Runtime::new()
+                .expect("failed to create tokio runtime")
+                .block_on(commands::mcp::run(&args)),
+        },
         Commands::Auth(a) => match a.sub {
             Some(AuthSubcommands::Login(args)) => commands::auth::run_login(&args),
             Some(AuthSubcommands::Logout(args)) => commands::auth::run_logout(&args),
