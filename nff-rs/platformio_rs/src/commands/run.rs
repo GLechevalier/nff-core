@@ -73,6 +73,29 @@ fn run_impl(args: &RunArgs) -> Result<i32> {
         } else {
             args.target.clone()
         };
+        // Native fast-path (Phase B / M6): opt-in, ESP32 only. Returns `Some(code)`
+        // when it handled the env; `None` means unsupported ⇒ delegate to SCons.
+        if build::native::gate_enabled(args) {
+            match build::native::build_env(
+                &cfg,
+                env,
+                targets.clone(),
+                &ini,
+                Path::new(&project_dir),
+                &core,
+                &scons_py,
+                &opts,
+            )? {
+                Some(code) => {
+                    if code != 0 {
+                        overall = code;
+                    }
+                    continue;
+                }
+                None => { /* unsupported family: fall through to SCons delegation */ }
+            }
+        }
+
         let prepared = build::prepare_env(&cfg, env, targets, &ini, &core, &scons_py, &opts)?;
         println!("Processing {env}...");
         let code = scons::run_scons(&prepared.scons, Path::new(&project_dir));

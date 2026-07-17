@@ -134,6 +134,11 @@ pub struct RunArgs {
     /// Do not auto-clean the build directory before building.
     #[arg(long = "disable-auto-clean")]
     pub disable_auto_clean: bool,
+    /// Use the native Rust build fast-path for supported families (ESP32),
+    /// falling back to SCons delegation otherwise. Opt-in (default off); also
+    /// enabled by a truthy `PLATFORMIO_RS_NATIVE` env var.
+    #[arg(long = "native")]
+    pub native: bool,
 }
 
 // --- M3 command surfaces ----------------------------------------------------

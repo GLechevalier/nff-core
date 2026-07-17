@@ -4,12 +4,17 @@ A native-Rust reimplementation of [PlatformIO Core](https://github.com/platformi
 built so `nff`/`nff-rs` (and the agents that drive them) get a fast, single-binary,
 dependency-free firmware build path.
 
-> Status: **M0–M5 done.** Config/package/registry (M1–M2), platform+board metadata
-> and the `boards`/`device`/`settings`/`system`/`project` commands (M3), SCons build
-> delegation for `run` (M4), and the `test`/`check`/`debug`/`remote`/`home`
-> orchestration commands (M5, delegated to the Python `platformio` CLI). Behaviour is
-> ported milestone by milestone; see the plan for the full roadmap
-> (`~/.claude/plans/zazzy-cuddling-pillow.md`). **Next: M6** (native ESP32 fast-path).
+> Status: **M0–M5 done; M6 native ESP32 fast-path proven on real hardware.**
+> Config/package/registry (M1–M2), platform+board metadata and the `boards`/`device`/
+> `settings`/`system`/`project` commands (M3), SCons build delegation for `run` (M4),
+> the `test`/`check`/`debug`/`remote`/`home` orchestration commands (M5), and the
+> **native ESP32 fast-path** (M6a–d): `run --native` captures one verbose SCons build
+> into a cached plan, then replays it natively (parallel compiles + `-MMD`
+> incremental cache + link + `esptool` images + flash) — `firmware.elf`/`firmware.bin`/
+> `bootloader.bin`/`partitions.bin` come out **byte-identical** to PlatformIO
+> (`parity/native_golden.sh`), and a natively-built+flashed image **boots on a real
+> ESP32** (`run --native -t upload`). Remaining: M6e (CI wiring + `.ino`→`.cpp` for
+> nff). See the roadmap (`~/.claude/plans/zazzy-cuddling-pillow.md`).
 
 ## What's here
 
@@ -87,6 +92,6 @@ subprocess shim and are reimplemented as Rust `#[cfg(test)]` tests instead.
 | M3 | Platform/board metadata + `boards`/`device`/`settings`/`system`/`project` |
 | M4 | Build Phase A — SCons delegation (`run`), byte-parity anchor |
 | M5 | `test`, `check`, `debug`, `remote`, `home` |
-| M6 | Build Phase B — native ESP32 fast-path (bypass SCons) |
+| M6 | Build Phase B — native ESP32 fast-path (bypass SCons). a–d done (byte-identical `.elf`/`.bin` + real-HW boot); e (CI wiring + `.ino`) pending |
 | M7 | nff integration + MCP tools |
 | M8 | Port remaining pure-logic tests to Rust |
