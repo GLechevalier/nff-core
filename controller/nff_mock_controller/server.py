@@ -4,7 +4,8 @@ A small Starlette app (run by uvicorn) that owns only spawn/list/destroy — pin
 OTA, and crash go through the EXISTING fleet / nff-ota planes against the spawned mock,
 so no control logic is duplicated here.
 
-    POST   /mocks   {count?, project_id, ttl_s?, level?}          -> spawn N mocks
+    POST   /mocks   {count?|target?, project_id, ttl_s?, level?}  -> spawn N mocks
+                    (`target` = idempotent seed-to-N: spawns only the per-project deficit)
     GET    /mocks   ?project_id=<id>                              -> list mocks
     DELETE /mocks/{device_id}                                     -> tear one down
     GET    /health                                               -> liveness
@@ -18,9 +19,11 @@ All /mocks routes require the X-Control-Secret header (settings.control_secret).
 
 from __future__ import annotations
 
+import asyncio
 import hmac
 import logging
 import secrets
+from collections import defaultdict
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -37,6 +40,14 @@ from nff_mock_controller.config import settings
 from nff_mock_controller.levels import profile_for
 
 logger = logging.getLogger(__name__)
+
+# Serialize spawn decisions per project so the list -> cap-check -> spawn sequence in
+# _create_mocks is atomic. Without this, two concurrent seed requests (multiple browser tabs,
+# a React StrictMode/HMR double-mount, or overlapping serverless invocations) both read the
+# same pre-spawn count and each spawn the full deficit, over-provisioning the fleet — the L1
+# per-project cap is high (100), so nothing else clamps it. Keyed by project_id, so different
+# projects still spawn in parallel; the map lives for the controller's lifetime.
+_project_locks: defaultdict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
 
 
 def _secret_ok(request: Request) -> bool:
@@ -65,6 +76,21 @@ async def _create_mocks(request: Request) -> JSONResponse:
         return JSONResponse({"error": "count must be an integer"}, status_code=400)
     if count < 1:
         return JSONResponse({"error": "count must be >= 1"}, status_code=400)
+
+    # Optional idempotent "seed to target": when present, the controller computes the deficit
+    # (target - current-for-this-level-and-project) itself, INSIDE the per-project lock below,
+    # instead of trusting the caller's `count`. This makes "ensure N mocks" safe under racing
+    # callers — two concurrent seeds converge on N, never 2*N. `count` still drives the
+    # non-idempotent callers (manual "add mocks", dev.mjs L2 top-up).
+    raw_target = body.get("target")
+    target: int | None = None
+    if raw_target is not None:
+        try:
+            target = int(raw_target)
+        except (TypeError, ValueError):
+            return JSONResponse({"error": "target must be an integer"}, status_code=400)
+        if target < 0:
+            return JSONResponse({"error": "target must be >= 0"}, status_code=400)
 
     # Complexity level (alias: tier). Default keeps today's behaviour (L1).
     raw_level = body.get("level", body.get("tier", settings.default_level))
@@ -120,58 +146,69 @@ async def _create_mocks(request: Request) -> JSONResponse:
         return JSONResponse({"error": "name_prefix must be a string"}, status_code=400)
     name_prefix = (name_prefix or "").strip()
 
-    # Cap enforcement against live state — counted per level, since L2 (heavy) has much
-    # tighter caps than L1.
-    try:
-        existing = await dk.list_mocks()
-    except dk.DockerError as exc:
-        return JSONResponse({"error": str(exc)}, status_code=502)
-
-    same_level = [m for m in existing if m.level == str(level)]
-    if len(same_level) + count > profile.max_total:
-        return JSONResponse(
-            {"error": f"total cap reached for level {level} ({profile.max_total})"},
-            status_code=429,
-        )
-    in_project = sum(1 for m in same_level if m.project_id == project_id)
-    if in_project + count > profile.max_per_project:
-        return JSONResponse(
-            {"error": f"per-project cap reached for level {level} ({profile.max_per_project})"},
-            status_code=429,
-        )
-
-    expires_at = (datetime.now(timezone.utc) + timedelta(seconds=ttl_s)).isoformat()
-    spawned: list[dict[str, str]] = []
-    for i in range(count):
-        device_id = _new_device_id(project_id)
-        display_name = ""
-        if name_prefix:
-            display_name = f"{name_prefix} {i + 1}" if count > 1 else name_prefix
+    # Serialize the list -> decide -> spawn sequence per project so concurrent seeds can't each
+    # observe the same pre-spawn count and over-provision. Different projects lock independently.
+    async with _project_locks[project_id]:
+        # Cap enforcement against live state — counted per level, since L2 (heavy) has much
+        # tighter caps than L1.
         try:
-            await provision.provision(device_id, project_id)
-        except provision.ProvisionError as exc:
-            return JSONResponse(
-                {"error": f"provision failed: {exc}", "spawned": spawned}, status_code=502
-            )
-        try:
-            container_id = await dk.spawn(
-                device_id, project_id, expires_at,
-                profile=profile,
-                buggy_versions=buggy_versions, fw_version=fw_version,
-                display_name=display_name or None,
-            )
+            existing = await dk.list_mocks()
         except dk.DockerError as exc:
-            # Roll back the orphaned cert so a failed spawn leaves no residue.
-            try:
-                await provision.deprovision(device_id)
-            except provision.ProvisionError:
-                logger.warning("could not roll back cert for %s after spawn failure", device_id)
+            return JSONResponse({"error": str(exc)}, status_code=502)
+
+        same_level = [m for m in existing if m.level == str(level)]
+        in_project = sum(1 for m in same_level if m.project_id == project_id)
+
+        # Idempotent seed: derive the count from the deficit under the lock. A no-op (already at
+        # or above target) returns an empty spawn — success, nothing to do.
+        if target is not None:
+            count = max(0, target - in_project)
+            if count == 0:
+                return JSONResponse({"spawned": []}, status_code=200)
+
+        if len(same_level) + count > profile.max_total:
             return JSONResponse(
-                {"error": f"spawn failed: {exc}", "spawned": spawned}, status_code=502
+                {"error": f"total cap reached for level {level} ({profile.max_total})"},
+                status_code=429,
             )
-        spawned.append({"device_id": device_id, "container_id": container_id[:12],
-                        "expires_at": expires_at, "name": display_name or device_id,
-                        "level": str(level)})
+        if in_project + count > profile.max_per_project:
+            return JSONResponse(
+                {"error": f"per-project cap reached for level {level} ({profile.max_per_project})"},
+                status_code=429,
+            )
+
+        expires_at = (datetime.now(timezone.utc) + timedelta(seconds=ttl_s)).isoformat()
+        spawned: list[dict[str, str]] = []
+        for i in range(count):
+            device_id = _new_device_id(project_id)
+            display_name = ""
+            if name_prefix:
+                display_name = f"{name_prefix} {i + 1}" if count > 1 else name_prefix
+            try:
+                await provision.provision(device_id, project_id)
+            except provision.ProvisionError as exc:
+                return JSONResponse(
+                    {"error": f"provision failed: {exc}", "spawned": spawned}, status_code=502
+                )
+            try:
+                container_id = await dk.spawn(
+                    device_id, project_id, expires_at,
+                    profile=profile,
+                    buggy_versions=buggy_versions, fw_version=fw_version,
+                    display_name=display_name or None,
+                )
+            except dk.DockerError as exc:
+                # Roll back the orphaned cert so a failed spawn leaves no residue.
+                try:
+                    await provision.deprovision(device_id)
+                except provision.ProvisionError:
+                    logger.warning("could not roll back cert for %s after spawn failure", device_id)
+                return JSONResponse(
+                    {"error": f"spawn failed: {exc}", "spawned": spawned}, status_code=502
+                )
+            spawned.append({"device_id": device_id, "container_id": container_id[:12],
+                            "expires_at": expires_at, "name": display_name or device_id,
+                            "level": str(level)})
 
     return JSONResponse({"spawned": spawned}, status_code=201)
 
