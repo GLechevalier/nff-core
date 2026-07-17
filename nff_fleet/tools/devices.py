@@ -2,6 +2,7 @@ import os
 import time
 from typing import Any
 
+from nff_fleet import db
 from nff_fleet.commands import send_command
 from nff_fleet.registry import registry
 
@@ -69,6 +70,11 @@ async def fleet_ping(device_id: str) -> dict[str, Any]:
     project_id = _resolve_project(device_id)
     if not project_id:
         return {"device_id": device_id, "error": "unknown project (device has not connected)"}
+    # A device broken in the self-heal demo (durable fault armed — migration 0080) is
+    # unreachable: refuse the ping instead of round-tripping to the still-healthy mock, so the
+    # reported state matches the dashboard's red "broken" dot. Best-effort (see is_device_broken).
+    if await db.is_device_broken(device_id):
+        return {"device_id": device_id, "error": "device unreachable — firmware crashed"}
     t0 = time.monotonic()
     try:
         resp = await send_command(device_id, {"action": "ping"}, project_id)

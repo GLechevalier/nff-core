@@ -134,6 +134,82 @@ def test_upsert_device_omits_absent_identity(monkeypatch):
     assert p["p_hardware"] == {}
 
 
+class _FakeResp:
+    def __init__(self, data):
+        self.data = data
+
+
+class _FakeSelect:
+    """Records the devices-row select chain is_device_broken builds and replays a
+    canned resp: table(...).select(...).eq(...).limit(...).execute()."""
+
+    def __init__(self, data):
+        self._data = data
+
+    def select(self, *a, **k):
+        return self
+
+    def eq(self, *a, **k):
+        return self
+
+    def limit(self, *a, **k):
+        return self
+
+    def execute(self):
+        async def _exec():
+            return _FakeResp(self._data)
+        return _exec()
+
+
+class _FakeSelectClient:
+    def __init__(self, data):
+        self._data = data
+
+    def table(self, name):
+        return _FakeSelect(self._data)
+
+
+def test_is_device_broken_true_when_error_and_fault_armed(monkeypatch):
+    """The self-heal demo's durable broken marker: status flipped to 'error' with
+    demo_fault_above set (migration 0080) → device is broken → ping must be refused."""
+    monkeypatch.setattr(
+        db, "_client", _FakeSelectClient([{"status": "error", "demo_fault_above": "0.0.2"}])
+    )
+    monkeypatch.setattr(db, "_enabled", True)
+    assert asyncio.run(db.is_device_broken("mock-1")) is True
+
+
+def test_is_device_broken_false_when_error_without_demo_fault(monkeypatch):
+    """An error state with no demo_fault_above is an unrelated real error — stays pingable
+    (the gate is scoped to the demo, not every error)."""
+    monkeypatch.setattr(
+        db, "_client", _FakeSelectClient([{"status": "error", "demo_fault_above": None}])
+    )
+    monkeypatch.setattr(db, "_enabled", True)
+    assert asyncio.run(db.is_device_broken("mock-1")) is False
+
+
+def test_is_device_broken_false_when_online(monkeypatch):
+    """Once the fix OTA lands, the heartbeat flips status back to 'online' — ping recovers."""
+    monkeypatch.setattr(
+        db, "_client", _FakeSelectClient([{"status": "online", "demo_fault_above": "0.0.2"}])
+    )
+    monkeypatch.setattr(db, "_enabled", True)
+    assert asyncio.run(db.is_device_broken("mock-1")) is False
+
+
+def test_is_device_broken_false_when_disabled(monkeypatch):
+    """Persistence off → best-effort False so the caller falls through to a real ping."""
+    monkeypatch.setattr(db, "_enabled", False)
+    assert asyncio.run(db.is_device_broken("mock-1")) is False
+
+
+def test_is_device_broken_false_on_missing_row(monkeypatch):
+    monkeypatch.setattr(db, "_client", _FakeSelectClient([]))
+    monkeypatch.setattr(db, "_enabled", True)
+    assert asyncio.run(db.is_device_broken("mock-1")) is False
+
+
 def test_upsert_device_drops_blank_hardware_fields(monkeypatch):
     """Empty-string hardware fields are dropped, not forwarded as ''."""
     captured: dict = {}

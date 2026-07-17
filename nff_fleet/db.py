@@ -56,6 +56,37 @@ def upsert_device(device_id: str, payload: dict[str, Any], with_telemetry: bool 
         _fire(_upsert_device(device_id, payload))
 
 
+async def is_device_broken(device_id: str) -> bool:
+    """True when a device's durable row shows the self-heal demo fault armed.
+
+    upsert_device_heartbeat (migration 0080) flips status to 'error' only while
+    demo_fault_above is set, within the fault window, and the running firmware hasn't
+    climbed above it — so checking status='error' AND demo_fault_above faithfully reuses
+    the DB's own determination and auto-clears when the fix OTA lands. Scoped to
+    demo_fault_above so an unrelated real error state stays pingable. Best-effort: returns
+    False when persistence is disabled or on any error, so the caller falls through to a
+    normal ping and this can never block a genuine one.
+    """
+    if not _enabled:
+        return False
+    try:
+        resp = await (
+            _client.table("devices")
+            .select("status, demo_fault_above")
+            .eq("id", device_id)
+            .limit(1)
+            .execute()
+        )
+        rows = resp.data or []
+        if not rows:
+            return False
+        row = rows[0]
+        return row.get("status") == "error" and row.get("demo_fault_above") is not None
+    except Exception as exc:  # noqa: BLE001 — a broken-check failure must never block ping
+        logger.warning("db: is_device_broken(%s) failed: %s", device_id, exc)
+        return False
+
+
 async def _upsert_device_and_telemetry(device_id: str, payload: dict[str, Any]) -> None:
     await _upsert_device(device_id, payload)
     await _insert_telemetry(device_id, payload)
