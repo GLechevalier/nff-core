@@ -75,7 +75,7 @@ pub enum Command {
     /// Remote development.
     Remote(PassthroughArgs),
     /// Run project targets (build, upload, clean, etc.).
-    Run(PassthroughArgs),
+    Run(RunArgs),
     /// Manage PlatformIO settings.
     Settings(SettingsArgs),
     /// Miscellaneous system commands.
@@ -88,6 +88,47 @@ pub enum Command {
     Update(PassthroughArgs),
     /// Upgrade PlatformIO Core to the latest version.
     Upgrade(PassthroughArgs),
+}
+
+// --- M4 build command surface -----------------------------------------------
+
+/// `pio run [-e ENV]... [-t TARGET]... [-d DIR] [-a ARG]... [--upload-port P]
+/// [-j N] [-s] [-v] [--disable-auto-clean] [--project-conf FILE]`.
+///
+/// Mirrors `platformio/run/cli.py`'s options. `--project-conf` is long-only
+/// because the root `-c` short is taken by the global `--caller` flag.
+#[derive(Args, Debug, Default, Clone)]
+pub struct RunArgs {
+    /// Process only the given environment(s); repeatable.
+    #[arg(short = 'e', long = "environment")]
+    pub environment: Vec<String>,
+    /// Build/upload/clean target(s); repeatable.
+    #[arg(short = 't', long = "target")]
+    pub target: Vec<String>,
+    /// Project directory (contains `platformio.ini`).
+    #[arg(short = 'd', long = "project-dir", default_value = ".")]
+    pub project_dir: String,
+    /// Explicit path to the project configuration file.
+    #[arg(long = "project-conf")]
+    pub project_conf: Option<String>,
+    /// Extra program argument (passed to the built binary); repeatable.
+    #[arg(short = 'a', long = "program-arg")]
+    pub program_arg: Vec<String>,
+    /// Upload port override.
+    #[arg(long = "upload-port")]
+    pub upload_port: Option<String>,
+    /// Parallel build jobs (defaults to the CPU count).
+    #[arg(short = 'j', long = "jobs")]
+    pub jobs: Option<usize>,
+    /// Suppress build output (accepted; Phase A streams SCons output verbatim).
+    #[arg(short = 's', long = "silent")]
+    pub silent: bool,
+    /// Verbose build output (`PIOVERBOSE=1`).
+    #[arg(short = 'v', long = "verbose")]
+    pub verbose: bool,
+    /// Do not auto-clean the build directory before building.
+    #[arg(long = "disable-auto-clean")]
+    pub disable_auto_clean: bool,
 }
 
 // --- M3 command surfaces ----------------------------------------------------
@@ -187,8 +228,18 @@ pub enum ProjectAction {
         #[arg(long = "json-output")]
         json_output: bool,
     },
-    /// Dump project build metadata (deferred — needs the build system, M4).
-    Metadata(PassthroughArgs),
+    /// Dump project build metadata intended for IDE extensions/plugins.
+    Metadata {
+        #[arg(short = 'd', long = "project-dir", default_value = ".")]
+        project_dir: String,
+        /// Restrict to the given environment(s); repeatable.
+        #[arg(short = 'e', long = "environment")]
+        environment: Vec<String>,
+        #[arg(long = "json-output")]
+        json_output: bool,
+        #[arg(long = "json-output-path")]
+        json_output_path: Option<String>,
+    },
     /// Initialize a new project (deferred — heavy scaffolding).
     Init(PassthroughArgs),
 }
@@ -204,11 +255,19 @@ mod tests {
     }
 
     #[test]
-    fn parses_run_with_passthrough_flags() {
-        let cli = Cli::try_parse_from(["pio-rs", "run", "-e", "native", "-d", "/tmp/proj"])
-            .expect("should parse");
+    fn parses_run_flags() {
+        let cli = Cli::try_parse_from([
+            "pio-rs", "run", "-e", "native", "-e", "esp32", "-d", "/tmp/proj", "-t", "upload",
+            "-v",
+        ])
+        .expect("should parse");
         match cli.command {
-            Some(Command::Run(p)) => assert_eq!(p.args, ["-e", "native", "-d", "/tmp/proj"]),
+            Some(Command::Run(a)) => {
+                assert_eq!(a.environment, ["native", "esp32"]);
+                assert_eq!(a.project_dir, "/tmp/proj");
+                assert_eq!(a.target, ["upload"]);
+                assert!(a.verbose);
+            }
             other => panic!("expected run, got {other:?}"),
         }
     }

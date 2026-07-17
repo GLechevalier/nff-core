@@ -73,7 +73,7 @@ fn reset_cmd() -> CmdOutcome {
 }
 
 fn error(message: &str) -> CmdOutcome {
-    CmdOutcome { code: 1, stdout: String::new(), stderr: format!("Error: {message}\n") }
+    CmdOutcome { code: 1, stdout: String::new(), stderr: format!("Error: {message}\n"), streamed: false }
 }
 
 #[cfg(test)]

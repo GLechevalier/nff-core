@@ -55,14 +55,21 @@ NETWORK_OR_DEFERRED=(
   # drives `pio platform search` (registry) then `pio boards` — `platform search`
   # is a deferred command (returns not-implemented in pio-rs). Reachable at M2+/M5.
   "platformio-core/tests/commands/test_boards.py::test_board_options"
-  # drives `pio project metadata`, which needs build-system output (native platform
-  # compile) -> that's the M4 build milestone, not M3.
-  "platformio-core/tests/project/test_metadata.py::test_metadata_dump"
+  # NOTE: `project/test_metadata.py::test_metadata_dump` is RE-ENABLED at M4 —
+  # `pio project metadata` now delegates the native build via SCons. It stays in
+  # the `project/` offline target and runs in both the baseline and rust gates.
 )
 
-# Whole test files/dirs that exercise the build system (`pio ci`/`pio run`) — the
-# M4 milestone, not M3. Not collected (--ignore) in any scope. Paths are relative
-# to $HERE. (Kept out of the offline gate because they compile real sketches.)
+# Whole test files/dirs that exercise the build system (`pio ci`) — kept out of
+# the offline gate because they compile real sketches. Not collected (--ignore)
+# in any scope. Paths are relative to $HERE.
+#
+# `commands/test_run.py` (the `pio run` build tests) is NOT ignored: it is simply
+# absent from OFFLINE_TESTS, so it runs only in `full` scope. At M4, pio-rs is
+# byte-parity with Python `pio` there — both pass 5/7 and fail the SAME 2
+# (`test_generic_build`, `test_build_unflags`) with an identical
+# `truncated \UXXXXXXXX escape`: those tests embed unescaped Windows paths into a
+# generated Python `extra_script`, a fixture bug on Windows, not a pio-rs defect.
 DEFERRED_PATHS=(
   "platformio-core/tests/misc/ino2cpp"   # drives `pio ci` (compile) on example sketches
 )
@@ -118,6 +125,15 @@ fi
 scope="${PARITY_SCOPE:-offline}"
 echo "== parity run: mode=$mode scope=$scope PIO_BIN=$PIO_BIN =="
 export PIO_BIN
+
+# M4: build-driving tests (`project metadata`, `run`) delegate the compile to
+# Python SCons. Pin the interpreter to the harness venv (which has platformio +
+# tool-scons) so pio-rs's delegation doesn't fall back to a system `python` that
+# may lack them. Upstream `proc.get_pythonexe_path()` honours PYTHONEXEPATH too,
+# so this is faithful for the baseline run as well.
+if [ "$PY" != "python" ]; then
+  export PYTHONEXEPATH="$PY"
+fi
 
 targets=()
 if [ "$scope" = "offline" ]; then

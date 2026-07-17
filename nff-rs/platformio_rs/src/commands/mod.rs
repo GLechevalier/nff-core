@@ -6,5 +6,6 @@
 pub mod boards;
 pub mod device;
 pub mod project;
+pub mod run;
 pub mod settings;
 pub mod system;

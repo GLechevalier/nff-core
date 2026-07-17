@@ -10,6 +10,7 @@
 //! in-process builds once the relevant milestones land.
 
 pub mod app;
+pub mod build;
 pub mod cli;
 pub mod commands;
 pub mod config;
@@ -55,12 +56,23 @@ pub struct CmdOutcome {
     pub code: i32,
     pub stdout: String,
     pub stderr: String,
+    /// The command already streamed its output to the process stdout/stderr
+    /// directly (e.g. a delegated build), so the binary must not re-print
+    /// `stdout`/`stderr`. Only [`CmdOutcome::code_only`] sets this.
+    pub streamed: bool,
 }
 
 impl CmdOutcome {
     #[must_use]
     pub fn ok(stdout: impl Into<String>) -> Self {
-        Self { code: 0, stdout: stdout.into(), stderr: String::new() }
+        Self { code: 0, stdout: stdout.into(), stderr: String::new(), streamed: false }
+    }
+
+    /// A command that already wrote its output live (streamed a subprocess) and
+    /// only carries the process exit code back to the binary.
+    #[must_use]
+    pub fn code_only(code: i32) -> Self {
+        Self { code, stdout: String::new(), stderr: String::new(), streamed: true }
     }
 
     /// A not-yet-ported command. Mirrors how an unimplemented subcommand should
@@ -71,6 +83,7 @@ impl CmdOutcome {
             code: 64, // EX_USAGE-ish; distinct from PlatformIO's own 0/1/2/3 codes
             stdout: String::new(),
             stderr: format!("pio-rs: command `{name}` is not implemented yet"),
+            streamed: false,
         }
     }
 }
@@ -100,7 +113,7 @@ pub fn dispatch(command: &cli::Command) -> CmdOutcome {
         Pkg(_) => CmdOutcome::not_implemented("pkg"),
         Platform(_) => CmdOutcome::not_implemented("platform"),
         Remote(_) => CmdOutcome::not_implemented("remote"),
-        Run(_) => CmdOutcome::not_implemented("run"),
+        Run(a) => commands::run::run(a),
         Team(_) => CmdOutcome::not_implemented("team"),
         Test(_) => CmdOutcome::not_implemented("test"),
         Update(_) => CmdOutcome::not_implemented("update"),
