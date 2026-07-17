@@ -427,6 +427,31 @@ pub fn active_backend() -> String {
     normalize_backend(&name)
 }
 
+/// Whether the PlatformIO backend should use the **legacy** external-subprocess
+/// engine (`tools/pio.rs`, shelling out to Python `pio`) instead of the default
+/// in-process `platformio_rs` native engine (M7). Both are the "platformio"
+/// backend — `normalize_backend` folds `platformio-legacy` into `platformio`, so
+/// [`active_backend`]/`pio_active` stay true either way; this reads the **raw**
+/// selector to detect the `-legacy` opt-in. Precedence: `NFF_PIO_LEGACY` env
+/// (truthy `1`/`true`/`yes`/`on`) → raw `NFF_BUILD_BACKEND` == "platformio-legacy"
+/// → raw `build.backend` == "platformio-legacy" → false.
+pub fn pio_legacy() -> bool {
+    if let Ok(env) = std::env::var("NFF_PIO_LEGACY") {
+        match env.trim().to_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => return true,
+            "0" | "false" | "no" | "off" => return false,
+            _ => {}
+        }
+    }
+    let is_legacy = |raw: &str| raw.trim().to_lowercase() == "platformio-legacy";
+    if let Ok(env) = std::env::var("NFF_BUILD_BACKEND") {
+        if !env.trim().is_empty() {
+            return is_legacy(&env);
+        }
+    }
+    load().map(|c| is_legacy(&c.build.backend)).unwrap_or(false)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -444,6 +469,35 @@ mod tests {
     fn build_config_defaults_to_platformio() {
         assert_eq!(BuildConfig::default().backend, "platformio");
         assert!(BuildConfig::default().board.is_none());
+    }
+
+    #[test]
+    fn pio_legacy_precedence() {
+        // These env-driven cases short-circuit before reading the real config, so
+        // the test is hermetic. NFF_PIO_LEGACY/NFF_BUILD_BACKEND are used by no
+        // other test, so mutating + clearing them here is race-free.
+        std::env::remove_var("NFF_PIO_LEGACY");
+
+        // Raw NFF_BUILD_BACKEND == "platformio-legacy" opts into legacy…
+        std::env::set_var("NFF_BUILD_BACKEND", "platformio-legacy");
+        assert!(pio_legacy());
+        // …while active_backend still normalizes it to "platformio" (native engine
+        // is still the "platformio" backend, just the legacy variant).
+        assert_eq!(active_backend(), "platformio");
+
+        // A plain "platformio" is the default in-process native engine.
+        std::env::set_var("NFF_BUILD_BACKEND", "platformio");
+        assert!(!pio_legacy());
+
+        // NFF_PIO_LEGACY wins over the backend selector, both ways.
+        std::env::set_var("NFF_PIO_LEGACY", "1");
+        assert!(pio_legacy());
+        std::env::set_var("NFF_PIO_LEGACY", "0");
+        std::env::set_var("NFF_BUILD_BACKEND", "platformio-legacy");
+        assert!(!pio_legacy(), "NFF_PIO_LEGACY=0 overrides a legacy backend");
+
+        std::env::remove_var("NFF_PIO_LEGACY");
+        std::env::remove_var("NFF_BUILD_BACKEND");
     }
 
     #[test]

@@ -183,6 +183,7 @@ fn metadata_impl(
         isatty: false,
         program_args: Vec::new(),
         upload_port: None,
+        log_sink: None,
     };
     let md = build::load_build_metadata(
         Path::new(&project_dir),

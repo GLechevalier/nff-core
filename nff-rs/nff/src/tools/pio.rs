@@ -101,6 +101,27 @@ fn require_pio() -> Result<Vec<String>, ToolchainError> {
         .ok_or_else(|| ToolchainError::NotFound("platformio not found — run `nff install-deps`".into()))
 }
 
+/// A Python interpreter that can `import platformio`, for the in-process native
+/// engine's SCons delegation (M7 — a cache-miss capture still runs Python SCons).
+/// Mirrors [`find_platformio`]'s search: PlatformIO's bundled penv first, then a
+/// PATH `python`/`python3` that has the package importable.
+pub(crate) fn platformio_python() -> Option<String> {
+    let penv = dirs::home_dir().unwrap_or_default().join(".platformio").join("penv");
+    let sub = if cfg!(windows) { "Scripts" } else { "bin" };
+    let suffix = if cfg!(windows) { ".exe" } else { "" };
+    let cand = penv.join(sub).join(format!("python{suffix}"));
+    if cand.exists() {
+        return Some(cand.to_string_lossy().into_owned());
+    }
+    let py = find_python()?;
+    let ok = Command::new(&py)
+        .args(["-c", "import platformio"])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    ok.then_some(py)
+}
+
 /// PlatformIO Core version string (for `nff doctor`), or None if unavailable.
 pub fn platformio_version() -> Option<String> {
     let cmd = find_platformio()?;
@@ -120,7 +141,7 @@ pub fn platformio_version() -> Option<String> {
 /// project that is NOT scaffolded was supplied by the user (a BYO PlatformIO project),
 /// so its `platformio.ini` and env names are theirs — nff must not overwrite or pin
 /// `-e nff` on it. Compares lexically first, then by canonical path (symlinked temp).
-fn is_scaffolded(project_dir: &Path) -> bool {
+pub(crate) fn is_scaffolded(project_dir: &Path) -> bool {
     let root = pio_dir();
     if project_dir.starts_with(&root) {
         return true;

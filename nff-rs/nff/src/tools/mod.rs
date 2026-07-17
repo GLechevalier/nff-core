@@ -8,6 +8,7 @@ pub mod installer;
 pub mod nudge;
 pub mod pi;
 pub mod pio;
+pub mod pio_native;
 pub mod retry;
 pub mod serial;
 pub mod toolchain;

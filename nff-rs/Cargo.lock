@@ -1318,7 +1318,7 @@ dependencies = [
 
 [[package]]
 name = "nff"
-version = "0.2.34"
+version = "0.2.36"
 dependencies = [
  "anyhow",
  "axum",
@@ -1329,6 +1329,7 @@ dependencies = [
  "form_urlencoded",
  "getrandom 0.3.4",
  "indicatif",
+ "platformio_rs",
  "regex",
  "reqwest",
  "rmcp",

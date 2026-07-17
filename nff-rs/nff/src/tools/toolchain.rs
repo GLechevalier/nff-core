@@ -428,8 +428,21 @@ pub fn upload_sketch(
 
 // (compile/upload backoff constants are defined near the top of the module)
 
+/// An in-process build job: runs to completion and yields `(returncode, stdout,
+/// stderr)`. Used by the native (`platformio_rs`) backend so a build needs no
+/// subprocess (M7).
+type InProcJob = Box<dyn FnOnce() -> (i32, String, String) + Send>;
+
+enum Body {
+    /// A subprocess command (`cmd[0]` = program, rest = args) — the arduino-cli
+    /// path and the legacy pio subprocess path.
+    Sub(Vec<String>),
+    /// An in-process job (native `platformio_rs`), consumed on the first `run()`.
+    InProc(Option<InProcJob>),
+}
+
 pub struct ProcessStream {
-    cmd: Vec<String>,
+    body: Body,
     pub returncode: Option<i32>,
     /// Captured stderr (arduino-cli prints upload/port faults here). Kept so the
     /// retry classifier and the caller can both see it, instead of letting it
@@ -439,42 +452,57 @@ pub struct ProcessStream {
 
 impl ProcessStream {
     pub fn new(cmd: Vec<String>) -> Self {
-        ProcessStream {
-            cmd,
-            returncode: None,
-            stderr: String::new(),
-        }
+        ProcessStream { body: Body::Sub(cmd), returncode: None, stderr: String::new() }
+    }
+
+    /// A stream backed by an in-process job. Its `stdout` is split into lines
+    /// (emitted as if streamed); `run()` already buffers subprocess output the
+    /// same way, so callers see identical behavior.
+    pub fn in_process(job: impl FnOnce() -> (i32, String, String) + Send + 'static) -> Self {
+        ProcessStream { body: Body::InProc(Some(Box::new(job))), returncode: None, stderr: String::new() }
     }
 
     pub fn run(&mut self) -> Result<impl Iterator<Item = String> + '_, ToolchainError> {
-        let mut child = Command::new(&self.cmd[0])
-            .args(&self.cmd[1..])
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|e| {
-                if e.kind() == std::io::ErrorKind::NotFound {
-                    ToolchainError::NotFound(self.cmd[0].clone())
-                } else {
-                    ToolchainError::Io(e)
-                }
-            })?;
+        let lines: Vec<String> = match &mut self.body {
+            Body::Sub(cmd) => {
+                let mut child = Command::new(&cmd[0])
+                    .args(&cmd[1..])
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped())
+                    .spawn()
+                    .map_err(|e| {
+                        if e.kind() == std::io::ErrorKind::NotFound {
+                            ToolchainError::NotFound(cmd[0].clone())
+                        } else {
+                            ToolchainError::Io(e)
+                        }
+                    })?;
 
-        let stdout = child.stdout.take().unwrap();
-        let mut err_pipe = child.stderr.take().unwrap();
-        // Drain stderr on a thread so a full pipe can't deadlock the stdout read.
-        let err_handle = std::thread::spawn(move || {
-            let mut s = String::new();
-            let _ = err_pipe.read_to_string(&mut s);
-            s
-        });
-        let lines: Vec<String> = BufReader::new(stdout)
-            .lines()
-            .map_while(Result::ok)
-            .collect();
-        let status = child.wait()?;
-        self.returncode = status.code();
-        self.stderr = err_handle.join().unwrap_or_default();
+                let stdout = child.stdout.take().unwrap();
+                let mut err_pipe = child.stderr.take().unwrap();
+                // Drain stderr on a thread so a full pipe can't deadlock the stdout read.
+                let err_handle = std::thread::spawn(move || {
+                    let mut s = String::new();
+                    let _ = err_pipe.read_to_string(&mut s);
+                    s
+                });
+                let lines: Vec<String> =
+                    BufReader::new(stdout).lines().map_while(Result::ok).collect();
+                let status = child.wait()?;
+                self.returncode = status.code();
+                self.stderr = err_handle.join().unwrap_or_default();
+                lines
+            }
+            Body::InProc(job) => {
+                let job = job
+                    .take()
+                    .ok_or_else(|| ToolchainError::Invalid("in-process stream already consumed".into()))?;
+                let (code, stdout, stderr) = job();
+                self.returncode = Some(code);
+                self.stderr = stderr;
+                stdout.lines().map(str::to_string).collect()
+            }
+        };
         Ok(lines.into_iter())
     }
 }
@@ -558,7 +586,10 @@ pub fn package_recover(board: &str) -> impl Fn(&str) + '_ {
 
 pub fn stream_compile(sketch_dir: &Path, fqbn: &str) -> Result<ProcessStream, ToolchainError> {
     if pio_active() {
-        return crate::tools::pio::stream_compile(sketch_dir, fqbn);
+        if crate::tools::config::pio_legacy() {
+            return crate::tools::pio::stream_compile(sketch_dir, fqbn);
+        }
+        return crate::tools::pio_native::stream_compile(sketch_dir, fqbn);
     }
     let exe = require_arduino_cli()?;
     let output_dir = elf_path_for(sketch_dir, fqbn)
@@ -585,7 +616,10 @@ pub fn stream_upload(
     port: &str,
 ) -> Result<ProcessStream, ToolchainError> {
     if pio_active() {
-        return crate::tools::pio::stream_upload(sketch_dir, fqbn, port);
+        if crate::tools::config::pio_legacy() {
+            return crate::tools::pio::stream_upload(sketch_dir, fqbn, port);
+        }
+        return crate::tools::pio_native::stream_upload(sketch_dir, fqbn, port);
     }
     let exe = require_arduino_cli()?;
     let input_dir = elf_path_for(sketch_dir, fqbn)
@@ -621,7 +655,10 @@ pub fn flash(code: &str, fqbn: &str, port: &str) -> String {
 /// MCP tool so it can accept a sketch path, not just raw code.
 pub fn flash_sketch(target_dir: &Path, fqbn: &str, port: &str) -> String {
     if pio_active() {
-        return crate::tools::pio::flash_project(target_dir, fqbn, port);
+        if crate::tools::config::pio_legacy() {
+            return crate::tools::pio::flash_project(target_dir, fqbn, port);
+        }
+        return crate::tools::pio_native::flash_project(target_dir, fqbn, port);
     }
     let compile_result = match compile_sketch(target_dir, fqbn) {
         Ok(r) => r,
@@ -899,13 +936,19 @@ pub fn compile_only(
         ));
     }
     if pio_active() {
+        // Both engines need PlatformIO Core present: the native path still shells
+        // Python SCons on a cache-miss capture, and legacy shells it every build.
         if crate::tools::pio::find_platformio().is_none() {
             return Err(ToolchainError::NotFound(
                 "platformio not found — run `nff install-deps`".into(),
             ));
         }
         let sd = crate::tools::pio::resolve_project(code, source, None)?;
-        let result = crate::tools::pio::compile_sketch(&sd, fqbn)?;
+        let result = if crate::tools::config::pio_legacy() {
+            crate::tools::pio::compile_sketch(&sd, fqbn)?
+        } else {
+            crate::tools::pio_native::compile_sketch(&sd, fqbn)?
+        };
         let artifacts = if result.success {
             crate::tools::pio::discover_artifacts(&sd, fqbn)
         } else {

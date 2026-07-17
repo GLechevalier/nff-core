@@ -21,6 +21,35 @@ users, stronger types, better cross-platform packaging.
 The MCP server is now native Rust (`nff-rs/nff/src/mcp_server.rs`, rmcp crate). Only
 `nff test` still delegates to the Python package via subprocess.
 
+### Build engine — the PlatformIO backend (M7)
+
+The `platformio` backend (the default) now builds **in-process** via the native
+`platformio_rs` library (`nff-rs/platformio_rs`), not by shelling out to an external
+Python `pio`. `nff compile` / `nff flash` and the `compile`/`flash` MCP tools all
+funnel through `tools/toolchain.rs`, which dispatches to `tools/pio_native.rs`:
+
+- `pio_native` calls `platformio_rs::commands::run::run_build` with `native = true`.
+  For espressif32 + arduino + xtensa ESP32 (`esp32`/`s2`/`s3`) it runs the native
+  Rust fast-path (capture-once, replay-native — byte-identical to SCons, proven by
+  `platformio_rs/parity/native_golden.sh`); other families fall back to `platformio_rs`'s
+  in-process SCons delegation.
+- A **cache-miss capture still needs Python PlatformIO** importable (SCons), so
+  `pio_native::ensure_python_env` points `PYTHONEXEPATH` at PlatformIO's penv, and
+  `ensure_build_tool`/`compile_only` still require `pio::find_platformio()`. The hot
+  **replay** path is pure Rust — no Python.
+- Multi-tab `.ino` sketches are handled by the ported `pioino` (`platformio_rs`'s
+  `build/native/ino.rs`): the native replay regenerates the `.ino`→`.cpp` (with
+  Arduino prototype injection) when a sketch changes, so incremental `.ino` edits
+  rebuild correctly off the hot path.
+- The scaffolding (`resolve_project`, `write_platformio_ini`, `discover_artifacts`,
+  `.pio/build/nff/` layout) is shared verbatim with the legacy `tools/pio.rs`.
+
+**Legacy subprocess fallback:** set `NFF_PIO_LEGACY=1` (or `NFF_BUILD_BACKEND=platformio-legacy`,
+or `build.backend = "platformio-legacy"` in `~/.nff/config.json`) to route back to the
+old external-`pio` subprocess path (`tools/pio.rs`). `config::pio_legacy()` gates this;
+`active_backend()`/`pio_active()` stay `platformio` either way. The `arduino` (arduino-cli)
+backend is unchanged.
+
 **Adding a new MCP tool (current Python flow):** add an `async def` handler in
 `nff/nff/mcp_server.py`, register it in both `_TOOLS` (with an `inputSchema`) and `_DISPATCH`.
 Local hardware/toolchain logic lives in `nff/nff/tools/`. *(When the Rust port resumes, the
