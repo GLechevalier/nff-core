@@ -119,10 +119,19 @@ int nff_l2_load_config_from_nvs(nff_config_t *cfg) {
      * absent it, connect+heartbeat work but signed commands can't be verified. */
     cfg->cmd_verify_key = nvs_dup_blob(h, K_CMD_VKEY, &cfg->cmd_verify_key_len);
 
+    /* OTA-adopted firmware version: the SDK's OTA commit path (nff_ota.c nff_ota_commit) records the
+     * running image's version under "fw_adopted" so heartbeat telemetry reflects what actually
+     * booted, not the build-time NFF_FW_VERSION baked into this generic L2 image. Without this, an
+     * L2 forever heartbeats the baked constant and migration 0080's version-anchored recovery check
+     * (semver_gt) can never observe a fix. Absent (never-OTA'd) => NULL => keep the baked default. */
+    char *adopted_fw = nvs_dup_str(h, "fw_adopted");
+    if (adopted_fw && !adopted_fw[0]) { free(adopted_fw); adopted_fw = NULL; }
+
     nvs_close(h);
 
-    /* Firmware-image identity is baked at build time, not per-device. */
-    cfg->fw_version           = NFF_FW_VERSION;
+    /* Firmware-image identity is baked at build time, not per-device — but the OTA-adopted version,
+     * when present, overrides the baked default so post-OTA telemetry reports the real version. */
+    cfg->fw_version           = adopted_fw ? adopted_fw : NFF_FW_VERSION;
     cfg->build_id             = NFF_BUILD_ID;
     cfg->fqbn                 = NFF_FQBN;
     cfg->device_type          = NFF_DEVICE_TYPE;  /* "nff-qemu-esp32" — overrides the silicon probe */
