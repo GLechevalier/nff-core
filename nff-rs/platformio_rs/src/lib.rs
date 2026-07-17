@@ -89,8 +89,10 @@ impl CmdOutcome {
 }
 
 /// Dispatch a parsed CLI invocation. The M3 command groups (`boards`, `device`,
-/// `project`, `settings`, `system`) route to real handlers in [`commands`];
-/// everything else is still a not-implemented stub filled in by later milestones.
+/// `project`, `settings`, `system`), the M4 build command (`run`), and the M5
+/// orchestration groups (`test`, `check`, `debug`, `remote`, `home` — which
+/// delegate to the Python `platformio` CLI, see [`commands`]) route to real
+/// handlers; everything else is still a not-implemented stub for later milestones.
 #[must_use]
 pub fn dispatch(command: &cli::Command) -> CmdOutcome {
     use cli::Command::{
@@ -104,18 +106,18 @@ pub fn dispatch(command: &cli::Command) -> CmdOutcome {
         Settings(a) => commands::settings::run(a),
         System(a) => commands::system::run(a),
         Account(_) => CmdOutcome::not_implemented("account"),
-        Check(_) => CmdOutcome::not_implemented("check"),
+        Check(a) => commands::check::run(a),
         Ci(_) => CmdOutcome::not_implemented("ci"),
-        Debug(_) => CmdOutcome::not_implemented("debug"),
-        Home(_) => CmdOutcome::not_implemented("home"),
+        Debug(a) => commands::debug::run(a),
+        Home(a) => commands::home::run(a),
         Lib(_) => CmdOutcome::not_implemented("lib"),
         Org(_) => CmdOutcome::not_implemented("org"),
         Pkg(_) => CmdOutcome::not_implemented("pkg"),
         Platform(_) => CmdOutcome::not_implemented("platform"),
-        Remote(_) => CmdOutcome::not_implemented("remote"),
+        Remote(a) => commands::remote::run(a),
         Run(a) => commands::run::run(a),
         Team(_) => CmdOutcome::not_implemented("team"),
-        Test(_) => CmdOutcome::not_implemented("test"),
+        Test(a) => commands::test::run(a),
         Update(_) => CmdOutcome::not_implemented("update"),
         Upgrade(_) => CmdOutcome::not_implemented("upgrade"),
     }

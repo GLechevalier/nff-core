@@ -4,9 +4,12 @@ A native-Rust reimplementation of [PlatformIO Core](https://github.com/platformi
 built so `nff`/`nff-rs` (and the agents that drive them) get a fast, single-binary,
 dependency-free firmware build path.
 
-> Status: **M0 — scaffold + parity harness.** Every PlatformIO CLI command exists
-> and parses; behaviour is ported milestone by milestone. See the plan for the full
-> roadmap (`~/.claude/plans/zazzy-cuddling-pillow.md`).
+> Status: **M0–M5 done.** Config/package/registry (M1–M2), platform+board metadata
+> and the `boards`/`device`/`settings`/`system`/`project` commands (M3), SCons build
+> delegation for `run` (M4), and the `test`/`check`/`debug`/`remote`/`home`
+> orchestration commands (M5, delegated to the Python `platformio` CLI). Behaviour is
+> ported milestone by milestone; see the plan for the full roadmap
+> (`~/.claude/plans/zazzy-cuddling-pillow.md`). **Next: M6** (native ESP32 fast-path).
 
 ## What's here
 

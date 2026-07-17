@@ -53,14 +53,17 @@ pub enum Command {
     /// Board Explorer.
     Boards(BoardsArgs),
     /// Static Code Analysis.
+    #[command(disable_help_flag = true)]
     Check(PassthroughArgs),
     /// Continuous Integration helper.
     Ci(PassthroughArgs),
     /// Unit Debugging.
+    #[command(disable_help_flag = true)]
     Debug(PassthroughArgs),
     /// Device manager & serial/socket monitor.
     Device(DeviceArgs),
     /// GUI to manage PlatformIO.
+    #[command(disable_help_flag = true)]
     Home(PassthroughArgs),
     /// Library manager (deprecated upstream alias of `pkg`).
     Lib(PassthroughArgs),
@@ -73,6 +76,7 @@ pub enum Command {
     /// Project manager.
     Project(ProjectArgs),
     /// Remote development.
+    #[command(disable_help_flag = true)]
     Remote(PassthroughArgs),
     /// Run project targets (build, upload, clean, etc.).
     Run(RunArgs),
@@ -83,6 +87,7 @@ pub enum Command {
     /// Manage teams.
     Team(PassthroughArgs),
     /// Unit Testing.
+    #[command(disable_help_flag = true)]
     Test(PassthroughArgs),
     /// Update installed platforms, packages and libraries.
     Update(PassthroughArgs),
