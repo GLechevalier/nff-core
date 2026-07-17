@@ -163,7 +163,10 @@ supabase db push
 `device_group_members`, and `deployments` tables. Apply the nff-fleet / nff-dashboard
 schema first, since this migration extends it.
 
-Create a storage bucket named `artifacts` (or whatever you set `OTA_ARTIFACT_BUCKET` to) with private access.
+The private storage bucket named `artifacts` (or whatever you set `OTA_ARTIFACT_BUCKET`
+to) is provisioned automatically by nff-db migration `0091_ota_artifacts_bucket.sql`,
+so `npm run db:migrate` creates it on every project — no manual step. If you point
+nff-ota at a bucket name other than `artifacts`, create that bucket by hand (private).
 
 ---
 
