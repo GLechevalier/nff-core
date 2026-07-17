@@ -10,14 +10,19 @@ from nff_ota.models.source import FirmwareFixJob, GetFirmwareSourceResult
 from nff_ota.source import ops as _core
 
 
-async def get_firmware_source(device_id: str) -> GetFirmwareSourceResult:
-    """Read the fictional firmware source a mock device is currently running.
+async def get_firmware_source(
+    device_id: str, include_source: bool = False
+) -> GetFirmwareSourceResult:
+    """Read the fictional firmware a mock device is currently running.
 
-    Returns the source (a pseudo-`.ino`), its semver, build id, author, and the ``fault`` the
-    build found in it ({"scenario": ...} or null). Use this first when a device is
-    crash-looping: the bug is in this source, and fixing it is what cures the device.
+    Compact by default: returns the source id (``build_id``), ``version``, ``lines`` (the source's
+    line count), ``author``, and the ``fault`` the build found ({"scenario": ...} or null) — but
+    NOT the source text. Use this first when a device is crash-looping to identify the bug class.
+
+    Pass ``include_source=True`` to also get the full source (a pseudo-`.ino`) in the ``source``
+    field — do that when you are about to edit it to ship a fix.
     """
-    return await _core.get_firmware_source(device_id)
+    return await _core.get_firmware_source(device_id, include_source=include_source)
 
 
 async def submit_firmware_fix(

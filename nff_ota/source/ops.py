@@ -255,19 +255,27 @@ async def register_source(
     return {"version": version, "build_id": build_id, "fault_remaining": fault is not None}
 
 
-async def get_firmware_source(device_id: str) -> GetFirmwareSourceResult:
-    """Return the fictional firmware source the device currently holds."""
+async def get_firmware_source(
+    device_id: str, include_source: bool = False
+) -> GetFirmwareSourceResult:
+    """Return the fictional firmware source the device currently holds.
+
+    Compact by default (id + metadata, no blob); pass ``include_source=True`` to also return the
+    full ``.ino`` text — needed when actually editing the source to fix a bug.
+    """
     rev = await _latest_revision(device_id)
     if not rev:
         return GetFirmwareSourceResult(
             error=f"no firmware source on record for device {device_id!r}"
         )
+    src = rev["source"]
     return GetFirmwareSourceResult(
         source=FirmwareSourceInfo(
             device_id=device_id,
             version=rev["version"],
-            source=rev["source"],
             build_id=rev["build_id"],
+            lines=src.count("\n") + 1,
+            source=src if include_source else None,
             fault=rev.get("fault"),
             author=rev.get("author") or "seed",
         )

@@ -6,8 +6,9 @@ from pydantic import BaseModel, Field
 class FirmwareSourceInfo(BaseModel):
     device_id: str
     version: str                       # the semver this revision ships as
-    source: str                        # the pseudo-.ino the device holds
-    build_id: str
+    build_id: str                      # the source id — sha256(source)[:16], stable per revision
+    lines: int = 0                     # line count of the held source (a size hint when source is elided)
+    source: str | None = None          # the pseudo-.ino the device holds; only set when include_source=True
     fault: dict[str, str] | None = None  # {"scenario": ...} the compiler found, or None
     author: str = "seed"               # 'seed' (harness) | 'agent'
 
