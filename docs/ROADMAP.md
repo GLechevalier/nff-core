@@ -161,6 +161,75 @@ so it surfaces first-run toolchain state in the log without failing the canary.
 
 ---
 
+## P4 — Build-engine performance (native replay) 🚧 roadmap
+
+*Added 2026-07-17 from a benchmark of the PlatformIO backend: `pio+rs` (native in-process engine,
+`tools/pio_native.rs` → `platformio_rs`) vs `pio normal` (legacy subprocess, `NFF_PIO_LEGACY=1`,
+`tools/pio.rs`). Measured through the real `compile` MCP tool (HTTP round-trip), sketch
+`sketches/esp32_vitals` on `esp32dev`, cold (cache-miss capture) + warm (plan-cache replay),
+interleaved. Tokens via `tiktoken o200k_base` (proxy; char counts are exact).*
+
+### Benchmark result (nff v0.2.36)
+
+| arm / state | median time | payload tokens | log lines | `built_natively` |
+|---|---|---|---|---|
+| pio+rs · cold (capture) | ~9.3 s | **~322,600** ⚠️ | 274 | false |
+| pio+rs · warm (replay) | **~2.79 s** | **319** | 3 | true |
+| pio normal · cold | ~9.5 s | 1,846 | 85 | false |
+| pio normal · warm | ~3.26 s | 734 | 25 | false |
+
+Net: native replay gives a **~15% warm speedup** and a **~2.3× warm token win** (terse
+`built natively` summary), but is **~equal on cold** and has a severe cold-token regression (below).
+
+### 11. Native engine must actually ship in the release binary — **verify per release**
+The first benchmark showed *zero* difference between the two arms because the shipped
+`target/release/nff.exe` was **stale** (v0.2.34) and predated the native-engine wiring in
+`tools/{toolchain,pio_native}.rs` + `platformio_rs/src/commands/run.rs`; the compile path silently
+fell through to in-process SCons. A `cargo build --release` (→ v0.2.36) is what activated
+`built natively`. **Action:** treat the native fast-path as a release-gated feature — the
+`windows-smoke`/CI canaries should assert a warm `compile` emits `built natively` (i.e. the plan
+cache at `.pio/build/nff/.pio-rs-native/plan.json` is written and replayed), so a stale/misbuilt
+binary can never regress this silently again.
+
+### 12. ⚠️ Cold-capture floods the MCP payload (~322k tokens) — **bug, high priority**
+On a cache-miss, `native::build_env` runs a **verbose** SCons capture and pipes the entire log
+(`to_out(&output)` in `platformio_rs/src/build/native/mod.rs`) straight into the `compile` tool's
+`output` field — ~1.16 MB / ~322k tokens for `esp32_vitals` (vs 1,846 tokens for the legacy path).
+The *first* compile of any sketch — or any compile after a structural change that invalidates the
+plan cache (new source file, changed build flag, platform bump; see `plan::cache_key`) — would blow
+up an agent's context. **Fix:** summarize/suppress the capture log in the returned payload the way
+replay already does (keep the verbose capture on disk for debugging, return a short summary +
+errors). This is the single most impactful correctness fix for the MCP/agent use case.
+
+### 13. Make a warm compile *really* fast — bottleneck is the GNU xtensa toolchain
+Phase profile of a warm build (replayed captured commands, steady-state), `esp32_vitals`:
+
+| phase | time | share | note |
+|---|---|---|---|
+| **link → firmware.elf** | ~1.7 s | ~50% | GNU `ld` statically linking `libFrameworkArduino.a` (3.3 MB) + ESP-IDF libs → 6 MB ELF; single-threaded. The 9 MB `.map` is negligible (dropping `-Wl,-Map` saved nothing). |
+| **compile sketch TU** | ~1.25 s | ~35% | one `g++` on `esp32_vitals.ino.cpp` — dominated by parsing `Arduino.h`/`WiFi.h`/ESP-IDF headers, not user code |
+| 3× image gen (esptool) | ~0.46 s | ~13% | `python esptool.py` elf2image ×2 + `gen_esp32part.py`; ~124 ms of each is Python startup |
+
+The orchestrator is **already** off the critical path (native replay removed SCons/Python/PIO
+startup) — which is why replay only bought ~15%. What remains is irreducible compiler work. Levers,
+ranked:
+- **(a) PCH the Arduino headers** — highest ROI for the edit→compile loop. The ~1.25 s sketch
+  compile is almost entirely header re-parsing; a precompiled header could cut it to a few hundred
+  ms. PlatformIO/Arduino don't do this by default.
+- **(b) Native Rust image generation** — replace the two `python esptool.py` spawns with in-process
+  `elf2image` (espflash-style) in `platformio_rs`. Removes ~0.4 s of Python startup; the engine is
+  already Rust.
+- **(c) Faster linker (`lld`)** — the ~1.7 s link is the hard floor; every build relinks the whole
+  static image (no incremental link for firmware). GNU `ld` on Xtensa is single-threaded; LLVM `lld`
+  (experimental Xtensa) could be 2–5×. `mold` has no Xtensa support. Without `lld` you cannot get
+  this sketch under ~1.7 s.
+- **(d) Parallel compile + ccache** — only helps **cold** (47 TUs); a warm build compiles one TU, so
+  `-j` is moot there. Already wired via `platformio_rs` jobs.
+
+Rough target: PCH (−~1 s) + native image gen (−~0.4 s) → ~2.0 s; sub-1.7 s needs `lld`.
+
+---
+
 ## Suggested sequencing
 
 1. **P0** — one afternoon, pure docs + hygiene. Removes the biggest sources of confusion.
@@ -168,3 +237,6 @@ so it surfaces first-run toolchain state in the log without failing the canary.
 2. **P1 #4** ✅ — the offline mode. Changes the product's first impression the most.
 3. **P2 #5–7** ✅ — `nff status`, `nff mcp` subcommands, better error messages.
 4. **P3** ✅ — CI split, Windows smoke test, security doc.
+5. **P4 #11–13** 🚧 — build-engine performance. Do **#12** (cold-capture token flood) first — it's a
+   correctness bug for agents — then **#11** (release-gate the native path in CI), then the
+   warm-speed levers **#13** (PCH → native image gen → lld).
