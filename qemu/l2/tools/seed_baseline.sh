@@ -48,8 +48,20 @@ if [ -n "$BUILD_CACHE_VOLUME" ]; then
 fi
 [ -n "$CCACHE_VOLUME" ] && cache_mounts="$cache_mounts -v $CCACHE_VOLUME:/ccache"
 echo ">> compiling (arduino-shim, ${IDF_IMAGE}) — cold ~15 min, warm ~1 min (reuses ${BUILD_CACHE_VOLUME:-<none>})…"
-docker run --rm -e NFF_BUILD_ID="$BUILD_ID" -e NFF_FW_VERSION="$FW_VERSION" \
-  -v "$REPO":/repo:ro -v "$WORK":/work $cache_mounts "$IDF_IMAGE" \
+# Windows/git-bash mount-path handling. Two problems, one fix:
+#  1) MSYS auto-rewrites the mount DESTINATIONS (`:/repo`, `:/work`, `:/bcache`, `:/ccache`) into
+#     Windows paths, so /repo inside the container isn't the repo and every /repo/... lookup 404s
+#     ("build_arduino_shim.sh: No such file or directory"). We suppress that with MSYS_NO_PATHCONV=1.
+#  2) But that also stops MSYS converting the SOURCES, and $WORK=mktemp is git-bash's virtual
+#     /tmp/… which Docker can't resolve (mounts /work empty → "cp: cannot stat '/work/*.ino'").
+# Fix: hand Docker Windows-form source paths via cygpath, and keep conversion off for the rest.
+# cygpath is absent on Linux (prod) → win_path() falls back to the path unchanged; MSYS_NO_PATHCONV
+# is then just an unused env var. So this whole block is a no-op off Windows.
+win_path() { cygpath -w "$1" 2>/dev/null || printf '%s' "$1"; }
+REPO_MNT="$(win_path "$REPO")"
+WORK_MNT="$(win_path "$WORK")"
+MSYS_NO_PATHCONV=1 docker run --rm -e NFF_BUILD_ID="$BUILD_ID" -e NFF_FW_VERSION="$FW_VERSION" \
+  -v "$REPO_MNT":/repo:ro -v "$WORK_MNT":/work $cache_mounts "$IDF_IMAGE" \
   bash -lc "SKETCH_DIR=/work ARDUINO_VER=\"$ARDUINO_VER\" PROJ=$proj ${artifact_env}\
             bash /repo/nff-mock/qemu/l2/example-arduino/build_arduino_shim.sh"
 
