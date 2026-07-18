@@ -139,6 +139,19 @@ async def _build_deploy(request: Request) -> JSONResponse:
     if group_err:
         return JSONResponse({"error": group_err}, status_code=400)
 
+    # The firmware_versions row is multi-tenant (project_id is NOT NULL). Every other
+    # artifact writer resolves the tenant from the target device/group and passes it;
+    # this webhook must too, or a first upload of a new version fails the upsert (23502).
+    # The group is the tenant anchor — mirror create_deployment (deployments/ops.py).
+    client = get_client()
+    grp = await client.table("device_groups").select("project_id").eq("id", group_id).execute()
+    project_id = grp.data[0].get("project_id") if grp.data else None
+    if not project_id:
+        return JSONResponse(
+            {"error": f"device group {group_id!r} has no project_id (tenant); re-provision it"},
+            status_code=400,
+        )
+
     # device_types is the firmware's target allow-list. A caller may pass it explicitly,
     # but the target group is the source of truth for what hardware is actually in play:
     # when the caller didn't supply a usable list, derive it from the self-attested
@@ -195,6 +208,7 @@ async def _build_deploy(request: Request) -> JSONResponse:
         upload = await upload_artifact(
             UploadArtifactParams(
                 name=name, version=version, device_types=device_types, file_path=file_path,
+                project_id=project_id,
                 build_id=_str("build_id"),
                 branch_name=_str("branch_name"),
                 author=_str("author"),
