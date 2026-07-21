@@ -2,7 +2,7 @@
   <img src="public/images/tumbnail.png" alt="nff" width="640">
 </p>
 
-<h1 align="center">nff — LLM bridge to hardware</h1>
+<h1 align="center">nff — let coding agents iterate on hardware</h1>
 
 <p align="center">
   <a href="https://pypi.org/project/nff/"><img alt="PyPI" src="https://img.shields.io/pypi/v/nff?color=2b9348&label=pypi"></a>
@@ -13,7 +13,7 @@
   <a href="https://nanoforgeflow.com"><img alt="nff platform" src="https://img.shields.io/badge/platform-nanoforgeflow.com-111"></a>
 </p>
 
-nff is an MCP server that gives LLMs direct control over physical hardware — on the bench during development, and in the field for maintenance and diagnosis.
+nff is an MCP server that gives coding agents direct control over physical hardware — on the bench during development, and in the field for maintenance and diagnosis.
 
 Connect your board over USB and Claude writes, compiles, flashes, and reads serial output autonomously. Deploy devices with the `nff-sdk-c` library and Claude can reach them remotely: capture crash state, diagnose failures, and push fixes — without physical access.
 
