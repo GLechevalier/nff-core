@@ -14,6 +14,13 @@
 > `/health` + background-daemon auto-start). The Python package under `nff/` remains as a
 > reference/prototype kept in sync version-for-version — **land features in BOTH** so they never
 > drift (prototype in Python if you like, but the shipped behavior is Rust).
+>
+> **⚠ PARITY DEBT (2026-07-20):** the local BYOT crash classifier (`nff diagnose` CLI +
+> `diagnose` MCP tool, `nff/tools/diagnose.py`), the platform OTA/fleet MCP tools
+> (`ota_deploy`/`ota_status`/`ota_deployments`/`ota_devices`/`fleet_status`), the
+> `nff fleet [--watch]` live renderer, and `ota_client.fleet_snapshot()` exist in the
+> **Python reference only**. Port them to `nff-rs` before the next release —
+> **pushes to `main` auto-publish to PyPI**, so do not push until parity lands.
 
 The Rust port replaces the Python `nff` with a single compiled binary — no Python runtime for end
 users, stronger types, better cross-platform packaging.
@@ -97,14 +104,27 @@ nff mcp server  (bearer_auth validates token vs ~/.nff/config.json)
     │
     ├──► local tools
     │       list_devices, compile, flash, serial_read, serial_write,
-    │       reset_device, get_device_info
+    │       reset_device, get_device_info, diagnose
     │       — operate on local hardware / toolchain; no further auth
+    │       — diagnose classifies an ESP32 crash entirely locally (nff/tools/diagnose.py:
+    │         parser + fault taxonomy + rule classifier) and returns STRUCTURED FACTS
+    │         ONLY; the calling model writes the narrative (BYOT — zero platform LLM cost)
     │
-    └──► diagnosis tools
-            authenticate, auth_status, auth_logout, repair
-            — POST to config.diagnosis.server_url (/api/auth/*, /api/repair)
-            — repair auto-refreshes the access_token on 401 using stored refresh_token;
-              clears tokens and returns ERROR: session expired if refresh also fails
+    ├──► diagnosis tools
+    │       authenticate, auth_status, auth_logout, repair
+    │       — POST to config.diagnosis.server_url (/api/auth/*, /api/repair)
+    │       — repair auto-refreshes the access_token on 401 using stored refresh_token;
+    │         clears tokens and returns ERROR: session expired if refresh also fails
+    │       — repair = platform diagnosis with server-side ELF symbolization; diagnose
+    │         (above) is the free local path
+    │
+    └──► platform OTA / fleet tools (require login)
+            ota_deploy, ota_status, ota_deployments, ota_devices, fleet_status
+            — thin wrappers over nff/tools/ota_client.py → {server_url}/api/ota/*;
+              blocking requests offloaded via run_in_executor; auth errors are rewritten
+              to point at the `authenticate` tool
+            — fleet_status returns ota_client.fleet_snapshot(): devices merged with the
+              latest deployment's per-device jobs (CLI live view: `nff fleet --watch`)
 ```
 
 ### 5. Response conventions

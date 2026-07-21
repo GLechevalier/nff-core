@@ -287,6 +287,10 @@ _ALL_TOOL_NAMES = {
     "auth_logout", "auth_status",
     "auth_clear", "auth_reconnect",
     "repair",
+    # local crash classification (no login)
+    "diagnose",
+    # platform OTA / fleet (require login)
+    "ota_deploy", "ota_status", "ota_deployments", "ota_devices", "fleet_status",
     # live on-chip debugging
     "debug_start", "debug_stop", "get_session_info", "get_call_stack",
     "get_variables", "expand_variable", "get_registers", "get_memory",

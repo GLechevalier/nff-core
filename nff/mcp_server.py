@@ -372,14 +372,14 @@ async def repair(
     access_token = cfg.get("access_token")
     refresh_token = cfg.get("refresh_token")
     if not access_token:
-        return "ERROR: not authenticated — run `nff auth login`"
+        return f"ERROR: not authenticated — {_MCP_LOGIN_HINT}"
     try:
         result = call_repair(server_url, access_token, serial_output, build_id, board)
         return json.dumps(result)
     except ValueError:
         if not refresh_token:
             config.clear_diagnosis_tokens()
-            return "ERROR: session expired — run `nff auth login`"
+            return f"ERROR: session expired — {_MCP_LOGIN_HINT}"
         try:
             new_tokens = auth_tools.refresh_tokens(server_url, refresh_token)
             config.set_diagnosis_tokens(new_tokens.access_token, new_tokens.refresh_token)
@@ -387,9 +387,129 @@ async def repair(
             return json.dumps(result)
         except Exception:
             config.clear_diagnosis_tokens()
-            return "ERROR: session expired — run `nff auth login` to re-authenticate"
+            return f"ERROR: session expired — {_MCP_LOGIN_HINT}"
     except Exception as exc:
         return f"ERROR: {exc}"
+
+
+async def diagnose(
+    serial_output: Optional[str] = None,
+    capture_ms: Optional[int] = None,
+    port: Optional[str] = None,
+    baud: Optional[int] = None,
+) -> Any:
+    from nff.tools import diagnose as diagnose_tools
+    if serial_output is None and capture_ms is not None:
+        # serial_read blocks for the whole capture window — offload it like
+        # power_measure does so the uvicorn loop keeps serving.
+        loop = asyncio.get_running_loop()
+        serial_output = await loop.run_in_executor(
+            None, serial_module.serial_read, capture_ms, port, baud
+        )
+    if not serial_output:
+        return {"ok": False, "error": "provide serial_output= or capture_ms="}
+    return diagnose_tools.diagnose(serial_output)
+
+
+# ---------------------------------------------------------------------------
+# Platform OTA / fleet handlers — thin wrappers over nff.tools.ota_client.
+# All require a platform login (Supabase JWT stored by `nff auth login` or the
+# `authenticate` tool); the client refreshes once on 401 by itself.
+# ---------------------------------------------------------------------------
+
+# In MCP context "run `nff auth login`" is not directly actionable for the calling
+# agent, so auth-shaped errors are rewritten to point at the authenticate tool.
+_MCP_LOGIN_HINT = (
+    "call the `authenticate` tool (for browser login, follow with "
+    "`complete_authentication`), or the user can run `nff auth login` in a terminal"
+)
+
+
+def _ota_offline() -> Optional[str]:
+    if config.is_offline():
+        return (
+            "ERROR: nff is in offline mode — OTA and fleet status go through the "
+            "platform. Unset NFF_OFFLINE (or offline=false in ~/.nff/config.json), "
+            "then authenticate."
+        )
+    return None
+
+
+def _ota_error_text(exc: Exception) -> str:
+    msg = str(exc)
+    if "run `nff auth login`" in msg:
+        head = msg.split("—")[0].strip()
+        return f"ERROR: {head} — {_MCP_LOGIN_HINT}"
+    return f"ERROR: {msg}"
+
+
+async def _ota_call(fn, *args, **kwargs) -> Any:
+    """Guard offline mode, then run a blocking ota_client call off the event loop."""
+    from nff.tools.ota_client import OtaError
+
+    offline = _ota_offline()
+    if offline:
+        return offline
+    loop = asyncio.get_running_loop()
+    try:
+        return await loop.run_in_executor(None, lambda: fn(*args, **kwargs))
+    except OtaError as exc:
+        return _ota_error_text(exc)
+    except Exception as exc:  # pragma: no cover - defensive
+        return f"ERROR: {type(exc).__name__}: {exc}"
+
+
+async def ota_deploy(
+    bin_path: str,
+    version: str,
+    group: str,
+    project: Optional[str] = None,
+    name: Optional[str] = None,
+    device_types: Optional[list] = None,
+    max_in_flight: Optional[int] = None,
+    retries: Optional[int] = None,
+) -> Any:
+    from nff.tools import ota_client
+
+    # Fail fast on bad inputs before any network hop.
+    if not ota_client.is_semver(version):
+        return f"ERROR: version must be 3-part semver like 1.2.0 (got {version!r})"
+    if not os.path.isfile(bin_path):
+        return (
+            f"ERROR: no such file: {bin_path} — pass the `image` path returned by "
+            "the `compile` tool"
+        )
+    return await _ota_call(
+        ota_client.deploy,
+        bin_path,
+        version=version,
+        group=group,
+        project=project,
+        name=name,
+        device_types=list(device_types) if device_types else None,
+        max_in_flight=max_in_flight,
+        retries=retries,
+    )
+
+
+async def ota_status(deployment_id: Optional[str] = None) -> Any:
+    from nff.tools import ota_client
+    return await _ota_call(ota_client.deployment_status, deployment_id)
+
+
+async def ota_deployments() -> Any:
+    from nff.tools import ota_client
+    return await _ota_call(ota_client.list_deployments)
+
+
+async def ota_devices() -> Any:
+    from nff.tools import ota_client
+    return await _ota_call(ota_client.list_devices)
+
+
+async def fleet_status(deployment_id: Optional[str] = None) -> Any:
+    from nff.tools import ota_client
+    return await _ota_call(ota_client.fleet_snapshot, deployment_id)
 
 
 # ---------------------------------------------------------------------------
@@ -597,11 +717,81 @@ _TOOLS = [
          inputSchema={"type": "object", "properties": {
              "email": {"type": "string"},
              "password": {"type": "string"}}}),
-    Tool(name="repair", description="Send serial/crash output to the diagnosis server and return a structured diagnosis",
+    Tool(name="repair",
+         description="Send crash output to the nff platform for a full diagnosis with "
+                     "server-side ELF symbolization (frames resolved to function/file/line "
+                     "from the uploaded build). Requires platform login — on an auth error, "
+                     "call `authenticate`. For a free, local, no-login classification run "
+                     "`diagnose` first; escalate to repair when you need symbolized frames.",
          inputSchema={"type": "object", "properties": {
              "serial_output": {"type": "string"}, "build_id": {"type": "string"},
              "board": {"type": "string"}},
              "required": ["serial_output"]}),
+    Tool(name="diagnose",
+         description="Classify an ESP32 crash locally — no login, no network, no API key. "
+                     "Pass serial_output= (crash text) or capture_ms= to capture from the "
+                     "attached board first. Returns STRUCTURED FACTS ONLY as JSON: "
+                     "crash_class, confidence, rationale, family, is_symptom, "
+                     "remediation_hint, extracted registers and raw backtrace addresses, "
+                     "and a raw excerpt. It deliberately does NOT write a root-cause "
+                     "explanation — YOU (the calling model) write the analysis from these "
+                     "facts, honoring is_symptom (e.g. a watchdog is a symptom: name what "
+                     "blocked; don't suggest feeding the watchdog) and remediation_hint. "
+                     "Backtrace addresses are unsymbolized; for server-side ELF "
+                     "symbolization use `repair` (requires login).",
+         inputSchema={"type": "object", "properties": {
+             "serial_output": {"type": "string",
+                               "description": "Raw serial/crash text to classify"},
+             "capture_ms": {"type": "integer",
+                            "description": "Capture serial for N ms instead of passing text"},
+             "port": {"type": "string"}, "baud": {"type": "integer"}}}),
+    # --- platform OTA / fleet (require login; see `authenticate`) ---
+    Tool(name="ota_deploy",
+         description="Ship a compiled firmware .bin to a field device group over-the-air "
+                     "via the nff platform (staged, signed rollout). bin_path should be the "
+                     "`image` path returned by the `compile` tool — compile first, then "
+                     "deploy. version must be 3-part semver (e.g. 1.2.0) and greater than "
+                     "the fleet's current version (devices refuse downgrades). Requires "
+                     "platform login — on a not-authenticated error, call `authenticate`. "
+                     "Returns JSON {deployment_id, version, delivered, failed, skipped}; "
+                     "track progress with `ota_status` or `fleet_status`.",
+         inputSchema={"type": "object", "properties": {
+             "bin_path": {"type": "string",
+                          "description": "Path to the compiled .bin (the compile tool's `image`)"},
+             "version": {"type": "string", "description": "3-part semver, e.g. 1.2.0"},
+             "group": {"type": "string", "description": "Target device group name in your project"},
+             "project": {"type": "string",
+                         "description": "Project id, only to disambiguate a shared group name"},
+             "name": {"type": "string", "description": "Human label for the artifact"},
+             "device_types": {"type": "array", "items": {"type": "string"},
+                              "description": "Firmware target device type(s); defaults from the group"},
+             "max_in_flight": {"type": "integer",
+                               "description": "Cap on devices updating concurrently"},
+             "retries": {"type": "integer", "description": "Per-device retry budget"}},
+             "required": ["bin_path", "version", "group"]}),
+    Tool(name="ota_status",
+         description="Per-device progress of one OTA deployment (the project's latest if "
+                     "deployment_id is omitted). Returns JSON {ok, deployment, jobs}; each "
+                     "job has device_id, status (pending|downloading|verifying|committed|"
+                     "rolled_back|timed_out) and progress 0-100. Requires platform login.",
+         inputSchema={"type": "object", "properties": {
+             "deployment_id": {"type": "string"}}}),
+    Tool(name="ota_deployments",
+         description="Recent OTA deployments + deployable firmware versions for your "
+                     "project. Requires platform login.",
+         inputSchema={"type": "object", "properties": {}}),
+    Tool(name="ota_devices",
+         description="Enrolled FIELD devices with online/offline status, current firmware "
+                     "version, and OTA enrollment state. Requires platform login. (For "
+                     "USB-attached bench boards use `list_devices` instead.)",
+         inputSchema={"type": "object", "properties": {}}),
+    Tool(name="fleet_status",
+         description="One-shot fleet snapshot: enrolled devices merged with the latest (or "
+                     "given) OTA deployment's per-device jobs — JSON {ok, devices:[{..., "
+                     "job, active_job}], deployment, jobs}. Requires platform login. For a "
+                     "live-updating view the user can run `nff fleet --watch` in a terminal.",
+         inputSchema={"type": "object", "properties": {
+             "deployment_id": {"type": "string"}}}),
     # --- live on-chip debugging (OpenOCD + GDB over JTAG) ---
     Tool(name="debug_start",
          description="Start a live on-chip debug session: launch OpenOCD + GDB over JTAG, "
@@ -702,6 +892,12 @@ _DISPATCH = {
     "auth_clear": auth_clear,
     "auth_reconnect": auth_reconnect,
     "repair": repair,
+    "diagnose": diagnose,
+    "ota_deploy": ota_deploy,
+    "ota_status": ota_status,
+    "ota_deployments": ota_deployments,
+    "ota_devices": ota_devices,
+    "fleet_status": fleet_status,
     "debug_start": debug_start,
     "debug_stop": debug_stop,
     "get_session_info": get_session_info,

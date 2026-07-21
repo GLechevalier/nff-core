@@ -9,7 +9,9 @@ from nff.commands.clean import clean
 from nff.commands.compile_cmd import compile_cmd
 from nff.commands.connect import connect
 from nff.commands.debug import debug
+from nff.commands.diagnose import diagnose
 from nff.commands.doctor import doctor
+from nff.commands.fleet import fleet
 from nff.commands.flash import flash
 from nff.commands.init import init
 from nff.commands.install_deps import install_deps
@@ -56,6 +58,8 @@ cli.add_command(mcp)
 cli.add_command(auth_cli, name="auth")
 cli.add_command(deauth, name="deauth")
 cli.add_command(repair)
+cli.add_command(diagnose)
+cli.add_command(fleet)
 cli.add_command(agent)
 cli.add_command(pi, name="pi")
 cli.add_command(power, name="power")
