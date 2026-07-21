@@ -14,6 +14,7 @@ pub mod mcp;
 pub mod monitor;
 pub mod ota;
 pub mod pi;
+pub mod policy;
 pub mod provision;
 pub mod repair;
 pub mod status;

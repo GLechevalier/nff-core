@@ -10,6 +10,7 @@ pub mod nudge;
 pub mod ota_client;
 pub mod pi;
 pub mod pio;
+pub mod policy;
 pub mod retry;
 pub mod serial;
 pub mod toolchain;

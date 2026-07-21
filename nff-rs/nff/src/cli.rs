@@ -41,6 +41,8 @@ pub enum Commands {
     Provision(ProvisionCommand),
     Agent(AgentArgs),
     Pi(PiCommand),
+    #[command(about = "Show the learned bench policy graph (local POAD-MDP layer).")]
+    Policy(PolicyArgs),
     #[command(about = "Live on-chip debugging (OpenOCD + GDB); bare `nff debug` starts a session.")]
     Debug(DebugCommand),
 }
@@ -412,6 +414,29 @@ pub struct AgentArgs {
         help = "Suppress live output; print only the final reply."
     )]
     pub no_stream: bool,
+}
+
+// ── policy ──────────────────────────────────────────────────────────────────
+
+#[derive(Args)]
+pub struct PolicyArgs {
+    /// Optional: bare `nff policy` (no subcommand) shows the learned graph.
+    #[command(subcommand)]
+    pub sub: Option<PolicySubcommands>,
+    #[arg(long, help = "Print the raw graph JSON.")]
+    pub json: bool,
+}
+
+#[derive(Subcommand)]
+pub enum PolicySubcommands {
+    #[command(about = "Delete ~/.nff/policy.json — the bench forgets everything it learned.")]
+    Clear(PolicyClearArgs),
+}
+
+#[derive(Args, Default)]
+pub struct PolicyClearArgs {
+    #[arg(long, help = "Skip the confirmation prompt.")]
+    pub yes: bool,
 }
 
 // ── pi ──────────────────────────────────────────────────────────────────────

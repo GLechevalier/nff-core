@@ -7,6 +7,7 @@ import contextlib
 import json
 import os
 import secrets
+import time
 from collections.abc import AsyncIterator
 from typing import Any, Optional
 from urllib.parse import parse_qs
@@ -976,12 +977,24 @@ async def _call_tool(name: str, arguments: dict) -> list[TextContent]:
     handler = _DISPATCH.get(name)
     if handler is None:
         return [TextContent(type="text", text=f"ERROR: unknown tool {name!r}")]
+    t0 = time.monotonic()
     result = await handler(**arguments)
+    wall_ms = int((time.monotonic() - t0) * 1000)
     if isinstance(result, dict):
         text = json.dumps(result)
     else:
         text = str(result)
     content = [TextContent(type="text", text=text)]
+    # Local POAD-MDP policy layer: fold this call into the learned bench graph and, when
+    # it lands the bench in a known faulty state, append the learned repair procedure as
+    # a separate text block (same mechanism as the nudge below). Fail-soft by contract —
+    # observe_tool never raises — so the tool's own output is never disturbed.
+    from nff.tools import policy
+
+    if policy.enabled():
+        hint = policy.observe_tool(name, result, wall_ms)
+        if hint:
+            content.append(TextContent(type="text", text=hint))
     # Append a periodic promo as a separate text block so the connected agent can relay it,
     # without disturbing the tool's own OK:/ERROR:/JSON output.
     from nff.tools import nudge

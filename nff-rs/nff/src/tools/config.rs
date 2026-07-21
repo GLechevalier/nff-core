@@ -29,6 +29,8 @@ pub struct Config {
     pub build: BuildConfig,
     #[serde(default)]
     pub debug: DebugConfig,
+    #[serde(default)]
+    pub policy: PolicyConfig,
     /// Local/offline mode: `nff init` skips the cloud sign-in and only local
     /// build/flash/monitor/debug are enabled. Sticky once set; cleared on a successful login.
     #[serde(default)]
@@ -182,6 +184,34 @@ pub struct DebugConfig {
     pub interface: Option<String>,
 }
 
+/// Local POAD-MDP policy layer (tools/policy.rs): the MCP server records every tool
+/// call into ~/.nff/policy.json and advises the learned repair procedure once a faulty
+/// state has `min_support` prior fixes. `NFF_POLICY=off` overrides per-run.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct PolicyConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default = "default_min_support")]
+    pub min_support: u64,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_min_support() -> u64 {
+    3
+}
+
+impl Default for PolicyConfig {
+    fn default() -> Self {
+        PolicyConfig {
+            enabled: true,
+            min_support: 3,
+        }
+    }
+}
+
 impl Default for Config {
     fn default() -> Self {
         Config {
@@ -192,6 +222,7 @@ impl Default for Config {
             agent: AgentConfig::default(),
             build: BuildConfig::default(),
             debug: DebugConfig::default(),
+            policy: PolicyConfig::default(),
             offline: false,
             last_build: None,
             nudge_count: 0,
@@ -330,6 +361,12 @@ pub fn get_build_config() -> Result<BuildConfig, ConfigError> {
 
 pub fn get_debug_config() -> Result<DebugConfig, ConfigError> {
     Ok(load()?.debug)
+}
+
+/// Policy-layer config, defaulting (enabled, min_support 3) on any read error so the
+/// tap stays best-effort.
+pub fn get_policy_config() -> PolicyConfig {
+    load().map(|c| c.policy).unwrap_or_default()
 }
 
 pub fn set_build_backend(backend: &str) -> Result<(), ConfigError> {

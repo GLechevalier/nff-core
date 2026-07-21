@@ -66,6 +66,7 @@ fn main() {
         Commands::Pi(p) => match p.sub {
             PiSubcommands::Probe(args) => commands::pi::run_probe(&args),
         },
+        Commands::Policy(args) => commands::policy::run(&args),
         Commands::Debug(d) => match d.sub {
             Some(DebugSubcommands::Check(args)) => commands::debug::run_check(&args),
             Some(DebugSubcommands::Start(args)) => commands::debug::run_start(&args),

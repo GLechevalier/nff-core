@@ -1318,7 +1318,7 @@ dependencies = [
 
 [[package]]
 name = "nff"
-version = "0.2.36"
+version = "0.2.37"
 dependencies = [
  "anyhow",
  "axum",
@@ -1337,6 +1337,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serialport",
+ "sha2",
  "tar",
  "thiserror 1.0.69",
  "tokio",

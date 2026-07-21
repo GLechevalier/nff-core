@@ -1,0 +1,2 @@
+scripts/install.sh text eol=lf
+scripts/install.ps1 text eol=lf
