@@ -110,6 +110,92 @@ fn default_120_u32() -> u32 {
     120
 }
 
+#[derive(Deserialize, JsonSchema)]
+struct DiagnoseParams {
+    /// Raw serial/crash text to classify
+    serial_output: Option<String>,
+    /// Capture serial for N ms instead of passing text
+    capture_ms: Option<u64>,
+    /// Serial port. Defaults to config.
+    port: Option<String>,
+    /// Baud rate. Defaults to config.
+    baud: Option<u32>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct OtaDeployParams {
+    /// Path to the compiled .bin (the compile tool's `image`)
+    bin_path: String,
+    /// 3-part semver, e.g. 1.2.0
+    version: String,
+    /// Target device group name in your project
+    group: String,
+    /// Project id, only to disambiguate a shared group name
+    project: Option<String>,
+    /// Human label for the artifact
+    name: Option<String>,
+    /// Firmware target device type(s); defaults from the group
+    device_types: Option<Vec<String>>,
+    /// Cap on devices updating concurrently
+    max_in_flight: Option<i64>,
+    /// Per-device retry budget
+    retries: Option<i64>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct DeploymentIdParam {
+    /// Deployment id (defaults to the project's latest)
+    deployment_id: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
+// Platform OTA / fleet helpers — thin wrappers over tools::ota_client.
+// All require a platform login (Supabase JWT stored by `nff auth login` or the
+// `authenticate` tool); the client refreshes once on 401 by itself.
+// ---------------------------------------------------------------------------
+
+// In MCP context "run `nff auth login`" is not directly actionable for the calling
+// agent, so auth-shaped errors are rewritten to point at the authenticate tool.
+const MCP_LOGIN_HINT: &str = "call the `authenticate` tool (for browser login, follow with \
+    `complete_authentication`), or the user can run `nff auth login` in a terminal";
+
+fn ota_offline() -> Option<String> {
+    if crate::tools::config::is_offline() {
+        return Some(
+            "ERROR: nff is in offline mode — OTA and fleet status go through the \
+             platform. Unset NFF_OFFLINE (or offline=false in ~/.nff/config.json), \
+             then authenticate."
+                .into(),
+        );
+    }
+    None
+}
+
+fn ota_error_text(exc: &crate::tools::ota_client::OtaError) -> String {
+    let msg = exc.to_string();
+    if msg.contains("run `nff auth login`") {
+        let head = msg.split('—').next().unwrap_or("").trim();
+        return format!("ERROR: {head} — {MCP_LOGIN_HINT}");
+    }
+    format!("ERROR: {msg}")
+}
+
+/// Guard offline mode, then run a blocking ota_client call off the Tokio runtime
+/// (reqwest::blocking panics under the rmcp runtime — offload to a plain OS thread).
+fn ota_call(
+    f: impl FnOnce() -> crate::tools::ota_client::Result<Value> + Send + 'static,
+) -> String {
+    if let Some(offline) = ota_offline() {
+        return offline;
+    }
+    std::thread::spawn(move || match f() {
+        Ok(v) => v.to_string(),
+        Err(e) => ota_error_text(&e),
+    })
+    .join()
+    .unwrap_or_else(|_| "ERROR: ota thread panicked".into())
+}
+
 // ---------------------------------------------------------------------------
 // Auth helpers (shared by the authenticate / auth_reconnect tools)
 // ---------------------------------------------------------------------------
@@ -820,7 +906,7 @@ impl NffServer {
         };
         let server_url = config.diagnosis.server_url.clone();
         let Some(access_token) = config.diagnosis.access_token.clone() else {
-            return "ERROR: not authenticated — run `nff auth login`".into();
+            return format!("ERROR: not authenticated — {MCP_LOGIN_HINT}");
         };
         let refresh_token = config.diagnosis.refresh_token.clone();
         let serial_output = p.serial_output;
@@ -844,7 +930,7 @@ impl NffServer {
                 Err(e) if e.to_string().contains("401") => {
                     let Some(refresh) = refresh_token else {
                         let _ = crate::tools::config::clear_diagnosis_tokens();
-                        return "ERROR: session expired — run `nff auth login`".into();
+                        return format!("ERROR: session expired — {MCP_LOGIN_HINT}");
                     };
                     match crate::tools::auth::refresh_tokens(&server_url, &refresh) {
                         Ok(new_tokens) => {
@@ -866,8 +952,7 @@ impl NffServer {
                         }
                         Err(_) => {
                             let _ = crate::tools::config::clear_diagnosis_tokens();
-                            "ERROR: session expired — run `nff auth login` to re-authenticate"
-                                .into()
+                            format!("ERROR: session expired — {MCP_LOGIN_HINT}")
                         }
                     }
                 }
@@ -876,6 +961,88 @@ impl NffServer {
         })
         .join()
         .unwrap_or_else(|_| "ERROR: repair thread panicked".into())
+    }
+
+    #[tool(
+        description = "Classify an ESP32 crash locally — no login, no network, no API key. Pass serial_output= (crash text) or capture_ms= to capture from the attached board first. Returns STRUCTURED FACTS ONLY as JSON: crash_class, confidence, rationale, family, is_symptom, remediation_hint, extracted registers and raw backtrace addresses, and a raw excerpt. It deliberately does NOT write a root-cause explanation — YOU (the calling model) write the analysis from these facts, honoring is_symptom (e.g. a watchdog is a symptom: name what blocked; don't suggest feeding the watchdog) and remediation_hint. Backtrace addresses are unsymbolized; for server-side ELF symbolization use `repair` (requires login)."
+    )]
+    fn diagnose(&self, Parameters(p): Parameters<DiagnoseParams>) -> String {
+        let mut serial_output = p.serial_output;
+        if serial_output.is_none() {
+            if let Some(capture_ms) = p.capture_ms {
+                serial_output = Some(crate::tools::serial::serial_read(
+                    capture_ms,
+                    p.port.as_deref(),
+                    p.baud,
+                ));
+            }
+        }
+        match serial_output.filter(|s| !s.is_empty()) {
+            Some(text) => crate::tools::diagnose::diagnose(&text).to_string(),
+            None => json!({"ok": false, "error": "provide serial_output= or capture_ms="})
+                .to_string(),
+        }
+    }
+
+    // ── platform OTA / fleet (require login; see `authenticate`) ──────────────
+
+    #[tool(
+        description = "Ship a compiled firmware .bin to a field device group over-the-air via the nff platform (staged, signed rollout). bin_path should be the `image` path returned by the `compile` tool — compile first, then deploy. version must be 3-part semver (e.g. 1.2.0) and greater than the fleet's current version (devices refuse downgrades). Requires platform login — on a not-authenticated error, call `authenticate`. Returns JSON {deployment_id, version, delivered, failed, skipped}; track progress with `ota_status` or `fleet_status`."
+    )]
+    fn ota_deploy(&self, Parameters(p): Parameters<OtaDeployParams>) -> String {
+        // Fail fast on bad inputs before any network hop.
+        if !crate::tools::ota_client::is_semver(&p.version) {
+            return format!(
+                "ERROR: version must be 3-part semver like 1.2.0 (got '{}')",
+                p.version
+            );
+        }
+        if !std::path::Path::new(&p.bin_path).is_file() {
+            return format!(
+                "ERROR: no such file: {} — pass the `image` path returned by the `compile` tool",
+                p.bin_path
+            );
+        }
+        ota_call(move || {
+            crate::tools::ota_client::deploy(
+                &p.bin_path,
+                &p.version,
+                &p.group,
+                p.project.as_deref(),
+                p.name.as_deref(),
+                p.device_types.as_deref(),
+                p.max_in_flight,
+                p.retries,
+            )
+        })
+    }
+
+    #[tool(
+        description = "Per-device progress of one OTA deployment (the project's latest if deployment_id is omitted). Returns JSON {ok, deployment, jobs}; each job has device_id, status (pending|downloading|verifying|committed|rolled_back|timed_out) and progress 0-100. Requires platform login."
+    )]
+    fn ota_status(&self, Parameters(p): Parameters<DeploymentIdParam>) -> String {
+        ota_call(move || crate::tools::ota_client::deployment_status(p.deployment_id.as_deref()))
+    }
+
+    #[tool(
+        description = "Recent OTA deployments + deployable firmware versions for your project. Requires platform login."
+    )]
+    fn ota_deployments(&self) -> String {
+        ota_call(crate::tools::ota_client::list_deployments)
+    }
+
+    #[tool(
+        description = "Enrolled FIELD devices with online/offline status, current firmware version, and OTA enrollment state. Requires platform login. (For USB-attached bench boards use `list_devices` instead.)"
+    )]
+    fn ota_devices(&self) -> String {
+        ota_call(crate::tools::ota_client::list_devices)
+    }
+
+    #[tool(
+        description = "One-shot fleet snapshot: enrolled devices merged with the latest (or given) OTA deployment's per-device jobs — JSON {ok, devices:[{..., job, active_job}], deployment, jobs}. Requires platform login. For a live-updating view the user can run `nff fleet --watch` in a terminal."
+    )]
+    fn fleet_status(&self, Parameters(p): Parameters<DeploymentIdParam>) -> String {
+        ota_call(move || crate::tools::ota_client::fleet_snapshot(p.deployment_id.as_deref()))
     }
 
     // ── live on-chip debugging (OpenOCD + GDB over JTAG/SWD) ──────────────────
@@ -1058,6 +1225,61 @@ mod tests {
         assert_eq!(p.baud, Some(115200));
     }
 
+    #[test]
+    fn diagnose_params_all_optional() {
+        let p: DiagnoseParams = serde_json::from_str(r#"{}"#).unwrap();
+        assert!(p.serial_output.is_none());
+        assert!(p.capture_ms.is_none());
+        let p: DiagnoseParams =
+            serde_json::from_str(r#"{"capture_ms":500,"port":"COM9","baud":115200}"#).unwrap();
+        assert_eq!(p.capture_ms, Some(500));
+        assert_eq!(p.port, Some("COM9".into()));
+    }
+
+    #[test]
+    fn ota_deploy_params_parse() {
+        let p: OtaDeployParams = serde_json::from_str(
+            r#"{"bin_path":"fw.bin","version":"1.2.0","group":"prod",
+                "device_types":["esp32"],"max_in_flight":5}"#,
+        )
+        .unwrap();
+        assert_eq!(p.bin_path, "fw.bin");
+        assert_eq!(p.device_types, Some(vec!["esp32".into()]));
+        assert_eq!(p.max_in_flight, Some(5));
+        assert!(p.retries.is_none());
+    }
+
+    #[test]
+    fn ota_error_text_rewrites_auth_errors_to_authenticate_tool() {
+        // Auth-shaped errors point the agent at the `authenticate` tool …
+        let e = crate::tools::ota_client::OtaError(
+            "not authenticated — run `nff auth login`".into(),
+        );
+        let text = ota_error_text(&e);
+        assert!(text.starts_with("ERROR: not authenticated — "));
+        assert!(text.contains("`authenticate`"));
+        assert!(!text.contains("run `nff auth login` in a terminal\n"));
+
+        let e = crate::tools::ota_client::OtaError(
+            "session expired — run `nff auth login`".into(),
+        );
+        assert!(ota_error_text(&e).contains("`authenticate`"));
+
+        // … while transport/platform errors pass through untouched.
+        let e = crate::tools::ota_client::OtaError("platform returned 500: boom".into());
+        assert_eq!(ota_error_text(&e), "ERROR: platform returned 500: boom");
+    }
+
+    #[test]
+    fn ota_call_short_circuits_offline_before_any_network() {
+        // NFF_OFFLINE gates ota_call before the closure runs (the Python tests assert
+        // the client is never called). The env var is process-global, so restore it.
+        std::env::set_var("NFF_OFFLINE", "1");
+        let result = ota_call(|| panic!("must not be called while offline"));
+        std::env::remove_var("NFF_OFFLINE");
+        assert!(result.starts_with("ERROR: nff is in offline mode"));
+        assert!(result.contains("NFF_OFFLINE"));
+    }
 }
 
 #[tool_handler]

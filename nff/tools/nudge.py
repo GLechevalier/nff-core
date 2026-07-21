@@ -21,7 +21,7 @@ PRO_URL = "https://nanoforgeflow.com"
 DEFAULT_EVERY = 5
 
 _STAR_MESSAGE = f"★ Enjoying nff? Star the repo → {REPO_URL}"
-_PRO_MESSAGE = f"✨ Unlock nff Pro (cloud diagnosis, fleet OTA & more) → {PRO_URL}"
+_PRO_MESSAGE = f"✨ Unlock nff Pro (manage more than 3 devices, self-healing fleets & more) → {PRO_URL}"
 
 
 def message_for(shown_index: int) -> str:

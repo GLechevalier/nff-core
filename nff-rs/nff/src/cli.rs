@@ -24,7 +24,12 @@ pub enum Commands {
     Clean,
     Test,
     Connect,
-    Ota,
+    #[command(about = "Ship firmware over-the-air to a field device group (via the nff platform).")]
+    Ota(OtaCommand),
+    #[command(about = "Classify a crash from serial output — fully local and offline.")]
+    Diagnose(DiagnoseArgs),
+    #[command(about = "Show field devices with live status, firmware version, and OTA progress.")]
+    Fleet(FleetArgs),
     #[command(name = "install-deps")]
     InstallDeps(InstallDepsArgs),
     Mcp(McpArgs),
@@ -126,6 +131,115 @@ pub struct MonitorArgs {
 pub struct InstallDepsArgs {
     #[arg(long, help = "Reinstall even if already present.")]
     pub force: bool,
+}
+
+// ── ota ─────────────────────────────────────────────────────────────────────
+
+#[derive(Args)]
+pub struct OtaCommand {
+    #[command(subcommand)]
+    pub sub: OtaSubcommands,
+}
+
+#[derive(Subcommand)]
+pub enum OtaSubcommands {
+    #[command(about = "Ship BINARY (a compiled .bin) to a device group as a staged OTA rollout.")]
+    Deploy(OtaDeployArgs),
+    #[command(about = "Show a deployment's per-device progress (latest for the project if omitted).")]
+    Status(OtaStatusArgs),
+    #[command(about = "List recent deployments and deployable firmware versions for your project.")]
+    List,
+    #[command(about = "List enrolled devices and their OTA status / current firmware version.")]
+    Devices,
+}
+
+#[derive(Args)]
+pub struct OtaDeployArgs {
+    #[arg(value_name = "BINARY", help = "Path to the compiled .bin to ship.")]
+    pub binary: PathBuf,
+    #[arg(
+        long,
+        value_name = "VERSION",
+        help = "On-wire firmware version (3-part semver, e.g. 1.2.0)."
+    )]
+    pub version: String,
+    #[arg(long, value_name = "GROUP", help = "Target device group name (in your project).")]
+    pub group: String,
+    #[arg(
+        long,
+        value_name = "UUID",
+        help = "Project id — only needed to disambiguate a group name shared across projects."
+    )]
+    pub project: Option<String>,
+    #[arg(
+        long,
+        value_name = "NAME",
+        help = "Human label for the artifact (defaults to the version)."
+    )]
+    pub name: Option<String>,
+    #[arg(
+        long = "device-type",
+        value_name = "TYPE",
+        help = "Firmware target device type(s). Repeatable. If omitted, the platform derives them from the target group's members."
+    )]
+    pub device_types: Vec<String>,
+    #[arg(
+        long = "max-in-flight",
+        value_name = "N",
+        help = "Cap on devices updating concurrently (rollout stays staged)."
+    )]
+    pub max_in_flight: Option<i64>,
+    #[arg(long, value_name = "N", help = "Per-device retry budget.")]
+    pub retries: Option<i64>,
+}
+
+#[derive(Args)]
+pub struct OtaStatusArgs {
+    #[arg(value_name = "DEPLOYMENT_ID", help = "Deployment id (defaults to the project's latest).")]
+    pub deployment_id: Option<String>,
+}
+
+// ── diagnose ────────────────────────────────────────────────────────────────
+
+#[derive(Args)]
+pub struct DiagnoseArgs {
+    #[arg(long, value_name = "TEXT", help = "Crash/serial output to classify.")]
+    pub serial: Option<String>,
+    #[arg(
+        long = "capture-ms",
+        value_name = "MS",
+        help = "Capture serial from the attached board for N ms, then classify."
+    )]
+    pub capture_ms: Option<u64>,
+    #[arg(long, value_name = "PORT", help = "Serial port. Falls back to config.")]
+    pub port: Option<String>,
+    #[arg(long, help = "Baud rate. Falls back to config.")]
+    pub baud: Option<u32>,
+    #[arg(long, help = "Print the full structured-facts JSON.")]
+    pub json: bool,
+}
+
+// ── fleet ───────────────────────────────────────────────────────────────────
+
+#[derive(Args)]
+pub struct FleetArgs {
+    #[arg(long, short = 'w', help = "Live-refreshing view (Ctrl-C to exit).")]
+    pub watch: bool,
+    #[arg(
+        long,
+        default_value = "3.0",
+        value_name = "SECONDS",
+        help = "Refresh period in seconds for --watch."
+    )]
+    pub interval: f64,
+    #[arg(
+        long,
+        value_name = "ID",
+        help = "Pin the OTA panel to one deployment id (default: the latest)."
+    )]
+    pub deployment: Option<String>,
+    #[arg(long, help = "One-shot machine-readable snapshot.")]
+    pub json: bool,
 }
 
 // ── mcp ─────────────────────────────────────────────────────────────────────

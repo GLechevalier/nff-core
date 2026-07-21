@@ -15,12 +15,12 @@
 > reference/prototype kept in sync version-for-version — **land features in BOTH** so they never
 > drift (prototype in Python if you like, but the shipped behavior is Rust).
 >
-> **⚠ PARITY DEBT (2026-07-20):** the local BYOT crash classifier (`nff diagnose` CLI +
-> `diagnose` MCP tool, `nff/tools/diagnose.py`), the platform OTA/fleet MCP tools
-> (`ota_deploy`/`ota_status`/`ota_deployments`/`ota_devices`/`fleet_status`), the
-> `nff fleet [--watch]` live renderer, and `ota_client.fleet_snapshot()` exist in the
-> **Python reference only**. Port them to `nff-rs` before the next release —
-> **pushes to `main` auto-publish to PyPI**, so do not push until parity lands.
+> Parity note (2026-07-20): the local BYOT crash classifier (`nff diagnose` + the `diagnose`
+> MCP tool), the platform OTA/fleet MCP tools, `nff fleet [--watch]`, and the full `nff ota`
+> command set are ported — `nff-rs/nff/src/tools/{diagnose,ota_client}.rs`,
+> `commands/{diagnose,fleet,ota}.rs`, plus 6 `#[tool]`s in `mcp_server.rs`. The panic-dump
+> string fixtures in `tests/test_diagnose.py` are duplicated verbatim in the Rust
+> `tools/diagnose.rs` test module as the behavioral parity oracle — keep both in sync.
 
 The Rust port replaces the Python `nff` with a single compiled binary — no Python runtime for end
 users, stronger types, better cross-platform packaging.
@@ -30,8 +30,8 @@ The MCP server is now native Rust (`nff-rs/nff/src/mcp_server.rs`, rmcp crate). 
 
 **Adding a new MCP tool (current Python flow):** add an `async def` handler in
 `nff/nff/mcp_server.py`, register it in both `_TOOLS` (with an `inputSchema`) and `_DISPATCH`.
-Local hardware/toolchain logic lives in `nff/nff/tools/`. *(When the Rust port resumes, the
-equivalent is a `#[tool(...)]` method on `NffServer` in `nff-rs/nff/src/mcp_server.rs`.)*
+Local hardware/toolchain logic lives in `nff/nff/tools/`. *(The Rust equivalent is a
+`#[tool(...)]` method on `NffServer` in `nff-rs/nff/src/mcp_server.rs` — land tools in BOTH.)*
 
 ## Claude ↔ nff Handshake
 

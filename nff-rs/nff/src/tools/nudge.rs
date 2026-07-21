@@ -16,7 +16,7 @@ fn star_message() -> String {
     format!("★ Enjoying nff? Star the repo → {REPO_URL}")
 }
 fn pro_message() -> String {
-    format!("✨ Unlock nff Pro (cloud diagnosis, fleet OTA & more) → {PRO_URL}")
+    format!("✨ Unlock nff Pro (manage more than 3 devices, self-healing fleets & more) → {PRO_URL}")
 }
 
 /// Pick the message for the given zero-based "shown" index: even → star, odd → Pro.

@@ -6,7 +6,7 @@ mod tools;
 use clap::Parser;
 use cli::{
     AuthLoginArgs, AuthSubcommands, Cli, Commands, DebugStartArgs, DebugSubcommands,
-    McpSubcommands, PiSubcommands, ProvisionSubcommands,
+    McpSubcommands, OtaSubcommands, PiSubcommands, ProvisionSubcommands,
 };
 
 fn main() {
@@ -32,7 +32,14 @@ fn main() {
             std::process::exit(2);
         }
         Commands::Connect => commands::connect::run(),
-        Commands::Ota => commands::ota::run(),
+        Commands::Ota(o) => match o.sub {
+            OtaSubcommands::Deploy(args) => commands::ota::run_deploy(&args),
+            OtaSubcommands::Status(args) => commands::ota::run_status(&args),
+            OtaSubcommands::List => commands::ota::run_list(),
+            OtaSubcommands::Devices => commands::ota::run_devices(),
+        },
+        Commands::Diagnose(args) => commands::diagnose::run(&args),
+        Commands::Fleet(args) => commands::fleet::run(&args),
         Commands::InstallDeps(args) => commands::install_deps::run(&args),
         Commands::Mcp(args) => match args.sub {
             Some(McpSubcommands::Stop) => commands::mcp::run_stop(),
