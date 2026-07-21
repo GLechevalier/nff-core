@@ -256,3 +256,79 @@ fn mcp_rejects_unknown_bearer_token() {
 // would additionally need a stored bearer token and a connected device, so the
 // end-to-end path is left to manual verification (see docs/bench-agent-pairing.md and
 // the `nff mcp` runbook).
+
+// ---------------------------------------------------------------------------
+// tools/list — the OTA/diagnose parity tools are registered
+// ---------------------------------------------------------------------------
+
+#[test]
+fn tools_list_includes_diagnose_and_ota_tools() {
+    let server = Server::start();
+    let c = client();
+    let init_resp = c
+        .post(server.url("/mcp"))
+        .header("content-type", "application/json")
+        .header("accept", "application/json, text/event-stream")
+        .body(INIT_BODY)
+        .send()
+        .expect("initialize failed");
+    assert!(
+        init_resp.status().is_success(),
+        "initialize: {}",
+        init_resp.status()
+    );
+    let session = init_resp
+        .headers()
+        .get("mcp-session-id")
+        .map(|v| v.to_str().unwrap().to_string());
+    let _ = init_resp.text();
+
+    // The MCP handshake requires the initialized notification before other calls.
+    let mut req = c
+        .post(server.url("/mcp"))
+        .header("content-type", "application/json")
+        .header("accept", "application/json, text/event-stream")
+        .body(r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#);
+    if let Some(s) = &session {
+        req = req.header("mcp-session-id", s);
+    }
+    let _ = req.send().expect("initialized notification failed");
+
+    let mut req = c
+        .post(server.url("/mcp"))
+        .header("content-type", "application/json")
+        .header("accept", "application/json, text/event-stream")
+        .body(r#"{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}"#);
+    if let Some(s) = &session {
+        req = req.header("mcp-session-id", s);
+    }
+    let resp = req.send().expect("tools/list failed");
+    assert!(resp.status().is_success(), "tools/list: {}", resp.status());
+    let text = resp.text().unwrap();
+    // The body is plain JSON or an SSE stream; take the first `data:` event that
+    // carries a JSON-RPC result (the stream may open with an empty priming event).
+    let body: serde_json::Value = text
+        .lines()
+        .filter_map(|l| l.strip_prefix("data:"))
+        .map(str::trim)
+        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+        .find(|v| v.get("result").is_some())
+        .or_else(|| serde_json::from_str(&text).ok())
+        .unwrap_or_else(|| panic!("tools/list response not JSON: {text}"));
+    let names: Vec<&str> = body["result"]["tools"]
+        .as_array()
+        .expect("tools array")
+        .iter()
+        .filter_map(|t| t["name"].as_str())
+        .collect();
+    for tool in [
+        "diagnose",
+        "ota_deploy",
+        "ota_status",
+        "ota_deployments",
+        "ota_devices",
+        "fleet_status",
+    ] {
+        assert!(names.contains(&tool), "tools/list missing '{tool}': {names:?}");
+    }
+}

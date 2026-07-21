@@ -14,6 +14,13 @@
 > `/health` + background-daemon auto-start). The Python package under `nff/` remains as a
 > reference/prototype kept in sync version-for-version — **land features in BOTH** so they never
 > drift (prototype in Python if you like, but the shipped behavior is Rust).
+>
+> Parity note (2026-07-20): the local BYOT crash classifier (`nff diagnose` + the `diagnose`
+> MCP tool), the platform OTA/fleet MCP tools, `nff fleet [--watch]`, and the full `nff ota`
+> command set are ported — `nff-rs/nff/src/tools/{diagnose,ota_client}.rs`,
+> `commands/{diagnose,fleet,ota}.rs`, plus 6 `#[tool]`s in `mcp_server.rs`. The panic-dump
+> string fixtures in `tests/test_diagnose.py` are duplicated verbatim in the Rust
+> `tools/diagnose.rs` test module as the behavioral parity oracle — keep both in sync.
 
 The Rust port replaces the Python `nff` with a single compiled binary — no Python runtime for end
 users, stronger types, better cross-platform packaging.
@@ -23,8 +30,8 @@ The MCP server is now native Rust (`nff-rs/nff/src/mcp_server.rs`, rmcp crate). 
 
 **Adding a new MCP tool (current Python flow):** add an `async def` handler in
 `nff/nff/mcp_server.py`, register it in both `_TOOLS` (with an `inputSchema`) and `_DISPATCH`.
-Local hardware/toolchain logic lives in `nff/nff/tools/`. *(When the Rust port resumes, the
-equivalent is a `#[tool(...)]` method on `NffServer` in `nff-rs/nff/src/mcp_server.rs`.)*
+Local hardware/toolchain logic lives in `nff/nff/tools/`. *(The Rust equivalent is a
+`#[tool(...)]` method on `NffServer` in `nff-rs/nff/src/mcp_server.rs` — land tools in BOTH.)*
 
 ## Claude ↔ nff Handshake
 
@@ -97,14 +104,27 @@ nff mcp server  (bearer_auth validates token vs ~/.nff/config.json)
     │
     ├──► local tools
     │       list_devices, compile, flash, serial_read, serial_write,
-    │       reset_device, get_device_info
+    │       reset_device, get_device_info, diagnose
     │       — operate on local hardware / toolchain; no further auth
+    │       — diagnose classifies an ESP32 crash entirely locally (nff/tools/diagnose.py:
+    │         parser + fault taxonomy + rule classifier) and returns STRUCTURED FACTS
+    │         ONLY; the calling model writes the narrative (BYOT — zero platform LLM cost)
     │
-    └──► diagnosis tools
-            authenticate, auth_status, auth_logout, repair
-            — POST to config.diagnosis.server_url (/api/auth/*, /api/repair)
-            — repair auto-refreshes the access_token on 401 using stored refresh_token;
-              clears tokens and returns ERROR: session expired if refresh also fails
+    ├──► diagnosis tools
+    │       authenticate, auth_status, auth_logout, repair
+    │       — POST to config.diagnosis.server_url (/api/auth/*, /api/repair)
+    │       — repair auto-refreshes the access_token on 401 using stored refresh_token;
+    │         clears tokens and returns ERROR: session expired if refresh also fails
+    │       — repair = platform diagnosis with server-side ELF symbolization; diagnose
+    │         (above) is the free local path
+    │
+    └──► platform OTA / fleet tools (require login)
+            ota_deploy, ota_status, ota_deployments, ota_devices, fleet_status
+            — thin wrappers over nff/tools/ota_client.py → {server_url}/api/ota/*;
+              blocking requests offloaded via run_in_executor; auth errors are rewritten
+              to point at the `authenticate` tool
+            — fleet_status returns ota_client.fleet_snapshot(): devices merged with the
+              latest deployment's per-device jobs (CLI live view: `nff fleet --watch`)
 ```
 
 ### 5. Response conventions
