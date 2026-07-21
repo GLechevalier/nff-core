@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "nff"
-version = "0.2.36"
+version = "0.2.37"
 description = "Claude Code IoT Bridge — connect Claude to hardware via USB"
 readme = "README.md"
 license = "MIT"
