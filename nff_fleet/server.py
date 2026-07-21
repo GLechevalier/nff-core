@@ -4,6 +4,7 @@ from fastmcp import FastMCP
 
 from nff_fleet.broker.broker import start_broker, stop_broker
 from nff_fleet.broker.router import start_router, stop_router
+from nff_fleet.link_bridge import start_link_bridge, stop_link_bridge
 from nff_fleet.reaper import start_reaper, stop_reaper
 from nff_fleet.enroll_worker import start_enroll_worker, stop_enroll_worker
 from nff_fleet.heartbeat import start_heartbeat, stop_heartbeat
@@ -21,6 +22,7 @@ async def _lifespan(app):
     await _db.init()
     await start_broker()
     await start_router()
+    await start_link_bridge()
     await start_reaper()
     await start_enroll_worker()
     await start_heartbeat()
@@ -30,6 +32,7 @@ async def _lifespan(app):
     await stop_heartbeat()
     await stop_enroll_worker()
     await stop_reaper()
+    await stop_link_bridge()
     await stop_router()
     await stop_broker()
     await _db.shutdown()

@@ -4,6 +4,7 @@ services:
     ports:
       - "8883:8883"
       - "3001:3001"
+      - "3008:3008"   # /link WS bridge (wired USB/PPPoS onboarding)
     env_file:
       - .env
     volumes:

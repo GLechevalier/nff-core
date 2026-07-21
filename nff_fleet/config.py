@@ -7,6 +7,9 @@ class NffFleetSettings(BaseSettings):
 
     mqtt_port: int = 8883
     mcp_port: int = 3001
+    # WS↔TCP bridge for wired (USB/PPPoS) onboarding — see link_bridge.py.
+    # (3002 ota, 3003 github, 3004 mockctl, 3005 diag, 3006 pentester, 3007 builder → 3008.)
+    link_port: int = 3008
 
     data_dir: Path = Path("/data")
 
