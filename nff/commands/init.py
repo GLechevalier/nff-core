@@ -65,20 +65,34 @@ def _ensure_logged_in() -> bool:
     return True
 
 
-def _resolve_login(offline_flag: bool) -> None:
-    """Decide how to handle sign-in without ever blocking init. Offline mode (the
-    `--offline` flag or a truthy NFF_OFFLINE) skips the browser flow entirely and marks the
-    bench local. Otherwise attempt a browser login, but a failure/timeout falls back to
-    local mode — compile/flash/monitor/debug work without an account."""
+def _resolve_login(cloud_flag: bool, offline_flag: bool) -> bool:
+    """Decide how to handle sign-in without ever blocking init. LOCAL MODE IS THE
+    DEFAULT: a plain `nff init` never opens a browser or asks for an account —
+    compile/flash/monitor/debug work immediately. `--cloud` opts into the browser
+    sign-in; `--offline` (or a truthy NFF_OFFLINE) additionally persists hard offline
+    mode so cloud prompts stay silenced everywhere. An existing token from a previous
+    `nff auth login` keeps cloud features on without any prompt.
+
+    Returns whether cloud features are active for this run."""
     if offline_flag or config.is_offline():
         config.set_offline(True)
         click.echo("  Offline mode — local build/flash/monitor/debug work without an account.")
         click.echo("  Cloud features (repair, agent, device onboarding) stay disabled "
                    "until you run `nff auth login`.")
-        return
-    if not _ensure_logged_in():
+        return False
+    if config.get_diagnosis_config().get("access_token"):
+        click.echo("  ✓ Signed in to the nff platform — cloud features enabled.")
+        return True
+    if cloud_flag:
+        if _ensure_logged_in():
+            return True
         click.echo("  Continuing in local mode — run `nff auth login` later to enable "
                    "cloud features (repair, agent).")
+        return False
+    click.echo("  Local mode (default) — no account needed for build/flash/monitor/debug.")
+    click.echo("  Cloud features (repair, agent, OTA, device onboarding) are opt-in: "
+               "run `nff init --cloud` or `nff auth login`.")
+    return False
 
 
 def _resolve_wifi() -> tuple[str, str]:
@@ -187,9 +201,13 @@ def _onboard_platform(device) -> None:
 @click.option("--force", is_flag=True)
 @click.option("--backend", type=click.Choice(["arduino", "platformio"]), default=None,
               help="Build backend to use (default: keep current / arduino)")
+@click.option("--cloud", is_flag=True,
+              help="Sign in to the nff platform (browser) and offer device onboarding. "
+                   "Without it, init is local-only and never prompts for an account.")
 @click.option("--offline", is_flag=True,
-              help="Skip cloud sign-in; configure for local build/flash/monitor/debug only.")
-def init(port, baud, force, backend, offline):
+              help="Persist hard offline mode (local is already the default; this also "
+                   "silences cloud hints in doctor/status until `nff auth login`).")
+def init(port, baud, force, backend, cloud, offline):
     """Interactive setup — detect board and configure nff."""
     if backend:
         config.set_build_backend(backend)
@@ -198,9 +216,10 @@ def init(port, baud, force, backend, offline):
 
     click.echo("Welcome to nff init!\n")
 
-    # Sign-in is optional: local build/flash/monitor/debug need no account, and the MCP
-    # tools aren't gated by default. Only cloud features need a token — never block init.
-    _resolve_login(offline)
+    # No account required: local build/flash/monitor/debug and the MCP tools work without
+    # one, so a plain init never opens a browser. `--cloud` (or a prior `nff auth login`)
+    # enables the cloud features — and even then, never block init on login.
+    cloud_enabled = _resolve_login(cloud, offline)
     offline_mode = offline or config.is_offline()
 
     if is_pio:
@@ -256,12 +275,15 @@ def init(port, baud, force, backend, offline):
     elif is_pio:
         click.echo("\nCloud platform onboarding currently runs on the arduino "
                    "backend; skipping. Your board is configured for PlatformIO builds.")
-    else:
+    elif cloud_enabled:
         device = types.SimpleNamespace(port=resolved_port, board=board_name, fqbn=fqbn)
         if fqbn.startswith("esp32") and click.confirm(
             "\nConnect this device to the nff platform now?", default=True
         ):
             _onboard_platform(device)
+    else:
+        click.echo("\nTip: connect this board to the nff platform later with "
+                   "`nff init --cloud` or `nff auth login` (OTA, fleet, repair).")
 
     _register_mcp()
 

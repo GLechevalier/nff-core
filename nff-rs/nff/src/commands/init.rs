@@ -5,10 +5,10 @@ use std::io::{self, BufRead, Write};
 use which::which;
 
 pub fn run(args: &InitArgs) -> Result<()> {
-    // Sign-in is optional: local build/flash/monitor/debug need no account, and the MCP
-    // tools aren't gated by default. Only cloud features (repair, agent, onboarding) need a
-    // token — so never block init on login.
-    resolve_login(args.offline)?;
+    // No account required: local build/flash/monitor/debug and the MCP tools work without
+    // one, so a plain init never opens a browser. `--cloud` (or a prior `nff auth login`)
+    // enables the cloud features — and even then, never block init on login.
+    resolve_login(args.cloud, args.offline)?;
 
     // Persist an explicit backend choice up front so the rest of init — and every
     // later build — honours it (default stays platformio).
@@ -84,11 +84,13 @@ pub fn run(args: &InitArgs) -> Result<()> {
     Ok(())
 }
 
-/// Decide how to handle sign-in without ever blocking init. Offline mode (the `--offline`
-/// flag or a truthy `NFF_OFFLINE`) skips the browser flow entirely and marks the bench local.
-/// Otherwise we attempt a browser login, but a failure/timeout falls back to local mode
-/// instead of aborting — compile/flash/monitor/debug work without an account.
-fn resolve_login(offline_flag: bool) -> Result<()> {
+/// Decide how to handle sign-in without ever blocking init. LOCAL MODE IS THE DEFAULT:
+/// a plain `nff init` never opens a browser or asks for an account —
+/// compile/flash/monitor/debug work immediately. `--cloud` opts into the browser sign-in;
+/// `--offline` (or a truthy `NFF_OFFLINE`) additionally persists hard offline mode so
+/// cloud prompts stay silenced everywhere. An existing token from a previous
+/// `nff auth login` keeps cloud features on without any prompt.
+fn resolve_login(cloud_flag: bool, offline_flag: bool) -> Result<()> {
     if offline_flag || config::is_offline() {
         // Persist the choice so subsequent `nff init` runs stay quiet and `nff doctor`/
         // `nff status` can report the mode.
@@ -101,11 +103,25 @@ fn resolve_login(offline_flag: bool) -> Result<()> {
         );
         return Ok(());
     }
-    if !ensure_logged_in() {
-        println!(
-            "  Continuing in local mode — run `nff auth login` later to enable cloud features (repair, agent)."
-        );
+    let signed_in = config::load()
+        .map(|c| c.diagnosis.access_token.is_some())
+        .unwrap_or(false);
+    if signed_in {
+        println!("  ✓ Signed in to the nff platform — cloud features enabled.");
+        return Ok(());
     }
+    if cloud_flag {
+        if !ensure_logged_in() {
+            println!(
+                "  Continuing in local mode — run `nff auth login` later to enable cloud features (repair, agent)."
+            );
+        }
+        return Ok(());
+    }
+    println!("  Local mode (default) — no account needed for build/flash/monitor/debug.");
+    println!(
+        "  Cloud features (repair, agent, OTA, device onboarding) are opt-in: run `nff init --cloud` or `nff auth login`."
+    );
     Ok(())
 }
 

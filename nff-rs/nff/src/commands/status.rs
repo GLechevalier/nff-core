@@ -24,7 +24,7 @@ pub fn run() -> Result<()> {
         println!("  mcp server    : down  (run `nff mcp` to start)");
     }
 
-    // Auth state: signed in, offline (local mode), or signed out.
+    // Auth state: signed in, hard offline, or the default local mode (no account).
     let signed_in = config::load()
         .map(|c| c.diagnosis.access_token.is_some())
         .unwrap_or(false);
@@ -33,7 +33,7 @@ pub fn run() -> Result<()> {
     } else if config::is_offline() {
         println!("  auth          : offline (local mode)");
     } else {
-        println!("  auth          : signed out");
+        println!("  auth          : local mode (default; `nff auth login` enables cloud)");
     }
 
     // Last successful build artifact (recorded by compile/flash).

@@ -86,22 +86,22 @@ arduino-cli core install esp8266:esp8266
 ### 3. Plug in your board and run init
 
 ```bash
-nff init                      # default PlatformIO backend (board-universal)
+nff init                      # local-first, NO sign-in — default PlatformIO backend (board-universal)
 nff init --backend arduino    # opt into the arduino-cli backend instead
-nff init --offline            # local-only: skip cloud sign-in entirely
+nff init --cloud              # also sign in to the nff platform (browser) + device onboarding
 ```
 
 This single command:
-- **Optionally signs you in** to the nff platform (browser login) to enable cloud features (`repair`, `agent`, device onboarding). Sign-in is **not required** — if it's skipped or times out, init continues in local mode. See [Local / offline mode](#local--offline-mode) below.
+- **Needs no account** — local mode is the default and init never opens a browser or prompts for sign-in. Pass `--cloud` (or run `nff auth login` at any time) to enable the cloud features (`repair`, `agent`, OTA, device onboarding). See [Local mode is the default](#local-mode-is-the-default) below.
 - Detects your board by USB vendor/product ID
 - Writes `~/.nff/config.json` (default device + build backend/board)
 - Installs the active backend's toolchain if missing (PlatformIO Core, or arduino-cli)
-- On the arduino backend with an ESP32, optionally enrolls the board on the nff platform (flash bootstrap firmware → claim into your dashboard)
+- With `--cloud` (or an existing sign-in) on the arduino backend with an ESP32, optionally enrolls the board on the nff platform (flash bootstrap firmware → claim into your dashboard)
 - Registers the nff MCP server with Claude Code (`claude mcp add --scope user --transport http nff http://127.0.0.1:3010/mcp`)
 - **Starts the MCP server in the background** so Claude Code finds it already running — no manual `nff mcp` needed
 
 ```
-  ✓ Signed in to the nff platform
+  Local mode (default) — no account needed for build/flash/monitor/debug.
   ✓ Found: ESP32 (CP210x) on COM10
   ✓ Config written to ~/.nff/config.json
   ✓ Registered with Claude Code CLI (HTTP MCP on 127.0.0.1:3010)
@@ -113,16 +113,16 @@ This single command:
 > The background server runs until you reboot or stop it. After a reboot, run `nff mcp`
 > (or just re-run `nff init`) to bring it back up — `nff doctor` will tell you if it's down.
 
-#### Local / offline mode
+#### Local mode is the default
 
-You don't need an nff account to **compile, flash, monitor, or debug** a board — those run
-entirely on your machine. Run `nff init --offline` (or set `NFF_OFFLINE=1`) to configure the bench
-without any cloud sign-in; even a plain `nff init` no longer blocks on login — if it fails or times
-out, init just continues in local mode. `nff doctor` reports a clean bill of health for a
-local-only setup (sign-in shows as an informational warning, not a failure).
+You don't need an nff account to use nff. **Compile, flash, monitor, debug, and the MCP tools**
+all run entirely on your machine, and a plain `nff init` never opens a browser or asks you to
+sign in. `nff doctor` reports a clean bill of health for a local-only setup.
 
-Only the cloud features need an account: `nff repair`, `nff agent`, and device onboarding. Run
-`nff auth login` whenever you want to enable them — that also lifts offline mode automatically.
+Only the cloud features need an account: `nff repair`, `nff agent`, OTA, and device onboarding.
+Opt in whenever you want them with `nff init --cloud` or `nff auth login` — signing in also lifts
+offline mode automatically. `nff init --offline` (or `NFF_OFFLINE=1`) persists a *hard* offline
+mode that additionally silences the cloud hints until you sign in.
 
 ### 4. Verify
 
@@ -286,7 +286,7 @@ not yet implemented. Full detail and the plan behind the roadmap items live in
 
 | Command | State | Notes |
 |---|---|---|
-| `nff init` | stable | Detects the board, writes config, registers + starts the MCP server. Cloud sign-in is optional — use `nff init --offline` for local-only build/flash/monitor |
+| `nff init` | stable | Detects the board, writes config, registers + starts the MCP server. Local-first: no sign-in by default — `nff init --cloud` opts into the platform |
 | `nff compile` | stable | PlatformIO (default) + arduino backends; no board/port needed |
 | `nff flash` | stable | Compile and upload |
 | `nff monitor` | stable | Stream serial output |
@@ -308,7 +308,7 @@ not yet implemented. Full detail and the plan behind the roadmap items live in
 
 | Command | Description |
 |---|---|
-| `nff init` | Detect board, write config, register + start the MCP server (optionally sign in; `--offline` skips it) |
+| `nff init` | Detect board, write config, register + start the MCP server (no sign-in by default; `--cloud` opts in) |
 | `nff compile <path>` | Compile a sketch to verify it builds (no board/port needed) |
 | `nff flash <path>` | Compile and upload a sketch directory |
 | `nff monitor` | Stream serial output (Ctrl+C to exit) |

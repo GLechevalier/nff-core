@@ -67,7 +67,12 @@ pub struct InitArgs {
     pub backend: Option<String>,
     #[arg(
         long,
-        help = "Skip cloud sign-in; configure for local build/flash/monitor/debug only."
+        help = "Sign in to the nff platform (browser). Without it, init is local-only and never prompts for an account."
+    )]
+    pub cloud: bool,
+    #[arg(
+        long,
+        help = "Persist hard offline mode (local is already the default; this also silences cloud hints in doctor/status until `nff auth login`)."
     )]
     pub offline: bool,
 }

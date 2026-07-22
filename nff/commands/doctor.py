@@ -181,18 +181,17 @@ def check_power_meter() -> Check:
 
 
 def check_login() -> Check:
-    """Sign-in is optional — local build/flash/monitor/debug need no account. Only cloud
-    features (repair, agent) do, so a signed-out bench is a warning, not a failure."""
+    """No account needed — local mode is the default and a signed-out bench is healthy.
+    Only cloud features (repair, agent, OTA) need a token, so this check always passes;
+    the detail just says which mode the bench is in."""
     token = config.get_diagnosis_config().get("access_token")
     if token:
         return Check(passed=True, detail="signed in to the nff platform")
     if config.is_offline():
-        return Check(passed=False, optional=True,
-                     detail="local/offline mode — cloud features disabled",
-                     fix="Run `nff auth login` to enable repair + agent")
-    return Check(passed=False, optional=True,
-                 detail="not signed in — cloud features (repair, agent) disabled",
-                 fix="Run `nff auth login` to enable them (not needed for local build/flash/monitor)")
+        return Check(passed=True,
+                     detail="offline mode — cloud features off (`nff auth login` re-enables)")
+    return Check(passed=True,
+                 detail="local mode (default) — cloud features off (`nff auth login` enables)")
 
 
 def check_mcp_server() -> Check:

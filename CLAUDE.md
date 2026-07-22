@@ -80,7 +80,9 @@ the server's advertised `instructions` string reflects whichever mode is active.
 **One-time bootstrap order:**
 
 ```
-1. nff init              # signs you in (browser login, required), detects board,
+1. nff init              # local-first: NO sign-in by default (`--cloud` opts into
+                         #   the browser login; a prior `nff auth login` also enables
+                         #   cloud features), detects board,
                          #   writes config, calls _register_mcp()
                          #   (claude mcp add --scope user --transport http nff http://127.0.0.1:3010/mcp),
                          #   then starts the MCP server in the background (daemon.start_background)

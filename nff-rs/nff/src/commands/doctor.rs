@@ -173,23 +173,18 @@ fn check_device() -> Check {
 }
 
 fn check_login() -> Check {
-    // Sign-in is optional — local build/flash/monitor/debug need no account. Only cloud
-    // features (repair, agent) do, so a signed-out bench is a warning, not a failure.
+    // No account needed — local mode is the default and a signed-out bench is healthy.
+    // Only cloud features (repair, agent, OTA) need a token, so this check always passes;
+    // the detail just says which mode the bench is in.
     let signed_in = config::load()
         .map(|c| c.diagnosis.access_token.is_some())
         .unwrap_or(false);
     if signed_in {
         Check::ok("Signed in to the nff platform")
     } else if config::is_offline() {
-        Check::warn(
-            "Local/offline mode — cloud features disabled",
-            "Run `nff auth login` to enable repair + agent",
-        )
+        Check::ok("Offline mode — cloud features off (`nff auth login` re-enables)")
     } else {
-        Check::warn(
-            "Not signed in — cloud features (repair, agent) disabled",
-            "Run `nff auth login` to enable them (not needed for local build/flash/monitor)",
-        )
+        Check::ok("Local mode (default) — cloud features off (`nff auth login` enables)")
     }
 }
 
