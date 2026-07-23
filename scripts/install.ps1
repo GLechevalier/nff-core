@@ -7,6 +7,8 @@
 # (or a pinned version) and installs it to %LOCALAPPDATA%\Programs\nff.
 #
 #   $env:NFF_VERSION = "0.2.40"; irm .../install.ps1 | iex    # pin a version
+#   $env:NFF_VERSION = "staging"; irm .../install.ps1 | iex   # staging channel
+#                                  (rolling prerelease built from the staging branch)
 #
 # No param() block on purpose: Invoke-Expression of piped script text cannot
 # carry parameters, so configuration is via NFF_VERSION / NFF_INSTALL_DIR.
@@ -31,6 +33,9 @@ $Asset = "nff-windows-x64.exe"
 
 $BaseUrl = if ($Version -eq "latest") {
     "https://github.com/$Repo/releases/latest/download"
+} elseif ($Version -eq "staging") {
+    # Rolling prerelease refreshed on every push to the staging branch (no v-prefix).
+    "https://github.com/$Repo/releases/download/staging"
 } else {
     "https://github.com/$Repo/releases/download/v$Version"
 }

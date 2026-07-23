@@ -1,0 +1,107 @@
+name: CI / Staging channel
+
+# Every push to `staging` rebuilds the standalone binaries and refreshes the
+# rolling `staging` prerelease (tag `staging`, assets replaced in place), so
+#   irm https://nanoforgeflow.com/install-staging.ps1 | iex
+#   curl -fsSL https://nanoforgeflow.com/install-staging.sh | sh
+# always install the tip of the staging branch. No version bump, no PyPI —
+# binaries report the branch's unbumped Cargo.toml version (e.g. 0.2.37).
+# Tests are not duplicated here: ci.yml already runs on every non-main push.
+
+on:
+  push:
+    branches: [staging]
+
+jobs:
+  # ── 1. Build standalone Rust binaries (same matrix as release.yml) ──────────
+  build-binaries:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            binary: nff
+            asset: nff-linux-x64
+          # Native arm64 Linux build (Raspberry Pi 4/5, ARM servers) on GitHub's
+          # free arm runner — cross-compiling would need a foreign libudev sysroot.
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            binary: nff
+            asset: nff-linux-arm64
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            binary: nff.exe
+            asset: nff-windows-x64.exe
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            binary: nff
+            asset: nff-macos-arm64
+          # Intel macOS — cross-compiled on the Apple-Silicon runner (the legacy
+          # Intel runner is unschedulable), same as release.yml.
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            binary: nff
+            asset: nff-macos-x64
+    runs-on: ${{ matrix.os }}
+    steps:
+      # No `ref:` — build exactly the pushed staging commit (no bump/tag step).
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Install system dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libudev-dev
+      - name: Build release binary
+        run: cargo build --release --target ${{ matrix.target }}
+        working-directory: nff-rs
+      - name: Stage binary
+        shell: bash
+        run: cp "nff-rs/target/${{ matrix.target }}/release/${{ matrix.binary }}" "${{ matrix.asset }}"
+      - name: Upload binary artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: ${{ matrix.asset }}
+
+  # ── 2. Refresh the rolling `staging` prerelease ─────────────────────────────
+  publish-staging:
+    needs: build-binaries
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: nff-*
+          merge-multiple: true
+          path: binaries/
+      # SHA256SUMS is consumed by scripts/install.{sh,ps1} to verify downloads.
+      - name: Generate SHA256SUMS
+        run: cd binaries && sha256sum * > SHA256SUMS
+      # Move the rolling tag to the pushed commit. Full refspec is required:
+      # a `staging` BRANCH of the same name exists, so the short name is ambiguous.
+      - name: Move rolling `staging` tag
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -f staging "$GITHUB_SHA"
+          git push -f origin refs/tags/staging
+      # softprops v2 replaces same-named assets on the existing release, so each
+      # push refreshes all 6 assets (5 binaries + SHA256SUMS) in place.
+      - name: Create/update staging prerelease
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: staging
+          name: nff staging (rolling)
+          prerelease: true
+          files: binaries/*
+          body: |
+            Rolling prerelease built from the `staging` branch (commit ${{ github.sha }}).
+            Assets are overwritten on every push to `staging` — do not pin to this tag.
+
+            Install:
+            - Windows: `irm https://nanoforgeflow.com/install-staging.ps1 | iex`
+            - macOS/Linux: `curl -fsSL https://nanoforgeflow.com/install-staging.sh | sh`

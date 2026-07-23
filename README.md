@@ -60,6 +60,16 @@ irm https://nanoforgeflow.com/install.ps1 | iex
 
 The script downloads the prebuilt standalone `nff` binary for your platform (Linux x64/arm64, Windows x64, macOS arm64/x64) from the [latest GitHub Release](https://github.com/GLechevalier/nff/releases/latest), verifies its SHA-256 checksum, installs it to `~/.local/bin` (or `%LOCALAPPDATA%\Programs\nff` on Windows), and puts it on your PATH. Pin a version with `NFF_VERSION=0.2.40` (env var) before running.
 
+**Staging channel** (rolling prerelease built from the `staging` branch — refreshed on every push, may break):
+
+```bash
+curl -fsSL https://nanoforgeflow.com/install-staging.sh | sh
+```
+
+```powershell
+irm https://nanoforgeflow.com/install-staging.ps1 | iex
+```
+
 **Or via pip:**
 
 ```bash

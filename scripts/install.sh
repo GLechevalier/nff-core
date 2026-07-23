@@ -9,6 +9,8 @@
 #
 #   NFF_VERSION=0.2.40 curl -fsSL .../install.sh | sh    # pin a version
 #   ./install.sh 0.2.40                                  # same, as an argument
+#   NFF_VERSION=staging curl -fsSL .../install.sh | sh   # staging channel
+#                                  (rolling prerelease built from the staging branch)
 #
 # A copy of this file is served from the nanoforgeflow-landing repo's `public/`
 # directory — keep the two in sync (canonical source: nff/scripts/install.sh).
@@ -43,6 +45,9 @@ esac
 
 if [ "$VERSION" = "latest" ]; then
   BASE_URL="https://github.com/$REPO/releases/latest/download"
+elif [ "$VERSION" = "staging" ]; then
+  # Rolling prerelease refreshed on every push to the staging branch (no v-prefix).
+  BASE_URL="https://github.com/$REPO/releases/download/staging"
 else
   VERSION="${VERSION#v}"
   BASE_URL="https://github.com/$REPO/releases/download/v$VERSION"

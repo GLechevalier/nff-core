@@ -1,2 +1,4 @@
 scripts/install.sh text eol=lf
 scripts/install.ps1 text eol=lf
+scripts/install-staging.sh text eol=lf
+scripts/install-staging.ps1 text eol=lf
