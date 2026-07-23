@@ -311,6 +311,7 @@ not yet implemented. Full detail and the plan behind the roadmap items live in
 | `nff agent` | stable | Cloud agent over SSE (needs login) |
 | `nff provision batch` | stable | Fleet batch enrollment |
 | `nff pi probe` | stable | Raspberry-Pi reachability probe |
+| `nff update` | stable | Self-update to the latest release; standalone installs also auto-update in the background |
 | `nff connect` | 🚧 roadmap | Autonomous log-analysis + repair loop — not yet implemented |
 | `nff ota` | 🚧 roadmap | Over-the-air firmware update — not yet implemented |
 
@@ -436,6 +437,33 @@ When you plug a board in, nff resolves it by USB vendor/product ID to a default 
 | Arduino Nano | 2341 | 0058 | `arduino:avr:nano` | `nanoatmega328` |
 
 > The **arduino backend** (`NFF_BUILD_BACKEND=arduino`) is limited to the FQBN column above plus whatever cores you `arduino-cli core install`. The PlatformIO backend is the one that makes the rest of the families above available.
+
+---
+
+## Self-Update
+
+nff keeps itself current the way Claude Code does. After a command finishes, a throttled
+(default: once per 24 h) **detached background check** downloads the latest GitHub Release
+binary, verifies it against the release's `SHA256SUMS`, sanity-runs it, and atomically swaps
+it into place — the *next* invocation runs the new version, and a `✓ nff updated itself to
+vX.Y.Z` notice appears on stderr. Nothing is added to the latency of the command you ran.
+
+- **Only standalone installs auto-update** (the `install.sh` / `install.ps1` one-liners).
+  pip/pipx/uv wheel installs (being deprecated) just get a "new version available —
+  reinstall standalone" notice; dev checkouts are left alone.
+- `nff update` runs the same flow in the foreground; `nff update --check` only reports
+  (exit 2 when a newer release exists — scriptable).
+- **If an update fails, nff calls the doctor**: `nff update` runs `nff doctor`
+  automatically for diagnostics, and a failed *background* attempt is surfaced on your
+  next command with a pointer to `nff update`. `nff doctor` also shows update health
+  (channel, freshness, last error).
+- Opt out with `NFF_NO_AUTO_UPDATE=1` (per-run) or `"update": {"auto": false}` in
+  `~/.nff/config.json` (persistent); `nff update` keeps working either way.
+  `NFF_UPDATE_EVERY_HOURS` tunes the cadence.
+- A running `nff mcp` server keeps its old image through a swap — restart it
+  (`nff mcp restart`) to pick up the new version.
+
+Update state lives in `~/.nff/update.json`; the background job logs to `~/.nff/update.log`.
 
 ---
 

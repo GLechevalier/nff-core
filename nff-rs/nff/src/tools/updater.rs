@@ -305,7 +305,8 @@ pub fn default_install_dir() -> PathBuf {
 
 pub fn read_marker() -> Option<Marker> {
     let raw = fs::read_to_string(marker_path()).ok()?;
-    serde_json::from_str(&raw).ok()
+    // Tolerate a UTF-8 BOM from PowerShell-written markers.
+    serde_json::from_str(raw.trim_start_matches('\u{feff}')).ok()
 }
 
 /// Record the standalone install location (written by the install scripts and re-written
@@ -969,6 +970,14 @@ pub fn after_command_hook(skip: bool) {
 
     if dirty {
         save_state(&state);
+    }
+
+    // Deferred deletion of the previous binary: the swapping process is itself the old
+    // image (renamed to .old on Windows), so only a later run can remove it.
+    if channel == Channel::Standalone {
+        if let Some(target) = standalone_target() {
+            cleanup_old(&target);
+        }
     }
 
     if should_check(&state, config::now_unix()) && !lock_held() {
