@@ -25,6 +25,17 @@
 #include "freertos/event_groups.h"
 #include <stdbool.h>
 
+// The wired (USB/PPPoS) fallback is real-hardware only. On the QEMU demo fleet, esp_wifi is
+// force-shimmed onto the emulated Ethernet MAC (NFF_QEMU is set project-wide), so WiFi always
+// "associates" and this path is unreachable — and PPP/UART0 aren't wired for QEMU. Guarding it
+// out keeps the emulated build linking exactly as before.
+#ifndef NFF_QEMU
+#include "driver/uart.h"
+#include "netif/ppp/pppapi.h"
+#include "netif/ppp/pppos.h"
+#include "lwip/dns.h"
+#endif
+
 #define LED_GPIO        GPIO_NUM_2
 #define WIFI_SSID       "your-wifi"
 #define WIFI_PASS       "your-password"
@@ -79,8 +90,84 @@ static void wifi_event_handler(void *arg, esp_event_base_t base,
     }
 }
 
-// Associate with WIFI_SSID/WIFI_PASS and block until we have an IP. Standard ESP-IDF station
-// bring-up, factored out so app_main() reads as a clean lifecycle.
+#define WIFI_TIMEOUT_MS  20000    // give WiFi a fair chance before switching transports
+
+// ── Wired (USB/PPPoS) fallback ─────────────────────────────────────────────────────────────────
+// A device that cannot associate with WiFi (e.g. onboarded over USB, placeholder creds) runs its
+// network over the serial cable instead: a PPPoS netif on UART0, terminated by the dashboard tab
+// (WiredLink), which answers DNS + NTP locally and splices TCP flows to the fleet. The nff SDK is
+// netif-agnostic, so everything above this line — MQTT, heartbeat, OTA — is unchanged.
+#ifndef NFF_QEMU
+
+#define WIRED_BAUD       460800   // must match the dashboard WiredLink baud
+
+static ppp_pcb      *s_ppp;
+static struct netif  s_ppp_netif;
+static volatile bool s_ppp_up = false;
+
+// lwIP hands us PPP bytes to transmit on the serial line.
+static u32_t ppp_output_cb(ppp_pcb *pcb, const void *data, u32_t len, void *ctx) {
+    (void)pcb;
+    (void)ctx;
+    int n = uart_write_bytes(UART_NUM_0, data, len);
+    return n < 0 ? 0 : (u32_t)n;
+}
+
+// Runs on the lwIP tcpip thread, so the RAW ppp_connect (not pppapi_) is the correct re-dial here.
+// A dropped link (the tab closed) just retries forever; reopening the tab re-attaches the device.
+static void ppp_status_cb(ppp_pcb *pcb, int err, void *ctx) {
+    (void)ctx;
+    if (err == PPPERR_NONE) {
+        s_ppp_up = true;
+    } else {
+        s_ppp_up = false;
+        ppp_connect(pcb, 0);
+    }
+}
+
+// Pump inbound serial bytes into the PPP input path, forever.
+static void ppp_rx_task(void *arg) {
+    (void)arg;
+    static uint8_t buf[512];
+    for (;;) {
+        int n = uart_read_bytes(UART_NUM_0, buf, sizeof(buf), pdMS_TO_TICKS(20));
+        if (n > 0) pppos_input_tcpip(s_ppp, buf, n);
+    }
+}
+
+static void wired_connect(void) {
+    // UART0 becomes a network link: a single stray log byte corrupts a PPP frame, so logging is
+    // silenced first. Online-ness is observed from the fleet, not the serial console.
+    esp_log_level_set("*", ESP_LOG_NONE);
+    uart_config_t uc = {
+        .baud_rate = WIRED_BAUD,
+        .data_bits = UART_DATA_8_BITS,
+        .parity    = UART_PARITY_DISABLE,
+        .stop_bits = UART_STOP_BITS_1,
+        .flow_ctrl = UART_HW_FLOWCTRL_DISABLE,
+    };
+    uart_driver_install(UART_NUM_0, 4096, 4096, 0, NULL, 0);
+    uart_param_config(UART_NUM_0, &uc);
+
+    // esp_netif_init() already ran in wifi_connect(), so the tcpip thread exists — required
+    // before any pppapi_* call, or LCP never transmits.
+    s_ppp = pppapi_pppos_create(&s_ppp_netif, ppp_output_cb, ppp_status_cb, NULL);
+    if (s_ppp == NULL) return;
+    pppapi_set_default(s_ppp);
+    pppapi_connect(s_ppp, 0);
+    xTaskCreatePinnedToCore(ppp_rx_task, "ppp_rx", 4096, NULL, 12, NULL, 0);
+
+    while (!s_ppp_up) vTaskDelay(pdMS_TO_TICKS(50));   // the tab answers as soon as it sees us
+
+    // DNS via the WiredLink router — it also answers SNTP from the host clock.
+    ip_addr_t dns;
+    IP_ADDR4(&dns, 10, 0, 0, 1);
+    dns_setserver(0, &dns);
+}
+#endif /* !NFF_QEMU */
+
+// Associate with WIFI_SSID/WIFI_PASS and block until we have an IP; if WiFi never associates,
+// fall back to the wired (USB) link. Standard ESP-IDF station bring-up otherwise.
 static void wifi_connect(void) {
     s_wifi_events = xEventGroupCreate();
     esp_netif_init();
@@ -100,7 +187,21 @@ static void wifi_connect(void) {
     esp_wifi_set_config(WIFI_IF_STA, &wifi_cfg);
     esp_wifi_start();
 
-    xEventGroupWaitBits(s_wifi_events, WIFI_CONNECTED_BIT, false, true, portMAX_DELAY);
+    EventBits_t bits = xEventGroupWaitBits(s_wifi_events, WIFI_CONNECTED_BIT, false, true,
+                                           pdMS_TO_TICKS(WIFI_TIMEOUT_MS));
+    if ((bits & WIFI_CONNECTED_BIT) == 0) {
+#ifndef NFF_QEMU
+        // No WiFi — run the network over the USB serial cable instead (real hardware only; on QEMU
+        // the shimmed esp_wifi always associates, so this branch is unreachable there).
+        ESP_LOGI(TAG, "wifi not associated - switching to the wired USB link");
+        esp_wifi_stop();
+        wired_connect();
+        return;
+#else
+        // Emulated openeth is up even if the got-IP post raced us; proceed.
+        xEventGroupWaitBits(s_wifi_events, WIFI_CONNECTED_BIT, false, true, portMAX_DELAY);
+#endif
+    }
     ESP_LOGI(TAG, "network up");
 }
 
