@@ -14,3 +14,4 @@ pub mod policy;
 pub mod retry;
 pub mod serial;
 pub mod toolchain;
+pub mod updater;

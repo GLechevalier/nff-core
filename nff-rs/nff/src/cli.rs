@@ -45,6 +45,17 @@ pub enum Commands {
     Policy(PolicyArgs),
     #[command(about = "Live on-chip debugging (OpenOCD + GDB); bare `nff debug` starts a session.")]
     Debug(DebugCommand),
+    #[command(about = "Update nff to the latest release (standalone installs auto-update in the background).")]
+    Update(UpdateArgs),
+}
+
+#[derive(Args)]
+pub struct UpdateArgs {
+    #[arg(long, help = "Only check for a newer release (exit 2 if one is available).")]
+    pub check: bool,
+    /// Silent detached mode spawned by the after-command hook — not for direct use.
+    #[arg(long, hide = true)]
+    pub background: bool,
 }
 
 #[derive(Args)]

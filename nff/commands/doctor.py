@@ -203,6 +203,52 @@ def check_mcp_server() -> Check:
                  fix="Run `nff mcp` (or re-run `nff init`) to start it")
 
 
+def check_update() -> Check:
+    """Optional: self-update health — install channel, freshness, and whether the last
+    background update attempt failed. Reads only local state (no network), so doctor
+    stays fast and offline; a pending update isn't a broken bench, so it never flips
+    the exit code."""
+    from nff.tools import updater
+
+    channel = updater.detect_channel()
+    state = updater.load_state()
+    current = updater.current_version()
+
+    err = state.get("last_error")
+    if err:
+        return Check(
+            passed=False,
+            detail=f"last self-update failed at '{err.get('stage')}': {err.get('detail')}",
+            fix="Run `nff update` to retry with diagnostics",
+            optional=True,
+        )
+
+    latest = state.get("latest_version")
+    last_check = int(state.get("last_check_at") or 0)
+    if last_check:
+        age_h = max(0, (config.now_unix() - last_check) // 3600)
+        checked = f"checked {age_h}h ago" if age_h < 48 else f"checked {age_h // 24}d ago"
+    else:
+        checked = "never checked yet"
+
+    if latest and updater.is_newer(latest, current):
+        if channel == "wheel":
+            return Check(
+                passed=False,
+                detail=f"v{latest} available (you have v{current}) — pip channel, auto-update off",
+                fix="Reinstall standalone: curl -fsSL https://nanoforgeflow.com/install.sh | sh "
+                    "(Windows: irm https://nanoforgeflow.com/install.ps1 | iex)",
+                optional=True,
+            )
+        return Check(
+            passed=False,
+            detail=f"v{latest} available (you have v{current}) — background update pending",
+            fix="Run `nff update` to install it now",
+            optional=True,
+        )
+    return Check(passed=True, detail=f"{channel} · v{current} up to date · {checked}")
+
+
 def check_claude_desktop() -> Check:
     path = _CLAUDE_DESKTOP_CONFIG
     if not path.exists():
@@ -239,6 +285,7 @@ def doctor():
         ("Login", check_login()),
         ("MCP server", check_mcp_server()),
         ("Claude Desktop", check_claude_desktop()),
+        ("Update", check_update()),
     ]
     any_failed = False
     for name, ch in checks:

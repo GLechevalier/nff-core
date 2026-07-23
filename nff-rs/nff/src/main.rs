@@ -16,6 +16,8 @@ fn main() {
     // so it never counts toward or shows the periodic nudge. (matches! borrows, so `cli.command`
     // is still available for the dispatch below.)
     let skip_nudge = matches!(cli.command, Commands::Mcp(_));
+    // The self-updater additionally skips `nff update` — it IS the updater.
+    let skip_update_hook = matches!(cli.command, Commands::Mcp(_) | Commands::Update(_));
 
     let result = match cli.command {
         Commands::Init(args) => commands::init::run(&args),
@@ -67,6 +69,7 @@ fn main() {
             PiSubcommands::Probe(args) => commands::pi::run_probe(&args),
         },
         Commands::Policy(args) => commands::policy::run(&args),
+        Commands::Update(args) => commands::update::run(&args),
         Commands::Debug(d) => match d.sub {
             Some(DebugSubcommands::Check(args)) => commands::debug::run_check(&args),
             Some(DebugSubcommands::Start(args)) => commands::debug::run_start(&args),
@@ -82,6 +85,11 @@ fn main() {
     // Periodic "star the repo / go Pro" nudge — shown on stderr every Nth attended CLI run,
     // regardless of whether the command succeeded.
     tools::nudge::maybe_show_cli(skip_nudge);
+
+    // Self-update: surface pending update notices and maybe spawn the throttled
+    // background check-and-swap (standalone installs only; best-effort, never fails
+    // the command).
+    tools::updater::after_command_hook(skip_update_hook);
 
     if let Err(e) = result {
         eprintln!("error: {e}");

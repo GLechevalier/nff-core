@@ -24,6 +24,7 @@ from nff.commands.power import power
 from nff.commands.provision import provision
 from nff.commands.repair import repair
 from nff.commands.status import status
+from nff.commands.update_cmd import update
 
 
 @click.group()
@@ -34,13 +35,16 @@ def cli():
 
 @cli.result_callback()
 def _after_command(*_args, **_kwargs):
-    """After a subcommand finishes, maybe show the periodic 'star the repo / go Pro' nudge.
+    """After a subcommand finishes, maybe show the periodic 'star the repo / go Pro' nudge
+    and let the self-updater surface notices / spawn its throttled background check.
 
-    Skips the long-running `mcp` server, whose lifetime isn't a discrete invocation."""
-    from nff.tools import nudge
+    Skips the long-running `mcp` server, whose lifetime isn't a discrete invocation;
+    the updater additionally skips `update` itself (it IS the updater)."""
+    from nff.tools import nudge, updater
 
     subcommand = click.get_current_context().invoked_subcommand
     nudge.maybe_show_cli(skip=(subcommand == "mcp"))
+    updater.after_command_hook(skip=(subcommand in ("mcp", "update")))
 
 
 cli.add_command(init)
@@ -49,6 +53,7 @@ cli.add_command(flash)
 cli.add_command(monitor)
 cli.add_command(doctor)
 cli.add_command(status)
+cli.add_command(update)
 cli.add_command(clean)
 cli.add_command(connect)
 cli.add_command(debug)

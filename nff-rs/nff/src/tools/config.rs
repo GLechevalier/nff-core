@@ -42,6 +42,8 @@ pub struct Config {
     /// (shown every Nth run). Persisted so the cadence survives across separate CLI processes.
     #[serde(default)]
     pub nudge_count: u64,
+    #[serde(default)]
+    pub update: UpdateConfig,
 }
 
 /// The most recent successful build artifact, recorded by `compile`/`flash` so
@@ -199,6 +201,22 @@ fn default_true() -> bool {
     true
 }
 
+/// Self-update (tools/updater.rs). `auto` gates the background check-and-swap that runs
+/// after CLI commands; `nff update` stays available either way. `NFF_NO_AUTO_UPDATE=1`
+/// overrides per-run. Mutable update state (last check time, staged versions, errors)
+/// lives in ~/.nff/update.json, not here.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct UpdateConfig {
+    #[serde(default = "default_true")]
+    pub auto: bool,
+}
+
+impl Default for UpdateConfig {
+    fn default() -> Self {
+        UpdateConfig { auto: true }
+    }
+}
+
 fn default_min_support() -> u64 {
     3
 }
@@ -226,6 +244,7 @@ impl Default for Config {
             offline: false,
             last_build: None,
             nudge_count: 0,
+            update: UpdateConfig::default(),
         }
     }
 }
@@ -367,6 +386,12 @@ pub fn get_debug_config() -> Result<DebugConfig, ConfigError> {
 /// tap stays best-effort.
 pub fn get_policy_config() -> PolicyConfig {
     load().map(|c| c.policy).unwrap_or_default()
+}
+
+/// Self-update config, defaulting (auto on) on any read error so the after-command hook
+/// stays best-effort.
+pub fn get_update_config() -> UpdateConfig {
+    load().map(|c| c.update).unwrap_or_default()
 }
 
 pub fn set_build_backend(backend: &str) -> Result<(), ConfigError> {
@@ -534,6 +559,18 @@ mod tests {
         }"#;
         let parsed: Config = serde_json::from_str(legacy).unwrap();
         assert_eq!(parsed.nudge_count, 0);
+    }
+
+    #[test]
+    fn update_section_defaults_auto_on_and_is_optional_in_legacy_config() {
+        assert!(UpdateConfig::default().auto);
+        // A config.json written before the update section existed must still parse.
+        let legacy = r#"{
+            "version": "1",
+            "default_device": {"port": null, "board": null, "fqbn": null, "baud": 9600}
+        }"#;
+        let parsed: Config = serde_json::from_str(legacy).unwrap();
+        assert!(parsed.update.auto);
     }
 
     #[test]
