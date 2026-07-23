@@ -63,6 +63,7 @@ fn run_impl(args: &RunArgs) -> Result<i32> {
         isatty: std::io::stdout().is_terminal(),
         program_args: args.program_arg.clone(),
         upload_port: args.upload_port.clone(),
+        log_sink: None,
     };
 
     let mut overall = 0;
