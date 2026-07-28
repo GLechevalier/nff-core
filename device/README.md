@@ -80,6 +80,13 @@ opaque bytes (keyed by version + SHA-256), a JSON **sketch** is a perfectly vali
 "firmware binary" for a mock, and the SHA-256 the mock verifies is the SHA-256 of the
 exact bytes you uploaded.
 
+> **Note — image-validity gate:** nff-ota's `upload_artifact` MCP tool now rejects
+> artifacts that don't look like real ESP32 images (magic byte `0xE9`, ≥ 32 KB), so a
+> raw sketch upload via MCP fails by default. The internal self-heal and build-deploy
+> paths allow synthetic artifacts automatically when the destination is mock-only
+> (`mock-` device ids); for a manual MCP upload of a sketch, set
+> `OTA_ESP_IMAGE_GATE_ENABLED=false` on nff-ota first (dev only).
+
 ```text
 # 1. Upload a sketch as a firmware version (nff-ota MCP, :3002).
 upload_artifact   file=examples/ota_v2_sketch.json  version=2.0.0
