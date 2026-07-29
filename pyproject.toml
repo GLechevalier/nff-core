@@ -9,7 +9,7 @@ description = "MCP server — Mender-inspired OTA firmware update manager for Io
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "mcp>=1.24.0",
+    "mcp>=1.24.0,<2",  # 2.0 removed mcp.server.fastmcp
     "pydantic>=2.11",
     "pydantic-settings>=2.0",
     "supabase>=2.0",
