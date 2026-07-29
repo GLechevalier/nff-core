@@ -30,7 +30,7 @@ def _esp32(port="COM10"):
 
 def test_init_real_board_single_device_decline_onboarding(isolated_config):
     from nff import config as cfg
-    with patch("nff.commands.init._resolve_login"), \
+    with patch("nff.commands.init._resolve_login", return_value=True), \
          patch("nff.commands.init.daemon.start_background", return_value=True), \
          patch("nff.commands.init.boards_module.list_devices", return_value=[_esp32()]), \
          patch("nff.commands.init.toolchain.find_arduino_cli", return_value="/bin/arduino-cli"), \
@@ -47,7 +47,7 @@ def test_init_real_board_single_device_decline_onboarding(isolated_config):
 
 def test_init_real_board_multi_device_select_and_onboard(isolated_config):
     devices = [_esp32("COM3"), _esp32("COM10")]
-    with patch("nff.commands.init._resolve_login"), \
+    with patch("nff.commands.init._resolve_login", return_value=True), \
          patch("nff.commands.init.daemon.start_background", return_value=True), \
          patch("nff.commands.init.boards_module.list_devices", return_value=devices), \
          patch("nff.commands.init.toolchain.find_arduino_cli", return_value="/bin/arduino-cli"), \
@@ -79,32 +79,49 @@ def test_register_mcp_swallows_errors():
 
 
 # ---------------------------------------------------------------------------
-# _resolve_login — sign-in is optional; init never aborts on login failure
+# _resolve_login — local mode is the default; sign-in is opt-in (--cloud) and
+# init never aborts on login failure
 # ---------------------------------------------------------------------------
 
-def test_resolve_login_returns_when_logged_in(isolated_config):
+def test_resolve_login_default_is_local_and_never_opens_browser(isolated_config):
+    from nff import config as cfg
+    with patch("nff.commands.init._ensure_logged_in") as mlogin:
+        assert init_mod._resolve_login(False, False) is False
+    mlogin.assert_not_called()  # a plain `nff init` must not trigger any login flow
+    assert cfg.is_offline() is False  # default local mode is implicit, not hard offline
+
+
+def test_resolve_login_existing_token_keeps_cloud_enabled(isolated_config):
+    from nff import config as cfg
+    cfg.set_diagnosis_tokens("tok", "ref")
+    with patch("nff.commands.init._ensure_logged_in") as mlogin:
+        assert init_mod._resolve_login(False, False) is True
+    mlogin.assert_not_called()  # already signed in — no browser needed
+
+
+def test_resolve_login_cloud_flag_logs_in(isolated_config):
     from nff import config as cfg
     with patch("nff.commands.init._ensure_logged_in", return_value=True):
-        init_mod._resolve_login(False)  # must not raise
+        assert init_mod._resolve_login(True, False) is True  # must not raise
     assert cfg.is_offline() is False  # a successful login does not mark offline
 
 
-def test_resolve_login_falls_back_to_local_mode_on_failure(isolated_config):
+def test_resolve_login_cloud_falls_back_to_local_mode_on_failure(isolated_config):
     # Login fails → init must NOT abort; it continues in local mode.
     with patch("nff.commands.init._ensure_logged_in", return_value=False):
-        init_mod._resolve_login(False)  # must not raise (no SystemExit)
+        assert init_mod._resolve_login(True, False) is False  # no SystemExit
 
 
 def test_resolve_login_offline_flag_skips_login_and_persists(isolated_config):
     from nff import config as cfg
     with patch("nff.commands.init._ensure_logged_in") as mlogin:
-        init_mod._resolve_login(True)
+        assert init_mod._resolve_login(False, True) is False
     mlogin.assert_not_called()  # offline mode never touches the browser flow
     assert cfg.is_offline() is True  # choice is persisted
 
 
 def test_init_starts_background_server(isolated_config):
-    with patch("nff.commands.init._resolve_login"), \
+    with patch("nff.commands.init._resolve_login", return_value=True), \
          patch("nff.commands.init._register_mcp"), \
          patch("nff.commands.init.boards_module.list_devices", return_value=[_esp32()]), \
          patch("nff.commands.init.toolchain.find_arduino_cli", return_value="/bin/arduino-cli"), \

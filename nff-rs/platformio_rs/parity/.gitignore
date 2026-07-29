@@ -1,0 +1,6 @@
+# Dedicated harness venv (isolated PlatformIO install) — never commit.
+.venv-harness/
+# pytest / Python caches
+__pycache__/
+.pytest_cache/
+*.pyc

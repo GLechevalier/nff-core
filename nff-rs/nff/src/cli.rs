@@ -41,8 +41,21 @@ pub enum Commands {
     Provision(ProvisionCommand),
     Agent(AgentArgs),
     Pi(PiCommand),
+    #[command(about = "Show the learned bench policy graph (local POAD-MDP layer).")]
+    Policy(PolicyArgs),
     #[command(about = "Live on-chip debugging (OpenOCD + GDB); bare `nff debug` starts a session.")]
     Debug(DebugCommand),
+    #[command(about = "Update nff to the latest release (standalone installs auto-update in the background).")]
+    Update(UpdateArgs),
+}
+
+#[derive(Args)]
+pub struct UpdateArgs {
+    #[arg(long, help = "Only check for a newer release (exit 2 if one is available).")]
+    pub check: bool,
+    /// Silent detached mode spawned by the after-command hook — not for direct use.
+    #[arg(long, hide = true)]
+    pub background: bool,
 }
 
 #[derive(Args)]
@@ -65,7 +78,12 @@ pub struct InitArgs {
     pub backend: Option<String>,
     #[arg(
         long,
-        help = "Skip cloud sign-in; configure for local build/flash/monitor/debug only."
+        help = "Sign in to the nff platform (browser). Without it, init is local-only and never prompts for an account."
+    )]
+    pub cloud: bool,
+    #[arg(
+        long,
+        help = "Persist hard offline mode (local is already the default; this also silences cloud hints in doctor/status until `nff auth login`)."
     )]
     pub offline: bool,
 }
@@ -412,6 +430,29 @@ pub struct AgentArgs {
         help = "Suppress live output; print only the final reply."
     )]
     pub no_stream: bool,
+}
+
+// ── policy ──────────────────────────────────────────────────────────────────
+
+#[derive(Args)]
+pub struct PolicyArgs {
+    /// Optional: bare `nff policy` (no subcommand) shows the learned graph.
+    #[command(subcommand)]
+    pub sub: Option<PolicySubcommands>,
+    #[arg(long, help = "Print the raw graph JSON.")]
+    pub json: bool,
+}
+
+#[derive(Subcommand)]
+pub enum PolicySubcommands {
+    #[command(about = "Delete ~/.nff/policy.json — the bench forgets everything it learned.")]
+    Clear(PolicyClearArgs),
+}
+
+#[derive(Args, Default)]
+pub struct PolicyClearArgs {
+    #[arg(long, help = "Skip the confirmation prompt.")]
+    pub yes: bool,
 }
 
 // ── pi ──────────────────────────────────────────────────────────────────────

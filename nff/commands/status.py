@@ -32,13 +32,13 @@ def status():
     else:
         click.echo("  mcp server    : down  (run `nff mcp` to start)")
 
-    # Auth state: signed in, offline (local mode), or signed out.
+    # Auth state: signed in, hard offline, or the default local mode (no account).
     if config.get_diagnosis_config().get("access_token"):
         click.echo("  auth          : signed in")
     elif config.is_offline():
         click.echo("  auth          : offline (local mode)")
     else:
-        click.echo("  auth          : signed out")
+        click.echo("  auth          : local mode (default; `nff auth login` enables cloud)")
 
     # Last successful build artifact (recorded by compile/flash).
     last = config.get_last_build()

@@ -61,6 +61,15 @@ _DEFAULT = {
     # Count of CLI invocations seen, used to pace the "star the repo / go Pro" nudge
     # (shown every Nth run). Persisted so the cadence survives across CLI processes.
     "nudge_count": 0,
+    # Local POAD-MDP policy layer (nff/tools/policy.py): the MCP server records every
+    # tool call into ~/.nff/policy.json and advises the learned repair procedure once a
+    # faulty state has min_support prior fixes. NFF_POLICY=off overrides per-run.
+    "policy": {"enabled": True, "min_support": 3},
+    # Self-update (nff/tools/updater.py). `auto` gates the background check-and-swap
+    # that runs after CLI commands; `nff update` stays available either way.
+    # NFF_NO_AUTO_UPDATE=1 overrides per-run. Mutable update state (last check time,
+    # staged versions, errors) lives in ~/.nff/update.json, not here.
+    "update": {"auto": True},
 }
 
 
@@ -309,6 +318,28 @@ def get_debug_config() -> dict:
         return cfg
     except ConfigError:
         return copy.deepcopy(_DEFAULT["debug"])
+
+
+def get_policy_config() -> dict:
+    """Local policy-layer config, merged over defaults so older config files (written
+    before this section existed) still return every key."""
+    try:
+        cfg = copy.deepcopy(_DEFAULT["policy"])
+        cfg.update(load().get("policy", {}))
+        return cfg
+    except ConfigError:
+        return copy.deepcopy(_DEFAULT["policy"])
+
+
+def get_update_config() -> dict:
+    """Self-update config, merged over defaults so older config files (written before
+    this section existed) still return every key (auto in particular)."""
+    try:
+        cfg = copy.deepcopy(_DEFAULT["update"])
+        cfg.update(load().get("update", {}))
+        return cfg
+    except ConfigError:
+        return copy.deepcopy(_DEFAULT["update"])
 
 
 def get_power_config() -> dict:

@@ -232,3 +232,6 @@ renderer/
 *.pdb
 public/videos/
 graphify-out/
+# Rust sources shadowed by the Python-template patterns above (build/, MANIFEST):
+# the negated dir glob makes git descend into src/build/ and src/package/manifest/.
+!nff-rs/platformio_rs/src/**

@@ -232,3 +232,65 @@ fn fleet_gates_on_offline_mode() {
     assert!(err.contains("offline mode"), "stderr: {err}");
     assert!(err.contains("nff auth login"), "stderr: {err}");
 }
+
+// ---------------------------------------------------------------------------
+// update — self-updater (no network: dev-build guard + local 302 server)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn update_refuses_dev_builds() {
+    // The test binary lives in target/{debug,release}, so channel detection reports
+    // `dev` — which is itself the dev-guard under test.
+    let tmp = std::env::temp_dir().join(format!("nff_update_dev_{}", std::process::id()));
+    std::fs::create_dir_all(&tmp).unwrap();
+    let out = Command::new(nff())
+        .args(["update"])
+        .env("NFF_CONFIG_DIR", &tmp)
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert!(
+        stdout(&out).contains("dev build"),
+        "stdout: {}\nstderr: {}",
+        stdout(&out),
+        stderr(&out)
+    );
+    std::fs::remove_dir_all(tmp).ok();
+}
+
+#[test]
+fn update_check_reports_available_version_via_local_redirect() {
+    use std::io::{Read, Write};
+
+    // Throwaway HTTP server answering every request with the GitHub-style
+    // /releases/latest 302 redirect.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = std::thread::spawn(move || {
+        for stream in listener.incoming().take(2) {
+            let Ok(mut stream) = stream else { continue };
+            let mut buf = [0_u8; 1024];
+            let _ = stream.read(&mut buf);
+            let _ = stream.write_all(
+                b"HTTP/1.1 302 Found\r\nLocation: https://github.com/GLechevalier/nff/releases/tag/v99.0.0\r\nContent-Length: 0\r\n\r\n",
+            );
+        }
+    });
+
+    let tmp = std::env::temp_dir().join(format!("nff_update_check_{}", std::process::id()));
+    std::fs::create_dir_all(&tmp).unwrap();
+    let out = Command::new(nff())
+        .args(["update", "--check"])
+        .env("NFF_CONFIG_DIR", &tmp)
+        .env("NFF_UPDATE_BASE_URL", format!("http://{addr}"))
+        .output()
+        .unwrap();
+    let text = stdout(&out);
+    assert_eq!(out.status.code(), Some(2), "stdout: {text}\nstderr: {}", stderr(&out));
+    assert!(text.contains("v99.0.0"), "stdout: {text}");
+    // The check persisted its result for the after-command hook to use.
+    let state = std::fs::read_to_string(tmp.join("update.json")).unwrap();
+    assert!(state.contains("99.0.0"), "state: {state}");
+    std::fs::remove_dir_all(tmp).ok();
+    drop(server);
+}

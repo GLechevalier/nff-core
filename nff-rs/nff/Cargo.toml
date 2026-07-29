@@ -22,6 +22,7 @@ zip         = "2"
 flate2      = "1"
 tar         = "0.4"
 which       = "6"
+sha2        = "0.10"
 thiserror   = "1"
 anyhow      = "1"
 rmcp        = { version = "1", features = ["server", "macros", "transport-streamable-http-server"] }

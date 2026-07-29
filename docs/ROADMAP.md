@@ -32,8 +32,9 @@ Keep this table honest and in sync with `README.md`. `stable` = works on the shi
 | `nff agent` | stable | Cloud agent over SSE (needs login) |
 | `nff provision batch` | stable | Fleet batch enrollment |
 | `nff pi probe` | stable | Raspberry-Pi reachability probe |
+| `nff ota` | stable | Shipped in **both** Rust (`commands/ota.rs`, `tools/ota_client.rs`) and Python (`nff/commands/ota.py`, `nff/tools/ota_client.py`) — `deploy` / `status` / `list` / `devices`, plus the 5 OTA/fleet MCP tools (needs login) |
+| `nff fleet` | stable | Live field-device table with OTA progress (`--watch`) — both languages (needs login) |
 | `nff connect` | **roadmap** | Stub in **both** Rust (`commands/connect.rs`) and Python (`nff/commands/connect.py`) |
-| `nff ota` | **roadmap** | Stub in **both** Rust (`commands/ota.rs`) and Python (`nff/commands/ota.py`) |
 
 ---
 
@@ -50,7 +51,8 @@ stable vs. experimental vs. roadmap.
 
 ### 2. Stop advertising stubs as finished features
 `README.md:256` and `README.md:272-277` document `nff connect` as a working autonomous
-repair loop, with no caveat. Both `nff connect` and `nff ota` are stubs everywhere.
+repair loop, with no caveat. `nff connect` is a stub everywhere (`nff ota` was one too at the
+time, but has since shipped — see the status table above).
 - Mark them `🚧 roadmap — not yet implemented` in the README.
 - Make the stub output point somewhere useful, e.g.
   `nff connect: not yet implemented — see docs/ROADMAP.md`.

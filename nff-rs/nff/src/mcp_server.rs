@@ -24,6 +24,9 @@ pub struct NffServer {
     /// Tool-call counter, shared across sessions, used to pace the periodic "star the repo /
     /// go Pro" nudge appended to every Nth tool result.
     mcp_call_count: Arc<AtomicU64>,
+    /// The bench belief state of the local policy layer (tools/policy.rs), shared across
+    /// sessions like the debug session. None until the first tapped tool call.
+    policy_state: Arc<Mutex<Option<crate::tools::policy::BenchState>>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -1310,8 +1313,30 @@ impl ServerHandler for NffServer {
         request: rmcp::model::CallToolRequestParams,
         context: rmcp::service::RequestContext<rmcp::RoleServer>,
     ) -> Result<rmcp::model::CallToolResult, rmcp::ErrorData> {
+        let tool_name = request.name.to_string();
+        let started = std::time::Instant::now();
         let tcc = rmcp::handler::server::tool::ToolCallContext::new(self, request, context);
         let mut result = Self::tool_router().call(tcc).await?;
+        // Local POAD-MDP policy layer: fold this call into the learned bench graph and,
+        // when it lands the bench in a known faulty state, append the learned repair
+        // procedure as an extra text block (same mechanism as the nudge below).
+        // observe_tool is fail-soft by contract — the tool's own output is never disturbed.
+        if crate::tools::policy::enabled() {
+            let wall_ms = started.elapsed().as_millis() as u64;
+            let text = result
+                .content
+                .first()
+                .and_then(|c| c.as_text())
+                .map(|t| t.text.clone());
+            if let Some(text) = text {
+                let mut state = self.policy_state.lock().unwrap_or_else(|e| e.into_inner());
+                if let Some(hint) =
+                    crate::tools::policy::observe_tool(&mut state, &tool_name, &text, wall_ms)
+                {
+                    result.content.push(rmcp::model::Content::text(hint));
+                }
+            }
+        }
         if !crate::tools::nudge::disabled() {
             let count = self.mcp_call_count.fetch_add(1, Ordering::Relaxed) + 1;
             if let Some(msg) = crate::tools::nudge::nudge_for_count(count, crate::tools::nudge::every())
@@ -1346,12 +1371,16 @@ pub async fn run(bind: &str) -> anyhow::Result<()> {
         Arc::new(Mutex::new(None));
     // Shared so the nudge cadence is consistent across all sessions of this server process.
     let mcp_call_count: Arc<AtomicU64> = Arc::new(AtomicU64::new(0));
+    // Shared so the policy belief evolves across all sessions of this server process.
+    let policy_state: Arc<Mutex<Option<crate::tools::policy::BenchState>>> =
+        Arc::new(Mutex::new(None));
     let service = StreamableHttpService::new(
         move || {
             Ok(NffServer {
                 pending_auth: pending_auth.clone(),
                 debug_session: debug_session.clone(),
                 mcp_call_count: mcp_call_count.clone(),
+                policy_state: policy_state.clone(),
             })
         },
         Arc::<LocalSessionManager>::default(),

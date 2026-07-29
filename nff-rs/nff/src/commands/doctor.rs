@@ -1,4 +1,4 @@
-use crate::tools::{arduino_lib, boards, config, daemon, toolchain};
+use crate::tools::{arduino_lib, boards, config, daemon, toolchain, updater};
 use anyhow::Result;
 
 struct Check {
@@ -47,6 +47,7 @@ pub fn run() -> Result<()> {
         check_login(),
         check_mcp_server(),
         check_claude_desktop(),
+        check_update(),
     ];
 
     let mut any_failed = false;
@@ -173,23 +174,18 @@ fn check_device() -> Check {
 }
 
 fn check_login() -> Check {
-    // Sign-in is optional — local build/flash/monitor/debug need no account. Only cloud
-    // features (repair, agent) do, so a signed-out bench is a warning, not a failure.
+    // No account needed — local mode is the default and a signed-out bench is healthy.
+    // Only cloud features (repair, agent, OTA) need a token, so this check always passes;
+    // the detail just says which mode the bench is in.
     let signed_in = config::load()
         .map(|c| c.diagnosis.access_token.is_some())
         .unwrap_or(false);
     if signed_in {
         Check::ok("Signed in to the nff platform")
     } else if config::is_offline() {
-        Check::warn(
-            "Local/offline mode — cloud features disabled",
-            "Run `nff auth login` to enable repair + agent",
-        )
+        Check::ok("Offline mode — cloud features off (`nff auth login` re-enables)")
     } else {
-        Check::warn(
-            "Not signed in — cloud features (repair, agent) disabled",
-            "Run `nff auth login` to enable them (not needed for local build/flash/monitor)",
-        )
+        Check::ok("Local mode (default) — cloud features off (`nff auth login` enables)")
     }
 }
 
@@ -207,6 +203,54 @@ fn check_mcp_server() -> Check {
             "Run `nff mcp` (or re-run `nff init`) to start it",
         )
     }
+}
+
+fn check_update() -> Check {
+    // Self-update health: install channel, freshness, and whether the last background
+    // update attempt failed. Reads only local state (no network) so doctor stays fast
+    // and offline; a pending update isn't a broken bench, so it never flips the exit
+    // code — but this IS where a silent background failure gets full visibility.
+    let channel = updater::detect_channel();
+    let state = updater::load_state();
+    let current = updater::current_version();
+
+    if let Some(e) = &state.last_error {
+        return Check::warn(
+            format!("Update: last self-update failed at '{}': {}", e.stage, e.detail),
+            "Run `nff update` to retry with diagnostics",
+        );
+    }
+
+    let checked = if state.last_check_at > 0 {
+        let age_h = (config::now_unix() - state.last_check_at).max(0) / 3600;
+        if age_h < 48 {
+            format!("checked {age_h}h ago")
+        } else {
+            format!("checked {}d ago", age_h / 24)
+        }
+    } else {
+        "never checked yet".to_string()
+    };
+
+    if let Some(latest) = &state.latest_version {
+        if updater::is_newer(latest, current) {
+            return match channel {
+                updater::Channel::Wheel => Check::warn(
+                    format!("Update: v{latest} available (you have v{current}) — pip channel, auto-update off"),
+                    "Reinstall standalone: curl -fsSL https://nanoforgeflow.com/install.sh | sh \
+                     (Windows: irm https://nanoforgeflow.com/install.ps1 | iex)",
+                ),
+                _ => Check::warn(
+                    format!("Update: v{latest} available (you have v{current}) — background update pending"),
+                    "Run `nff update` to install it now",
+                ),
+            };
+        }
+    }
+    Check::ok(format!(
+        "Update: {} · v{current} up to date · {checked}",
+        channel.name()
+    ))
 }
 
 fn check_claude_desktop() -> Check {
