@@ -46,7 +46,7 @@ dev = [
     "requests",      # HTTP client (auth, installer, agent, provisioning)
     "pyserial",      # `import serial` — board enumeration + serial I/O
     "rich",          # styled terminal output (compile/flash/power/agent)
-    "mcp",           # MCP SDK — the reference MCP server (nff/nff/mcp_server.py)
+    "mcp>=1.9,<2",   # MCP SDK — the reference MCP server (nff/nff/mcp_server.py); 2.0 removed the lowlevel Server.list_tools()/call_tool() decorators we use
     "httpx",         # used by the MCP transport tests (tests/test_mcp.py)
     "uvicorn",       # ASGI server hosting the reference MCP server
     "starlette",     # ASGI types used by the reference MCP server
