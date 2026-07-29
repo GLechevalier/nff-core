@@ -34,3 +34,36 @@ def build_ota_result(
     if not committed and reason:
         result["reason"] = reason
     return result
+
+
+def build_ota_progress(
+    device_id: str,
+    version: str,
+    stage: str,
+    *,
+    progress: int | None = None,
+    written: int | None = None,
+    size: int | None = None,
+    attempt: int = 1,
+) -> dict[str, Any]:
+    """A mid-flight ``ota_progress`` tick — the same wire shape the SDK publishes.
+
+    ``stage`` is one of ``downloading`` / ``installing`` / ``rebooting``. ``progress``
+    is omitted when the image size is unknown (the server then treats the tick as a
+    liveness keepalive only). ``attempt`` authorizes a progress regression server-side
+    when a download restarts from byte 0 (resume unsupported).
+    """
+    msg: dict[str, Any] = {
+        "type": "ota_progress",
+        "id": device_id,
+        "version": version,
+        "stage": stage,
+        "attempt": attempt,
+    }
+    if progress is not None:
+        msg["progress"] = max(0, min(100, int(progress)))
+    if written is not None:
+        msg["written"] = written
+    if size is not None:
+        msg["size"] = size
+    return msg

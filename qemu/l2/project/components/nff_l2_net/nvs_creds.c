@@ -75,6 +75,26 @@ static uint8_t *nvs_dup_blob(nvs_handle_t h, const char *key, size_t *out_len) {
 
 /* ---- public API ------------------------------------------------------------------- */
 
+bool nff_l2_identity_present(void) {
+    /* Cached: the splice happens before boot, so the answer can never change at runtime. */
+    static int cached = -1;
+    if (cached >= 0) return cached != 0;
+
+    cached = 0;
+    nvs_handle_t h;
+    if (nvs_open("nff", NVS_READONLY, &h) == ESP_OK) {
+        /* Splice-specific keys ONLY (see header): the SDK's claim store shares this namespace on
+         * real hardware, so "namespace exists" would misdetect every claimed real device. */
+        size_t len = 0;
+        bool has_id  = nvs_get_str(h, K_DEVICE_ID, NULL, &len) == ESP_OK && len > 0;
+        len = 0;
+        bool has_crt = nvs_get_blob(h, K_DEVICE_CRT, NULL, &len) == ESP_OK && len > 0;
+        cached = (has_id && has_crt) ? 1 : 0;
+        nvs_close(h);
+    }
+    return cached != 0;
+}
+
 void nff_l2_set_clock_from_nvs(void) {
     int64_t epoch = 1750000000;   /* 2025-06-15 floor; overridden by NVS when present */
     nvs_handle_t h;
@@ -137,6 +157,11 @@ int nff_l2_load_config_from_nvs(nff_config_t *cfg) {
     cfg->device_type          = NFF_DEVICE_TYPE;  /* "nff-qemu-esp32" — overrides the silicon probe */
     cfg->heartbeat_interval_s = 30;
     cfg->batch_id             = NULL;
+    /* QEMU-only TLS concession, now a RUNTIME flag (the image is universal): the fleet server
+     * cert's SAN omits the dialed guest IP, so the CN/SAN check would reject it. Only this loader
+     * — which runs iff a spliced QEMU identity exists — ever sets it; real hardware keeps full
+     * hostname verification. Replaces the compile-time #ifdef NFF_QEMU gate in the SDK's IDF port. */
+    cfg->tls_skip_cn_check    = true;
 
     if (!cfg->device_id || !cfg->client_cert || !cfg->client_key || !cfg->ca_cert) {
         ESP_LOGE(TAG, "incomplete NVS identity (id/cert/key/ca) — cannot connect");

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
+import os
 from typing import TYPE_CHECKING
 
 import httpx
@@ -64,13 +65,22 @@ class OtaSimulator:
             {"type": "ota_started", "version": version, "id": d.cfg.device_id},
         )
 
-        artifact, ok, err = await self._download(url, sha256)
+        size = payload.get("size") if isinstance(payload.get("size"), int) else None
+        artifact, ok, err = await self._download(url, sha256, version, size)
         if not ok:
             await d.publish(
                 topic_response(d.cfg.project_id, d.cfg.device_id),
                 {"type": "error", "msg": err or "ota: download failed"},
             )
             return None
+
+        # Mirror the SDK's stage markers: SHA verified -> installing, then rebooting
+        # just before the simulated reboot (the real device's 500 ms pre-reboot flush).
+        # Real hardware spends ~a second in esp_ota_end() finalizing the partition;
+        # hold the stage briefly so it's observable (same spirit as the fake flash
+        # delay in _download's fallback), not a millisecond blip.
+        await self._publish_progress(version, "installing", progress=100)
+        await asyncio.sleep(0.8)
 
         # Persist intent across the simulated reboot (NVS, like nff_ota.c).
         d.nvs.set_str(ota_state.NVS_OTA_PENDING, "1")
@@ -98,22 +108,63 @@ class OtaSimulator:
                 "OTA v%s: simulated (no artifact downloaded); version bump only, "
                 "behaviour unchanged", version
             )
+        await self._publish_progress(version, "rebooting", progress=100)
         d.request_reboot()
         return None
 
-    async def _download(self, url: str, expected_sha: str) -> tuple[bytes | None, bool, str | None]:
+    async def _publish_progress(
+        self,
+        version: str,
+        stage: str,
+        *,
+        progress: int | None = None,
+        written: int | None = None,
+        size: int | None = None,
+        attempt: int = 1,
+    ) -> None:
+        d = self.d
+        await d.publish(
+            topic_response(d.cfg.project_id, d.cfg.device_id),
+            ota_state.build_ota_progress(
+                d.cfg.device_id, version, stage,
+                progress=progress, written=written, size=size, attempt=attempt,
+            ),
+        )
+
+    async def _download(
+        self, url: str, expected_sha: str, version: str, size: int | None = None
+    ) -> tuple[bytes | None, bool, str | None]:
         """Stream the artifact and verify its SHA-256. If the URL is unreachable
         (common in a self-contained demo), fall back to a simulated download so the
-        flow still completes — but a real fetch that mismatches is a hard failure."""
+        flow still completes — but a real fetch that mismatches is a hard failure.
+
+        Publishes throttled ``ota_progress`` ticks along the way (>=5% steps, like the
+        SDK's NFF_OTA_PROGRESS_STEP_PCT), so the dashboard sees the middle of the
+        process. ``NFF_MOCK_OTA_PACING_S`` (total seconds, optional) slows the loop so
+        demos are visibly progressive even with tiny artifacts."""
+        pacing_s = float(os.environ.get("NFF_MOCK_OTA_PACING_S", "0") or 0)
         try:
             h = hashlib.sha256()
             chunks: list[bytes] = []
+            written = 0
+            last_pct = 0
             async with httpx.AsyncClient(timeout=30.0, verify=False) as client:
                 async with client.stream("GET", url) as resp:
                     resp.raise_for_status()
+                    total = size or int(resp.headers.get("content-length") or 0) or None
                     async for chunk in resp.aiter_bytes():
                         h.update(chunk)
                         chunks.append(chunk)
+                        written += len(chunk)
+                        pct = int(written * 100 / total) if total else None
+                        if pct is not None and pct >= last_pct + 5:
+                            last_pct = pct
+                            await self._publish_progress(
+                                version, "downloading",
+                                progress=pct, written=written, size=total,
+                            )
+                            if pacing_s:
+                                await asyncio.sleep(pacing_s / 20)
             if h.hexdigest() != expected_sha:
                 logger.warning("OTA sha256 mismatch")
                 return None, False, "ota: sha256 mismatch"
@@ -123,7 +174,12 @@ class OtaSimulator:
             # success with no artifact (None); the caller logs the simulation and the
             # boot path keeps the current firmware rather than reverting to stock.
             logger.warning("OTA artifact unreachable (%s); simulating download", exc)
-            await asyncio.sleep(1.5)  # pretend the flash write took a moment
+            # Pretend the transfer + flash write took a moment, and make the middle
+            # visible: stepped fake progress instead of one silent sleep.
+            step_delay = (pacing_s or 1.5) / 5
+            for pct in (20, 40, 60, 80, 100):
+                await asyncio.sleep(step_delay)
+                await self._publish_progress(version, "downloading", progress=pct)
             return None, True, None
 
     async def check_pending_result(self) -> None:

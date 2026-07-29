@@ -64,14 +64,22 @@ _fw_ident_lines() {  # emit the identity target_compile_definitions on stdout
 }
 _fw_ident_defs() { _fw_ident_lines >> "$1"; }
 
-# ---- top-level project (NFF_QEMU project-wide so it reaches the nff SDK component's IDF port) ----
-# The nff SDK's esp32 IDF port gates the broker hostname-check skip on `#ifdef NFF_QEMU`; a
-# per-component define on `main` would not reach the nff component, so set it project-wide here.
+# ---- top-level project ---------------------------------------------------------------------------
+# NFF_QEMU is kept project-wide for BACKWARD COMPAT with older firmware sources that still guard on
+# it. Nothing device-visible depends on it any more: the SDK's TLS CN-skip moved to a RUNTIME flag
+# (nff_config_t.tls_skip_cn_check, set by the L2 NVS identity loader) and the demo firmware + shim
+# dispatch QEMU-vs-real at runtime via nff_l2_identity_present() — one image serves both.
 _write_if_changed "$PROJ/CMakeLists.txt" <<'EOF'
 cmake_minimum_required(VERSION 3.16)
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 project(nff_l2_idf)
 idf_build_set_property(COMPILE_DEFINITIONS "NFF_QEMU=1" APPEND)
+# The universal image runs over a slow, flap-prone wired PPPoS link on real silicon: the OTA
+# trial's default 60 s confirm window (nff.h) is too tight for the wired boot (WiFi-first
+# fallback + PPP negotiation + mTLS-over-serial) to establish and hold MQTT before the deadline,
+# so a perfectly good image gets rolled back with "health check timeout". Give the wired trial
+# generous headroom. Harmless on QEMU L2 (device_type nff-qemu-esp32 simulate-adopts, never trials).
+idf_build_set_property(COMPILE_DEFINITIONS "NFF_OTA_CONFIRM_TIMEOUT_S=180" APPEND)
 EOF
 
 # ---- sdkconfig.defaults: the maintained L2 project's config + OTA lwIP window bumps ----------------
@@ -79,7 +87,15 @@ EOF
 # ECDSA P-256, watchdogs off (QEMU openeth trips the IWDT mid-TLS). The LWIP_* bumps are lifted from
 # build_arduino_shim.sh: a sustained 4 MB HTTPS OTA over emulated openeth stalls with IDF defaults
 # (tiny receive window / mailbox / no OOSEQ queue), so enlarge them. Stack-canary watchpoint so a
-# task-stack overflow traps with a clean panic + coredump.
+# task-stack overflow traps with a clean panic + coredump. PPP is enabled so the universal image's
+# wired (PPPoS) fallback compiles — unused on QEMU, load-bearing on real wired hardware.
+#
+# ⚠ When these defaults CHANGE, the generated $PROJ/sdkconfig must be regenerated: IDF only seeds
+# sdkconfig from the defaults file at generation time — an existing sdkconfig's explicit
+# "# CONFIG_X is not set" lines beat a new default, so a changed default would otherwise silently
+# never apply on the persistent build-cache volume. Hash-compare and delete on change (one-time
+# full reconfigure; ccache keeps the rebuild short).
+_defaults_hash_before=$(md5sum "$PROJ/sdkconfig.defaults" 2>/dev/null | cut -d' ' -f1)
 _write_if_changed "$PROJ/sdkconfig.defaults" <<'EOF'
 CONFIG_IDF_TARGET="esp32"
 CONFIG_ETH_USE_OPENETH=y
@@ -87,6 +103,12 @@ CONFIG_ETH_OPENETH_DMA_RX_BUFFER_NUM=4
 CONFIG_ETH_OPENETH_DMA_TX_BUFFER_NUM=1
 CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
 CONFIG_ESPTOOLPY_FLASHSIZE="4MB"
+# Flash mode/freq must MATCH the proven real-hardware image (DIO/80MHz — what the wired golden
+# image's Arduino bootloader runs): the app header carries these and a mismatched header was the
+# prime suspect when the universal image's first real-HW boot was rejected by the bootloader
+# (which silently fell back to the old slot). QEMU's flash emulation is indifferent to them.
+CONFIG_ESPTOOLPY_FLASHMODE_DIO=y
+CONFIG_ESPTOOLPY_FLASHFREQ_80M=y
 CONFIG_PARTITION_TABLE_CUSTOM=y
 CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
 CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH=y
@@ -106,7 +128,16 @@ CONFIG_LWIP_TCP_QUEUE_OOSEQ=y
 CONFIG_LWIP_TCP_OOSEQ_MAX_PBUFS=16
 CONFIG_LWIP_TCPIP_RECVMBOX_SIZE=64
 CONFIG_FREERTOS_WATCHPOINT_END_OF_STACK=y
+CONFIG_LWIP_PPP_SUPPORT=y
+CONFIG_LWIP_PPP_NOTIFY_PHASE_SUPPORT=y
+CONFIG_LWIP_PPP_PAP_SUPPORT=y
+CONFIG_LWIP_PPP_VJ_HEADER_COMPRESSION=y
 EOF
+_defaults_hash_after=$(md5sum "$PROJ/sdkconfig.defaults" 2>/dev/null | cut -d' ' -f1)
+if [ "$_defaults_hash_before" != "$_defaults_hash_after" ]; then
+  echo "build_espidf.sh: sdkconfig.defaults changed — regenerating sdkconfig from defaults"
+  rm -f "$PROJ/sdkconfig"
+fi
 # cmp-guard: only recopy when it actually changed so its mtime (→ a reconfigure) stays put.
 cmp -s "$PROJDIR/partitions.csv" "$PROJ/partitions.csv" 2>/dev/null || cp "$PROJDIR/partitions.csv" "$PROJ/partitions.csv"
 

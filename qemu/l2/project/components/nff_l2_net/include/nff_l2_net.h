@@ -38,6 +38,14 @@ void nff_l2_set_clock_from_nvs(void);
  * lifetime (firmware never frees them). Returns 0 on success, -1 if a mandatory key is missing. */
 int nff_l2_load_config_from_nvs(nff_config_t *cfg);
 
+/* True iff a supervisor-SPLICED identity is present in NVS — i.e. this image is running on a QEMU
+ * L2 mock, not real silicon. Probes the splice-specific keys ("device_id" str + "device_crt" blob)
+ * in the "nff" namespace, NEVER mere namespace existence: on real hardware the nff SDK's claim
+ * store (nff_store.c) writes chunked/b64 keys + a "claimed" flag into that SAME namespace, so the
+ * namespace exists on any claimed device. The result is cached after the first call (identity is
+ * spliced before boot and never appears at runtime). Requires nvs_flash_init() to have run. */
+bool nff_l2_identity_present(void);
+
 #ifdef __cplusplus
 }
 #endif
