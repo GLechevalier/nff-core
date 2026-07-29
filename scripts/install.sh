@@ -92,6 +92,13 @@ mv "$TMP_DIR/nff" "$INSTALL_DIR/nff"
 chmod +x "$INSTALL_DIR/nff"
 say "Installed to $INSTALL_DIR/nff"
 
+# ── Record install channel (read by `nff update` / the background self-updater
+#    so it knows this is a standalone binary it may replace) ─────────────────
+NFF_STATE_DIR="$HOME/.nff"
+mkdir -p "$NFF_STATE_DIR"
+printf '{\n  "channel": "standalone",\n  "path": "%s",\n  "installed_at": %s\n}\n' \
+  "$INSTALL_DIR/nff" "$(date +%s)" > "$NFF_STATE_DIR/install-channel"
+
 # ── Ensure INSTALL_DIR is on PATH (mirrors nff-rs installer.rs) ─────────────
 case ":$PATH:" in
   *":$INSTALL_DIR:"*) ;;

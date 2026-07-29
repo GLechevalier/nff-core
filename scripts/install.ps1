@@ -73,6 +73,15 @@ try {
     Move-Item -Force $TmpExe $Target
     Write-Host "Installed to $Target"
 
+    # ── Record install channel (read by `nff update` / the background self-
+    #    updater so it knows this is a standalone binary it may replace) ─────
+    $StateDir = Join-Path $env:USERPROFILE ".nff"
+    New-Item -ItemType Directory -Path $StateDir -Force | Out-Null
+    $Epoch = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+    $MarkerJson = "{`n  `"channel`": `"standalone`",`n  `"path`": $(ConvertTo-Json $Target),`n  `"installed_at`": $Epoch`n}"
+    # BOM-free UTF-8: the marker is parsed as strict JSON by both nff implementations.
+    [IO.File]::WriteAllText((Join-Path $StateDir "install-channel"), $MarkerJson, (New-Object Text.UTF8Encoding $false))
+
     # ── Ensure InstallDir is on the user PATH (mirrors nff-rs installer.rs) ─
     $UserPath = [Environment]::GetEnvironmentVariable("Path", "User")
     if (-not $UserPath) { $UserPath = "" }

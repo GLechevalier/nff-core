@@ -250,7 +250,8 @@ def default_install_dir() -> Path:
 
 def read_marker() -> Optional[dict]:
     try:
-        data = json.loads(marker_path().read_text(encoding="utf-8"))
+        # utf-8-sig: tolerate a BOM from PowerShell-written markers.
+        data = json.loads(marker_path().read_text(encoding="utf-8-sig"))
         return data if isinstance(data, dict) else None
     except (OSError, ValueError):
         return None
@@ -805,6 +806,13 @@ def after_command_hook(skip: bool = False) -> None:
 
         if dirty:
             save_state(state)
+
+        # Deferred deletion of the previous binary: the swapping process is itself the
+        # old image (renamed to .old on Windows), so only a later run can remove it.
+        if channel == "standalone":
+            target = standalone_target()
+            if target is not None:
+                cleanup_old(target)
 
         from nff import config
 
