@@ -33,6 +33,8 @@ LLM: [captures panic over OTA] → [reads registers + backtrace] → "Stack over
 
 **Supported boards:** with the **PlatformIO backend** (now the default in both the shipped Rust binary and the Python implementation) nff is board-universal — **any of PlatformIO's ~1000+ boards across ~40 hardware platforms** (every ESP32 variant, RP2040/Pico, all STM32 families, classic & megaAVR, SAMD/SAM, Teensy, nRF51/nRF52, Renesas RA / Arduino Uno R4, NXP LPC, Kendryte K210, GD32V/RISC-V, MSP430, TIVA, and many more), with the platform toolchain auto-installed on first build. The classic **arduino-cli backend** remains available and covers ESP32 (CP210x / CH340) · ESP8266 (FTDI) · Arduino AVR (Uno, Mega, Nano, Leonardo). See [Build backends](#build-backends) and the full [Supported Boards](#supported-boards) listing.
 
+**Bench to fleet, over-the-air.** The loop doesn't stop at the bench: `nff ota deploy` ships the binary you just built to a whole device group — a staged, ECDSA-signed rollout with per-device tracking and automatic rollback — and `nff fleet --watch` shows it land in real time. See [Ship it over-the-air](#ship-it-over-the-air--nff-ota).
+
 **Shipped as a single Rust binary.** The release artifact is the compiled `nff` binary built from `nff-rs/` — a self-contained executable with no Python runtime required. The Python package under `nff/nff/` remains as the reference/prototyping implementation (features are often prototyped there first, then ported to Rust at parity); both are kept in sync, version for version. The Rust port is at full feature parity (CLI commands, MCP server + OAuth proxy, the bench-loop hardening, the PlatformIO build backend, and the `nff pi` Raspberry-Pi probe).
 
 ## Quickstart
@@ -55,13 +57,7 @@ Windows (PowerShell):
 irm https://nanoforgeflow.com/install.ps1 | iex
 ```
 
-> The same scripts are mirrored in this repo: swap the URL for
-> `https://raw.githubusercontent.com/GLechevalier/nff/main/scripts/install.sh` (or `.ps1`).
-
-The script downloads the prebuilt standalone `nff` binary for your platform (Linux x64/arm64, Windows x64, macOS arm64/x64) from the [latest GitHub Release](https://github.com/GLechevalier/nff/releases/latest), verifies its SHA-256 checksum, installs it to `~/.local/bin` (or `%LOCALAPPDATA%\Programs\nff` on Windows), and puts it on your PATH. Pin a version with `NFF_VERSION=0.2.40` (env var) before running.
-
-**Staging channel** (rolling prerelease built from the `staging` branch — refreshed on every push, may break):
-
+Staging versions :
 ```bash
 curl -fsSL https://nanoforgeflow.com/install-staging.sh | sh
 ```
@@ -70,7 +66,7 @@ curl -fsSL https://nanoforgeflow.com/install-staging.sh | sh
 irm https://nanoforgeflow.com/install-staging.ps1 | iex
 ```
 
-**Or via pip:**
+**Or via pip (depreciated post 0.2.37):**
 
 ```bash
 pip install nff
@@ -82,14 +78,6 @@ pip install nff
 
 On the **default PlatformIO backend** there is nothing to install here — PlatformIO Core is set up by `nff init`, and the platform/framework/esptool for your board auto-install on the first build. Just make sure your sketch names a PlatformIO board id (`--board esp32dev`, etc.).
 
-Only on the **arduino backend** do you install cores manually:
-
-```bash
-# arduino backend only — install the cores you need
-arduino-cli core install esp32:esp32
-arduino-cli core install arduino:avr
-arduino-cli core install esp8266:esp8266
-```
 
 > Both toolchains (`platformio` / `arduino-cli`) are auto-installed by `nff init`/`nff install-deps` for the active backend if not already present.
 
@@ -170,46 +158,40 @@ This is the gap Mender, balena, and similar OTA tools cannot fill: they require 
 
 ---
 
-## Build backends
+## Ship it over-the-air — `nff ota`
 
-nff can drive the build/flash loop through either of two toolchains, selected per-run or persisted in config. Every `compile`/`flash` path resolves the backend the same way, so the CLI and MCP tools are identical regardless of which one is active.
+The bench loop ends with a compiled binary; `nff ota` is how that binary reaches the fleet. One command turns a local build into a staged, signed rollout to a device group — with per-device progress and automatic rollback on failure. The same "push and it's live" motion as a web deploy, for firmware in the field.
 
-| Backend | Boards | Toolchain | Sketch layout |
-|---|---|---|---|
-| **`platformio`** (default) | board-universal — any [PlatformIO board id](https://docs.platformio.org/en/latest/boards/index.html) (`esp32dev`, `esp32-s3-devkitc-1`, `pico`, `genericSTM32F103C8`, `uno`, …) | PlatformIO Core; the platform + framework + esptool **auto-install on first build** per board family | native `src/main.cpp` + a generated `platformio.ini` |
-| **`arduino`** | the [Supported Boards](#supported-boards) table (FQBN) | arduino-cli + manually installed cores | `.ino` sketch folder |
-
-**Selecting a backend** — precedence is env var → config → default (`platformio`):
-
-```bash
-# per-run override (config untouched)
-NFF_BUILD_BACKEND=platformio  nff compile sketches/esp32_vitals --board esp32dev
-NFF_BUILD_BACKEND=arduino     nff compile sketches/esp32_vitals --board esp32:esp32:esp32
-
-# persist a choice (writes build.backend + build.board to ~/.nff/config.json)
-nff init --backend platformio     # → no flags needed afterwards
-nff init --backend arduino        # opt back into arduino-cli
+```
+you: "The fix is verified on the bench — roll 1.2.0 out to the prod group"
+LLM: [compiles] → [ota_deploy v1.2.0 → prod] → [fleet_status] → "18/18 devices committed, 0 rollbacks"
 ```
 
-`--board` is backend-aware: a **PlatformIO board id** under the pio backend, an **arduino-cli FQBN** under the arduino backend. With a board saved via `nff init` you can omit `--board` entirely.
+Prefer the CLI directly? A deploy is one line, and a live fleet view is another:
 
-> **Status:** both backends ship in the compiled Rust binary (`nff-rs/`) — the artifact `pip install nff` delivers — with **PlatformIO the default**. The Python package (`nff/`) is the reference/prototyping implementation and is kept at parity. `nff init --backend platformio` (or `arduino`) persists the choice.
+```bash
+nff ota deploy build/firmware.bin --version 1.2.0 --group prod
+# OK: deployment 3f2a… started (v1.2.0)
+#   delivered=18 failed=0 skipped=0
+#   track it with `nff ota status 3f2a…`
 
-📄 Full write-up — architecture, internals, requirements, and verification — in [`docs/platformio-backend.md`](docs/platformio-backend.md).
+nff ota status        # per-device progress of the latest deployment
+nff fleet --watch     # live table: device status, current → target firmware, OTA progress
+```
 
----
+| Command | What it does |
+|---|---|
+| `nff ota deploy BINARY --version X.Y.Z --group NAME` | Ship a compiled `.bin` to a device group as a staged OTA rollout. `--max-in-flight N` caps devices updating concurrently; `--retries N` sets the per-device retry budget |
+| `nff ota status [DEPLOYMENT_ID]` | Show a deployment's per-device progress (the project's latest if omitted) |
+| `nff ota list` | List recent deployments and deployable firmware versions for your project |
+| `nff ota devices` | List enrolled devices and their OTA status / current firmware version |
+| `nff fleet [--watch]` | Show field devices with live status, firmware version, and OTA progress |
 
-## AI crash diagnosis — validated
+**Signed, staged, and downgrade-proof.** The bench builds the binary, but a field device only ever accepts an ECDSA-signed update delivered by the fleet (signing keys live in an HSM) — so the update ships *through the platform*, never from the bench directly. Versions are strict 3-part semver and must increase: devices refuse downgrades. Rollouts stay staged (`--max-in-flight`), and a device that fails verification rolls itself back to the previous firmware.
 
-Phase-0 validation on an ESP32 confirmed that Claude can produce specific, correct diagnoses from raw panic output alone — no ELF file, no source access:
+> OTA is a cloud feature: it needs a platform sign-in (`nff auth login`, or `nff init --cloud`) and refuses to run in offline mode. Deployments run under your project — the platform verifies membership and drives the rollout.
 
-| Crash type | Panic signature | What Claude identifies |
-|---|---|---|
-| Null pointer write | `EXCCAUSE 0x1d` + `EXCVADDR 0x00000000` | StoreProhibited in `setup()`, stack intact |
-| Stack overflow | `EXCCAUSE 0x01` + repeated PC in backtrace | Unbounded recursion, FreeRTOS canary, depth 11 |
-| Watchdog timeout | IDF task-WDT log, no Guru Meditation | `loopTask` on CPU 1 never yielded, liveness failure |
-
-Each failure class produces a different panic format, exception code, backtrace depth, and task snapshot — rich enough signal to distinguish root causes without symbol resolution. With addr2line + the build ELF wired in (next milestone), diagnoses resolve to exact source lines.
+The same capability is exposed to agents as MCP tools — see [Fleet & OTA](#fleet--ota) below.
 
 ---
 
@@ -227,9 +209,7 @@ Each failure class produces a different panic format, exception code, backtrace 
 | `reset_device(port?)` | Toggle DTR to hardware-reset the board |
 | `get_device_info(port?)` | Return port, board name, FQBN, baud rate |
 
-> **Simulation** (running firmware without hardware via Wokwi) lives in the separate
-> **[nff-sim](../nff-sim)** package, which provides the `wokwi_flash` / `wokwi_serial_read` /
-> `wokwi_get_diagram` tools and the `nff-sim` CLI.
+
 
 ### Debug — live on-chip (JTAG/SWD)
 
@@ -268,6 +248,20 @@ no ELF you can still attach and read registers/memory/raw-GDB.
 | `authenticate(email?, password?)` | Log in to the diagnosis server (direct, or omit both for browser OAuth) |
 | `complete_authentication(timeout?)` | Wait for a browser login to finish and store the tokens |
 | `auth_status()` / `auth_logout()` / `auth_clear()` / `auth_reconnect(email?, password?)` | Inspect, end, force-clear, or re-establish the authenticated MCP session |
+
+### Fleet & OTA
+
+Ship firmware to the field and watch it land — the agent-facing side of [`nff ota`](#ship-it-over-the-air--nff-ota).
+
+| Tool | What it does |
+|---|---|
+| `ota_deploy(bin_path, version, group, …)` | Ship a compiled `.bin` to a field device group over-the-air (staged, signed rollout). `bin_path` is the `image` path returned by `compile` — compile first, then deploy. `version` must be 3-part semver and greater than the fleet's current version (devices refuse downgrades). Returns JSON `{deployment_id, version, delivered, failed, skipped}` |
+| `ota_status(deployment_id?)` | Per-device progress of one deployment (the project's latest if omitted) — each job has `device_id`, status (`pending\|downloading\|verifying\|committed\|rolled_back\|timed_out`) and progress 0–100 |
+| `ota_deployments()` | Recent OTA deployments + deployable firmware versions for your project |
+| `ota_devices()` | Enrolled **field** devices with online/offline status, current firmware version, and OTA enrollment state (for USB-attached bench boards use `list_devices`) |
+| `fleet_status(deployment_id?)` | One-shot fleet snapshot: enrolled devices merged with the latest (or given) deployment's per-device jobs — the terminal equivalent is `nff fleet --watch` |
+
+> All five require platform login — on a not-authenticated error, call `authenticate` (CLI: `nff auth login`).
 
 All bench tools fall back to the default device in `~/.nff/config.json` when `port` and `board` are omitted.
 
@@ -312,8 +306,9 @@ not yet implemented. Full detail and the plan behind the roadmap items live in
 | `nff provision batch` | stable | Fleet batch enrollment |
 | `nff pi probe` | stable | Raspberry-Pi reachability probe |
 | `nff update` | stable | Self-update to the latest release; standalone installs also auto-update in the background |
+| `nff ota` | stable | Over-the-air rollout to a device group: `deploy` / `status` / `list` / `devices` — staged, signed, downgrade-proof (needs login). See [Ship it over-the-air](#ship-it-over-the-air--nff-ota) |
+| `nff fleet` | stable | Live table of field devices: status, `current → target` firmware, OTA progress (`--watch`, needs login) |
 | `nff connect` | 🚧 roadmap | Autonomous log-analysis + repair loop — not yet implemented |
-| `nff ota` | 🚧 roadmap | Over-the-air firmware update — not yet implemented |
 
 ### Real hardware
 
@@ -326,6 +321,9 @@ not yet implemented. Full detail and the plan behind the roadmap items live in
 | `nff connect` | 🚧 (roadmap — not yet implemented) Attach to a device, continuously analyse its logs, autonomously repair detected issues |
 | `nff debug` | Live on-chip debugging (OpenOCD + GDB over JTAG/SWD); `nff debug check` reports the tools/chip without hardware, `nff debug start` opens an interactive session |
 | `nff repair` | Send captured serial/crash output to the diagnosis server for a structured root-cause |
+| `nff ota deploy <bin> --version X.Y.Z --group NAME` | Ship a compiled binary to a field device group as a staged, signed OTA rollout (needs login) |
+| `nff ota status` | Per-device progress of the latest (or a given) OTA deployment |
+| `nff fleet --watch` | Live table of field devices with firmware versions and OTA progress |
 | `nff auth login` | Authenticate with the diagnosis server (browser OAuth or email/password) |
 | `nff doctor` | Check all dependencies and configuration |
 | `nff status` | Snapshot of the bench: build backend, detected board, MCP server up/down, auth state, and last build artifact |
@@ -339,36 +337,6 @@ nff flash sketches/sensor_init --manual-reset                 # for boards witho
 nff monitor --port COM10 --baud 115200
 nff monitor --port COM10 --baud 115200 --timeout 15
 ```
-
-### nff connect — Autonomous log analysis and repair
-
-> 🚧 **Not yet implemented** — planned. See [docs/ROADMAP.md](docs/ROADMAP.md). The design below
-> describes the intended behaviour.
-
-`nff connect` keeps a live serial connection to your device and routes each batch of output to Claude for analysis. When Claude detects an error, a hang, or a recoverable fault, it rewrites the sketch, recompiles, reflashes, and resumes monitoring — closing the repair loop without manual intervention.
-
-```
-nff connect
-  ↓ streams serial from device
-  ↓ Claude analyses each log window
-  ↓ fault detected → sketch rewritten → nff flash → device reset
-  ↓ monitoring resumes automatically
-```
-
-Useful flags:
-
-| Flag | Default | Description |
-|---|---|---|
-| `--port PORT` | auto-detect | Serial port to attach to |
-| `--baud BAUD` | 115200 | Baud rate |
-| `--sketch DIR` | last flashed | Sketch directory to rewrite and reflash on a fix |
-| `--window MS` | 2000 | Log window passed to Claude per analysis cycle |
-| `--max-cycles N` | unlimited | Stop after N repair attempts |
-
-> **Simulation** (`nff wokwi` / `flash --sim`) moved to the separate
-> **[nff-sim](../nff-sim)** package — see its README.
-
----
 
 ## Supported Boards
 
@@ -525,7 +493,8 @@ nff/
 │   │   ├── connect.py           # autonomous log-analysis + repair loop
 │   │   ├── repair.py            # route crash output to the diagnosis server
 │   │   ├── auth_cmd.py          # nff auth login / status / logout
-│   │   ├── ota.py
+│   │   ├── ota.py               # nff ota — OTA rollout to a device group
+│   │   ├── fleet.py             # nff fleet — live fleet/OTA view
 │   │   ├── provision.py
 │   │   ├── doctor.py
 │   │   ├── clean.py
@@ -538,6 +507,7 @@ nff/
 │   │   ├── backends/
 │   │   │   └── platformio.py    # PlatformIO backend (project scaffold, pio run)
 │   │   ├── installer.py         # arduino-cli auto-install
+│   │   ├── ota_client.py        # /api/ota/* client (deploy, status, fleet snapshot)
 │   │   └── auth.py              # diagnosis-server token handling
 │   └── skills/                  # /nff skill (ships with the package)
 ├── nff-rs/                      # Rust port — the shipped binary (full parity)
@@ -561,15 +531,6 @@ sudo usermod -aG dialout $USER
 ```
 
 `nff doctor` detects this and prints the fix.
-
----
-
-## Simulation
-
-Running firmware without hardware (Wokwi) is provided by the separate
-**[nff-sim](../nff-sim)** package. It compiles via `nff` and runs the result in the Wokwi
-simulator — `nff-sim init` / `nff-sim flash` / `nff-sim run`, plus the `wokwi_*` MCP tools
-and the `/wokwi-diagram` authoring skill.
 
 ---
 
