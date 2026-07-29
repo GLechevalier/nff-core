@@ -179,6 +179,10 @@ async def _handle_message(topic: str, payload_bytes: bytes) -> None:
         # instead of dropping it in resolve_response (which only resolves a pending future).
         if payload.get("type") == "ota_result":
             ota_result.forward_ota_result(device_id, payload)
+        elif payload.get("type") == "ota_progress":
+            # Mid-download telemetry — never a command reply, so it must not fall
+            # through to resolve_response (it would race the pending command future).
+            ota_result.forward_ota_progress(device_id, payload)
         else:
             resolve_response(device_id, payload)
 

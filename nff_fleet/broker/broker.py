@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import socket
+import ssl
 from pathlib import Path
 
 from amqtt.broker import Broker
@@ -29,6 +30,37 @@ class NffBroker(Broker):
     full access). Couples to amqtt 0.11.3 internals (``_retained_messages``/``_matches``/
     ``_get_handler``) by necessity — revisit on an amqtt upgrade.
     """
+
+    @staticmethod
+    def _create_ssl_context(listener) -> ssl.SSLContext:
+        """amqtt's context, capped at TLS 1.2.
+
+        Python's ssl negotiates TLS 1.3 by default, but mbedtls 3.x device clients (arduino-esp32
+        core 3.x) prefer 1.3 while their CLIENT-CERTIFICATE auth only works on 1.2 — the mTLS
+        handshake then dies deterministically right at the certificate stage (observed live:
+        device receives the full server flight, aborts before/mid client Certificate). mTLS is
+        the fleet's whole auth model, so pin the ceiling where client certs work everywhere.
+        """
+        ctx = Broker._create_ssl_context(listener)
+        ctx.maximum_version = ssl.TLSVersion.TLSv1_2
+        return ctx
+
+    async def add_subscription(self, subscription: tuple[str, int], session: Session) -> int:
+        """Grant every subscription at QoS 0 — cap downlink delivery so no PUBACK waiter is armed.
+
+        amqtt delivers a downlink at the *granted* subscription QoS (min of what the client asked
+        for and this cap) and then waits — a hard-coded 5 s in 0.11.3, ``handler.py`` — for the
+        device's PUBACK. A wired PPPoS device saturating its only pipe with a ~1 MB firmware
+        download cannot PUBACK an OTA command in time, so amqtt drops it from ``inflight_out``
+        mid-download and the session flaps → the OTA never commits. Downlinks are lossy by design
+        in this fleet: command redelivery rides the next heartbeat (``router._maybe_redeliver``)
+        and enrollment finalizes by presence (``claim_enrollment_by_device``), so a QoS-0 grant
+        costs no reliability we were actually relying on. Uplink (device→broker) QoS is untouched,
+        so heartbeats/crash/response stay reliable. (0.11.3's own ``max-qos`` config key is rejected
+        by its typed ``BrokerConfig``, hence this override rather than a config entry.)
+        """
+        topic_filter, _requested_qos = subscription
+        return await super().add_subscription((topic_filter, 0), session)
 
     async def _publish_retained_messages_for_subscription(
         self, subscription: tuple[str, int], session: Session

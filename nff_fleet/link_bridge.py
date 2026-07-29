@@ -27,11 +27,18 @@ import logging
 import time
 from urllib.parse import parse_qs, urlparse
 
+import websockets.http11
 from websockets.asyncio.server import serve
 
 from nff_fleet.config import settings
 
 logger = logging.getLogger(__name__)
+
+# websockets caps a single handshake line at 8192 bytes (MAX_LINE_LENGTH). The browser's WS upgrade
+# request can exceed that — cookies for the localhost origin (Supabase auth) are NOT port-scoped, so
+# they ride along to :3008 and a multi-KB auth cookie blows the request line. Raise the cap so a
+# large-but-legitimate handshake isn't rejected (the connection is still gated by the signed token).
+websockets.http11.MAX_LINE_LENGTH = 65536
 
 _server = None
 

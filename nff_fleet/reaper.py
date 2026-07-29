@@ -18,7 +18,13 @@ async def _reaper_loop() -> None:
                 settings.default_heartbeat_interval_s, settings.heartbeat_miss_factor
             ):
                 registry.set_offline(d.device_id)
-                db.upsert_device(d.device_id, {"status": "offline"})
+                # project_id must ride along (mirrors the LWT path in router.py): the
+                # upsert RPC's insert tuple hits devices.project_id NOT NULL (prod)
+                # before ON CONFLICT arbitration, so omitting it 23502s every sweep.
+                if d.project_id:
+                    db.upsert_device(
+                        d.device_id, {"status": "offline", "project_id": d.project_id}
+                    )
                 interval = d.heartbeat_interval_s or settings.default_heartbeat_interval_s
                 logger.info(
                     "Device %s marked offline (no heartbeat for >%ss = %s× its %ss interval)",
