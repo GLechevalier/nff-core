@@ -594,7 +594,11 @@ def test_update_command_runs_doctor_on_failure(isolated_config, monkeypatch):
     ran = {"doctor": False}
     monkeypatch.setattr(update_cmd, "_run_doctor",
                         lambda: ran.__setitem__("doctor", True))
-    result = CliRunner(mix_stderr=False).invoke(update_cmd.update, [])
+    try:
+        runner = CliRunner(mix_stderr=False)  # click < 8.2
+    except TypeError:
+        runner = CliRunner()  # click >= 8.2 always captures stderr separately
+    result = runner.invoke(update_cmd.update, [])
     assert result.exit_code == 1
     assert ran["doctor"] is True
     assert "update failed at 'swap'" in result.stderr
