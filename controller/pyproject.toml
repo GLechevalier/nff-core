@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "nff-mock-controller"
-version = "0.1.18"
+version = "0.1.19"
 description = "On-demand orchestrator that spawns/provisions/reaps nff-mock virtual ESP32s"
 readme = "README.md"
 requires-python = ">=3.12"
