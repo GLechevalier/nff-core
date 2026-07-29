@@ -80,7 +80,7 @@ async def test_register_source_does_not_deploy(mock_supabase, monkeypatch):
         called["deploy"] = True
         raise AssertionError("register_source must not create a deployment")
 
-    monkeypatch.setattr(ops, "upload_artifact", _fail_upload)
+    monkeypatch.setattr(ops, "upload_artifact_impl", _fail_upload)
     monkeypatch.setattr(ops, "create_deployment", _fail_deploy)
 
     _device_row(mock_supabase)

@@ -240,6 +240,42 @@ async def group_member_device_types(group_id: str) -> list[str]:
     return sorted(seen.values())
 
 
+async def group_is_mock_only(group_id: str) -> bool:
+    """True when every member of the group is a simulated device that never boots firmware.
+
+    Provenance, not device_type, is the discriminator: L1 mocks heartbeat the same
+    self-attested ``esp32`` as real hardware, but the mock controller mints ``mock-``
+    device ids. QEMU (nff-qemu-esp32) devices DO execute firmware, so a mock-minted id
+    with that type still counts as real. Used by build-deploy to decide whether a
+    synthetic (non-0xE9) artifact is acceptable — an empty group is NOT mock-only.
+    """
+    client = get_client()
+    members_resp = (
+        await client.table("device_group_members")
+        .select("device_id")
+        .eq("group_id", group_id)
+        .execute()
+    )
+    member_ids = [r["device_id"] for r in (members_resp.data or [])]
+    if not member_ids:
+        return False
+    devices_resp = (
+        await client.table("devices")
+        .select("id, device_type")
+        .in_("id", member_ids)
+        .execute()
+    )
+    rows = devices_resp.data or []
+    if not rows:
+        return False
+    for row in rows:
+        if not str(row.get("id") or "").startswith("mock-"):
+            return False
+        if (row.get("device_type") or "").strip().lower() == "nff-qemu-esp32":
+            return False
+    return True
+
+
 async def _firmware_device_types(target_version: str) -> list[str]:
     """The device_type allow-list an artifact declares it targets (may be empty).
 
@@ -858,6 +894,37 @@ async def _resolve_device_id(reported_id: str) -> str | None:
     return None
 
 
+async def _find_active_job(ota_device_id: str, version: str) -> dict | None:
+    """Find the device's single in-flight ota_jobs row for a reported wire version.
+
+    The device reports the OTA command's wire version. For connector deploys that's
+    the artifact's semver release_version, NOT the job's catalog target_version, so an
+    exact target_version match won't find the job. Try the exact match first
+    (manual/legacy deploys where they're the same string), then fall back to the
+    device's single most-recent non-terminal job — a device runs one OTA at a time.
+    """
+    client = get_client()
+    exact = (
+        await client.table("ota_jobs")
+        .select("*")
+        .eq("device_id", ota_device_id)
+        .eq("target_version", version)
+        .order("last_updated", desc=True)
+        .execute()
+    )
+    active = [j for j in (exact.data or []) if j["status"] not in _TERMINAL_DD]
+    if not active:
+        any_resp = (
+            await client.table("ota_jobs")
+            .select("*")
+            .eq("device_id", ota_device_id)
+            .order("last_updated", desc=True)
+            .execute()
+        )
+        active = [j for j in (any_resp.data or []) if j["status"] not in _TERMINAL_DD]
+    return active[0] if active else None
+
+
 async def finalize_ota_result(
     device_id: str, status: str, version: str, reason: str | None = None
 ) -> dict:
@@ -883,34 +950,12 @@ async def finalize_ota_result(
         logger.info("ota_result: no device matches %r — ignoring", device_id)
         return {"finalized": False, "reason": "device-not-found", "device_id": device_id}
 
-    # The device reports the version it ran = the OTA command's wire version. For connector
-    # deploys that's the artifact's semver release_version, NOT the job's catalog
-    # target_version, so an exact target_version match won't find the job. Try the exact
-    # match first (manual/legacy deploys where they're the same string), then fall back to
-    # the device's single most-recent in-flight job — a device runs one OTA at a time.
-    exact = (
-        await client.table("ota_jobs")
-        .select("*")
-        .eq("device_id", ota_device_id)
-        .eq("target_version", version)
-        .order("last_updated", desc=True)
-        .execute()
-    )
-    active = [j for j in (exact.data or []) if j["status"] not in _TERMINAL_DD]
-    if not active:
-        any_resp = (
-            await client.table("ota_jobs")
-            .select("*")
-            .eq("device_id", ota_device_id)
-            .order("last_updated", desc=True)
-            .execute()
-        )
-        active = [j for j in (any_resp.data or []) if j["status"] not in _TERMINAL_DD]
-    if not active:
+    active = await _find_active_job(ota_device_id, version)
+    if active is None:
         logger.info("ota_result: no active job for (%s, %s) — idempotent no-op", ota_device_id, version)
         return {"finalized": False, "reason": "no-active-job", "device_id": ota_device_id, "version": version}
 
-    job = active[0]
+    job = active
     # Persist the rollback cause only on a failure; success carries nothing to explain.
     extra = {"failure_reason": reason} if (new_status == "failure" and reason) else None
     await _apply_job_status(job, new_status, job["deployment_id"], ota_device_id, extra_update=extra)
@@ -923,6 +968,75 @@ async def finalize_ota_result(
         "job_id": job["id"],
         "status": new_status,
     }
+
+
+_PROGRESS_STAGES = {"downloading", "installing", "rebooting"}
+
+
+async def record_ota_progress(
+    device_id: str,
+    version: str,
+    stage: str,
+    progress: int | None = None,
+    attempt: int | None = None,
+) -> dict:
+    """Record a device-reported mid-flight OTA progress tick onto its ota_jobs row.
+
+    Fire-and-forget QoS-0 telemetry: lossy, unordered, and possibly stale, so every
+    guard here degrades to a silent no-op rather than an error. Only non-terminal jobs
+    are touched — ``ota_result`` (via ``finalize_ota_result``) stays authoritative.
+
+    ``progress`` may be absent (device didn't know the image size): the tick then only
+    bumps ``last_updated``, which doubles as the reaper's liveness signal. A progress
+    *decrease* is accepted only when ``attempt`` increased — the device restarts from
+    byte 0 when its origin can't resume — otherwise out-of-order forwards are dropped.
+    """
+    if stage not in _PROGRESS_STAGES:
+        return {"recorded": False, "reason": "unknown-stage"}
+
+    client = get_client()
+    ota_device_id = await _resolve_device_id(device_id)
+    if ota_device_id is None:
+        return {"recorded": False, "reason": "device-not-found"}
+
+    job = await _find_active_job(ota_device_id, version)
+    if job is None:
+        return {"recorded": False, "reason": "no-active-job"}
+
+    if stage in ("installing", "rebooting"):
+        if job["status"] == stage:
+            return {"recorded": True, "job_id": job["id"], "status": stage}
+        try:
+            validate_transition("device_deployment", job["status"], stage)
+        except Exception:
+            # Stale/out-of-order tick (e.g. "installing" arriving after "rebooting").
+            return {"recorded": False, "reason": "illegal-transition", "status": job["status"]}
+        await _apply_job_status(
+            job, stage, job["deployment_id"], ota_device_id, extra_update={"progress": 100}
+        )
+        return {"recorded": True, "job_id": job["id"], "status": stage}
+
+    # stage == "downloading": pure progress tick — single-row update, no deployment
+    # recompute (nothing terminal changed).
+    now = datetime.now(timezone.utc).isoformat()
+    update: dict = {"last_updated": now}
+
+    if job["status"] == "pending":
+        # The device's first tick can beat the dispatch-time status write.
+        update["status"] = "downloading"
+    elif job["status"] != "downloading":
+        return {"recorded": False, "reason": "not-downloading", "status": job["status"]}
+
+    attempt_bumped = isinstance(attempt, int) and attempt > (job.get("attempts") or 0)
+    if attempt_bumped:
+        update["attempts"] = attempt
+
+    if isinstance(progress, int) and 0 <= progress <= 100:
+        if progress >= (job.get("progress") or 0) or attempt_bumped:
+            update["progress"] = progress
+
+    await client.table("ota_jobs").update(update).eq("id", job["id"]).execute()
+    return {"recorded": True, "job_id": job["id"], "status": update.get("status", job["status"])}
 
 
 async def _recompute_deployment_status(deployment_id: str) -> None:

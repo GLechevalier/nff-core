@@ -43,8 +43,8 @@ async def test_full_ota_lifecycle(supabase_client, tmp_path, ed25519_keypair):
 
     run_id = secrets.token_hex(4)
 
-    # 1. Upload artifact
-    fw_data = secrets.token_bytes(2048)
+    # 1. Upload artifact (shaped like a real ESP32 image: 0xE9 magic + size ≥ the gate floor)
+    fw_data = b"\xe9" + secrets.token_bytes(40 * 1024)
     fw_file = tmp_path / "firmware.bin"
     fw_file.write_bytes(fw_data)
 

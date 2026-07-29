@@ -20,7 +20,10 @@ module adds the inbound endpoints that other trusted services call:
         connector: uploads the artifact (+ optional debug ELF and git lineage), then
         creates and starts a deployment to the target group. Wraps the existing
         upload_artifact / create_deployment / start_deployment ops so nff-ota stays the
-        sole owner of deploy logic.
+        sole owner of deploy logic. The upload enforces the ESP32 image-validity gate
+        (magic 0xE9 + size floor) unless the target group is mock-only — decided by
+        provenance (every member id ``mock-`` and no QEMU member), because L1 mocks and
+        real hardware both self-attest device_type "esp32".
 
 Mirrors nff-fleet's ``control.py`` shared-secret pattern.
 """
@@ -44,11 +47,13 @@ from nff_ota.models.artifact import UploadArtifactParams
 from nff_ota.source.ops import build_and_deploy_source, register_source
 from nff_ota.storage import upload_elf
 from nff_ota.models.deployment import CreateDeploymentParams
-from nff_ota.tools.artifacts.ops import upload_artifact
+from nff_ota.tools.artifacts.ops import upload_artifact_impl
 from nff_ota.tools.deployments.ops import (
     create_deployment,
     finalize_ota_result,
+    group_is_mock_only,
     group_member_device_types,
+    record_ota_progress,
     start_deployment,
 )
 
@@ -89,6 +94,40 @@ async def _ota_result(request: Request) -> JSONResponse:
     result = await finalize_ota_result(
         device_id, status, version, reason=reason if isinstance(reason, str) else None
     )
+    return JSONResponse(result)
+
+
+async def _ota_progress(request: Request) -> JSONResponse:
+    if not _secret_ok(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+
+    await ensure_client()
+
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "invalid JSON body"}, status_code=400)
+
+    device_id = body.get("device_id")
+    version = body.get("version")
+    stage = body.get("stage")
+    if not isinstance(device_id, str) or not device_id:
+        return JSONResponse({"error": "device_id is required"}, status_code=400)
+    if not isinstance(version, str) or not version:
+        return JSONResponse({"error": "version is required"}, status_code=400)
+    if not isinstance(stage, str) or not stage:
+        return JSONResponse({"error": "stage is required"}, status_code=400)
+
+    progress = body.get("progress")
+    attempt = body.get("attempt")
+    result = await record_ota_progress(
+        device_id,
+        version,
+        stage,
+        progress=progress if isinstance(progress, int) else None,
+        attempt=attempt if isinstance(attempt, int) else None,
+    )
+    # Always 200: progress is lossy telemetry and a stale tick is not the fleet's error.
     return JSONResponse(result)
 
 
@@ -204,8 +243,13 @@ async def _build_deploy(request: Request) -> JSONResponse:
         val = body.get(key)
         return val if isinstance(val, str) and val else None
 
+    # Synthetic (non-0xE9) artifacts are acceptable only when nothing in the target group
+    # boots the bytes — decided by provenance (mock-only membership), not device_type,
+    # because L1 mocks and real hardware both self-attest "esp32".
+    allow_synthetic = await group_is_mock_only(group_id)
+
     try:
-        upload = await upload_artifact(
+        upload = await upload_artifact_impl(
             UploadArtifactParams(
                 name=name, version=version, device_types=device_types, file_path=file_path,
                 project_id=project_id,
@@ -217,7 +261,8 @@ async def _build_deploy(request: Request) -> JSONResponse:
                 parent_version=_str("parent_version"),
                 elf_path=elf_path,
                 release_version=_str("release_version"),
-            )
+            ),
+            allow_synthetic=allow_synthetic,
         )
     finally:
         if tmp_path is not None:
@@ -443,6 +488,7 @@ async def _firmware_register_source(request: Request) -> JSONResponse:
 def register(root) -> None:
     """Register inbound HTTP routes on the FastMCP HTTP app."""
     root.custom_route("/internal/ota-result", methods=["POST"])(_ota_result)
+    root.custom_route("/internal/ota-progress", methods=["POST"])(_ota_progress)
     root.custom_route("/internal/build-deploy", methods=["POST"])(_build_deploy)
     root.custom_route("/internal/ensure-mock-target", methods=["POST"])(_ensure_mock_target)
     root.custom_route("/internal/firmware/seed", methods=["POST"])(_firmware_seed)

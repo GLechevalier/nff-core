@@ -11,9 +11,13 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 @pytest.fixture
 def sample_artifact_bytes() -> bytes:
-    """1 KB of deterministic pseudo-random firmware bytes."""
+    """A plausible ESP32 app image: 0xE9 magic + 40 KB of pseudo-random firmware bytes.
+
+    Shaped to pass the upload image-validity gate (magic byte + esp_image_min_bytes floor)
+    the way a genuinely compiled image would.
+    """
     rng = secrets.SystemRandom()
-    return bytes(rng.randint(0, 255) for _ in range(1024))
+    return b"\xe9" + bytes(rng.randint(0, 255) for _ in range(40 * 1024))
 
 
 @pytest.fixture

@@ -19,6 +19,14 @@ class OtaSettings(BaseSettings):
     default_max_retries: int = 3
     trusted_signing_key_path: str = ""
 
+    # ESP32 image-validity gate: reject uploaded artifacts that are not plausible ESP32
+    # firmware images (magic byte 0xE9 + a size floor) unless the upload is explicitly
+    # allowed to be synthetic (mock-only targets — the mock verifies bytes by SHA-256,
+    # it never boots them). Prevents the "text blob shipped as firmware" failure a real
+    # device is the first to expose. Disable as a rollback lever, not a workaround.
+    esp_image_gate_enabled: bool = True
+    esp_image_min_bytes: int = 32768  # real app images are >100 KB; 32 KB is conservative
+
     # nff-fleet is the command-delivery plane. nff-ota decides what to push and asks
     # fleet to deliver it over MQTT via fleet's POST /internal/command endpoint.
     fleet_url: str = ""          # e.g. http://nff-fleet:3001

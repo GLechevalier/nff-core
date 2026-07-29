@@ -26,13 +26,19 @@ _task: asyncio.Task | None = None
 
 
 async def sweep_once() -> int:
-    """Time out jobs stuck in 'downloading'. Returns the number reaped."""
+    """Time out jobs stuck in a non-terminal in-flight state. Returns the number reaped.
+
+    'installing'/'rebooting' are swept with the same cutoff as 'downloading': the
+    device-side confirm window (NFF_OTA_CONFIRM_TIMEOUT_S, 60 s x max 3 trial boots)
+    is well inside the 600 s default, and progress ticks keep bumping last_updated
+    while the device is actually alive.
+    """
     client = get_client()
     cutoff = (datetime.now(timezone.utc) - timedelta(seconds=settings.download_timeout)).isoformat()
     resp = (
         await client.table("ota_jobs")
         .select("*")
-        .eq("status", "downloading")
+        .in_("status", ["downloading", "installing", "rebooting"])
         .lt("last_updated", cutoff)
         .execute()
     )

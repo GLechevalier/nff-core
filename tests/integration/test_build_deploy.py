@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import base64
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from starlette.applications import Starlette
@@ -25,22 +25,28 @@ def _deployment(dep_id: str = "dep-1") -> DeploymentInfo:
 
 
 @pytest.fixture
-def client(monkeypatch):
+def client(monkeypatch, mock_supabase):
     monkeypatch.setattr(settings, "fleet_secret", _SECRET)
+    # The route resolves the group's project_id (tenant anchor) before uploading; serve
+    # it from the mock so the test never needs a live Supabase.
+    mock_supabase.table.return_value.execute = AsyncMock(
+        return_value=MagicMock(data=[{"id": "grp-1", "project_id": "proj-1"}], error=None)
+    )
     app = Starlette(
         routes=[Route("/internal/build-deploy", webhooks._build_deploy, methods=["POST"])]
     )
     return TestClient(app)
 
 
-def _patch_pipeline(monkeypatch, *, dep_id="dep-1"):
-    """Stub the three nff-ota ops the route orchestrates; return the mocks."""
+def _patch_pipeline(monkeypatch, *, dep_id="dep-1", mock_only=False):
+    """Stub the ops the route orchestrates; return the mocks."""
     upload = AsyncMock(return_value=ArtifactResult(error=None))
     create = AsyncMock(return_value=DeploymentResult(deployment=_deployment(dep_id)))
     start = AsyncMock(return_value=StartDeploymentResult(delivered=2, failed=0, skipped=0))
-    monkeypatch.setattr(webhooks, "upload_artifact", upload)
+    monkeypatch.setattr(webhooks, "upload_artifact_impl", upload)
     monkeypatch.setattr(webhooks, "create_deployment", create)
     monkeypatch.setattr(webhooks, "start_deployment", start)
+    monkeypatch.setattr(webhooks, "group_is_mock_only", AsyncMock(return_value=mock_only))
     return upload, create, start
 
 
@@ -220,3 +226,27 @@ def test_upload_failure_surfaces_400(client, monkeypatch):
     assert resp.status_code == 400
     assert "upload failed" in resp.json()["error"]
     create.assert_not_awaited()
+
+
+def test_mock_only_group_allows_synthetic_upload(client, monkeypatch):
+    """A mock-only target group makes the upload synthetic-permissive (image gate off)."""
+    upload, _, _ = _patch_pipeline(monkeypatch, mock_only=True)
+    body = {
+        "version": "fw-abc1234", "name": "v", "device_types": ["esp32"],
+        "artifact_b64": base64.b64encode(b"not firmware").decode(), "device_group_id": "grp-1",
+    }
+    resp = client.post("/internal/build-deploy", json=body, headers={"X-Fleet-Secret": _SECRET})
+    assert resp.status_code == 200
+    assert upload.await_args.kwargs["allow_synthetic"] is True
+
+
+def test_real_group_upload_is_strict(client, monkeypatch):
+    """A group with real/QEMU hardware keeps the ESP32 image gate on (allow_synthetic=False)."""
+    upload, _, _ = _patch_pipeline(monkeypatch, mock_only=False)
+    body = {
+        "version": "fw-abc1234", "name": "v", "device_types": ["esp32"],
+        "artifact_b64": base64.b64encode(b"\xe9binary").decode(), "device_group_id": "grp-1",
+    }
+    resp = client.post("/internal/build-deploy", json=body, headers={"X-Fleet-Secret": _SECRET})
+    assert resp.status_code == 200
+    assert upload.await_args.kwargs["allow_synthetic"] is False

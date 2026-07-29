@@ -13,18 +13,51 @@ from nff_ota.storage import create_signed_url as _create_signed_url, delete_arti
 # Deployable-image columns nff-ota owns on the shared firmware_versions table.
 _ARTIFACT_FIELDS = ("name", "device_types", "checksum_sha256", "size_bytes", "signature", "storage_path", "provides", "depends")
 
+# Every ESP32 image (bootloader/app) starts with the ROM loader's magic byte.
+_ESP_IMAGE_MAGIC = 0xE9
+
 
 async def upload_artifact(params: UploadArtifactParams) -> ArtifactResult:
     """Upload a firmware artifact and register it against its version. The file is read from file_path on the server.
 
     A firmware version is the unit of identity (firmware_versions.version). Uploading
     attaches the deployable binary + checksum/signature to that version row, creating
-    it if the version is not already tracked.
+    it if the version is not already tracked. Artifacts must look like real ESP32
+    images (magic 0xE9, plausible size) — internal callers shipping to mock-only
+    targets use ``upload_artifact_impl(..., allow_synthetic=True)``.
+    """
+    return await upload_artifact_impl(params)
+
+
+async def upload_artifact_impl(
+    params: UploadArtifactParams, *, allow_synthetic: bool = False
+) -> ArtifactResult:
+    """upload_artifact with the synthetic-artifact escape hatch.
+
+    ``allow_synthetic`` is provenance-derived by INTERNAL callers only (a mock-only
+    target group / a ``mock-`` device id) — it is deliberately not on the MCP tool
+    signature or UploadArtifactParams, where a caller could simply assert it.
     """
     try:
         data = Path(params.file_path).read_bytes()
     except OSError as e:
         return ArtifactResult(error=f"Cannot read file: {e}")
+
+    # Image-validity gate: a device downloads and BOOTS these bytes; anything that isn't
+    # a plausible ESP32 image would sail through SHA-256 verification (computed over the
+    # same bytes) and only fail on real hardware. Mocks never boot the artifact, so
+    # synthetic uploads are allowed only when the caller proved a mock-only destination.
+    if settings.esp_image_gate_enabled and not allow_synthetic:
+        if len(data) < settings.esp_image_min_bytes or data[0] != _ESP_IMAGE_MAGIC:
+            head = f"{data[0]:#04x}" if data else "empty"
+            return ArtifactResult(
+                error=(
+                    f"artifact is not a valid ESP32 firmware image (first byte {head}, "
+                    f"{len(data)} bytes; expected magic 0xE9 and >= "
+                    f"{settings.esp_image_min_bytes} bytes). Synthetic blobs may only "
+                    f"target mock-only device groups"
+                )
+            )
 
     checksum = sha256_bytes(data)
     signature: str | None = None

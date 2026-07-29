@@ -28,7 +28,7 @@ from nff_ota.models.source import (
 )
 from nff_ota.source import jobs
 from nff_ota.source.compile import build_id_for, compile_sketch, detect_fault
-from nff_ota.tools.artifacts.ops import upload_artifact
+from nff_ota.tools.artifacts.ops import upload_artifact_impl
 from nff_ota.tools.deployments.ops import create_deployment, start_deployment
 
 logger = logging.getLogger(__name__)
@@ -155,7 +155,10 @@ async def build_and_deploy_source(
     try:
         fd.write(sketch_bytes)
         fd.close()
-        upload = await upload_artifact(
+        # A JSON sketch is only bootable-by-pretense: the L1 mock "runs" it via the regex
+        # analyzer. Only a mock-minted device id may receive one — a real (typeless legacy)
+        # device reaching this path gets the image gate instead of a text blob.
+        upload = await upload_artifact_impl(
             UploadArtifactParams(
                 name=catalog_version,
                 version=catalog_version,
@@ -166,7 +169,8 @@ async def build_and_deploy_source(
                 release_version=version,
                 author=author,
                 changelog=changelog,
-            )
+            ),
+            allow_synthetic=device_id.startswith("mock-"),
         )
     finally:
         Path(fd.name).unlink(missing_ok=True)
