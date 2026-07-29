@@ -1,5 +1,60 @@
 # What changed
 
+## Status — wired-PPPoS OTA verified end-to-end on real hardware; OTA'd images can now complete mTLS (2026-07-28)
+
+A full OTA over the **wired PPPoS link** (browser WiredLink over Web Serial → fleet bridge)
+now succeeds on a real ESP32-D0WD (`2805a53568b8`): deployment → 1.09 MB download over the
+bridge → SHA-256 verify → flash → trial boot → **mTLS reconnect → health soak →
+`ota_result committed`** in ~109 s, with the fleet advancing the device to the new version.
+This closes the last gap of the wired-OTA saga: every previous OTA'd image booted and ran but
+could never commit its trial — it died in the TLS handshake with the broker.
+
+## Fix: OTA'd images presented a leaf-only client cert — NVS chain never contributed its intermediate
+
+**Problem:** An image delivered by OTA could not complete the mTLS reconnect required to
+commit its trial (device sent ClientHello, received the full server flight, then sent a
+suspiciously small ~751 B client flight and the broker closed the connection — no auth-deny,
+i.e. death at the TLS layer). The same NVS credentials worked fine in the USB-flashed
+onboarding image. Root cause is a two-part interaction:
+
+1. The only thing that ever put the **project-CA intermediate** on the wire was
+   `nff_config_t::intermediate_cert` — fed from the `NFFxICRT` patch slot, which is filled by
+   the **browser flasher at USB-flash time**. An OTA rewrites the app partition, so an OTA'd
+   image always has an empty slot (`intermediate_cert_len == 0`).
+2. NVS *does* hold the full chain — `op_chain` is raw `leaf_DER || intermediate_DER`
+   (`nff_claim.c`) — but `nff_store_load` assigned the whole blob to `client_cert` and never
+   set `intermediate_cert`. The ESP32 port's `der_to_pem()` wraps the blob in **one** PEM
+   block, and mbedTLS parses exactly one certificate per PEM block, so the trailing
+   intermediate DER was silently dropped. Net effect: leaf-only.
+
+The broker's trust store is the **root** CA only and device leaves are issued by a
+**per-project intermediate**, so a leaf-only client can never chain to root and the server
+aborts the handshake. Proven directly against the live broker (Python `ssl` client with the
+device's real key): leaf-only → EOF mid-handshake (the exact device signature);
+leaf + intermediate → `HANDSHAKE OK TLSv1.2`.
+
+**Change:**
+
+| File | Change |
+|---|---|
+| `src/nff_store.c` | `nff_store_load` now splits `op_chain` at the leaf boundary (the leaf blob `op_cert` gives the split point, `memcmp`-guarded) and sets `intermediate_cert`/`_len` to point at the trailing intermediate inside the chain buffer — no extra allocation. The port already appends `intermediate_cert` as a second PEM block, so the device now presents leaf + intermediate from NVS alone. `nff_store_free_loaded` NULLs the (aliasing) intermediate pointer. |
+
+Slot-patched (USB-flashed) images are unaffected: when the guard fails or the chain has no
+trailing bytes, `intermediate_cert` stays inherited from the base config as before.
+
+**Verification:** rebuilt the wired SOS sketch as 1.0.7 against the patched SDK and deployed
+it over the wired link: the trial image completed mTLS on first attempt, held the soak,
+published `ota_result committed`, and the device heartbeats as the new build
+(`build_id a7490269501b1107`) — the first OTA'd image ever to commit over PPPoS. Baseline
+onboarding image still connects (regression check).
+
+**Related, sketch-side (not SDK):** the wired sketches' `run_wired_mode` used to wait ≤60 s
+for PPP and then return without ever dialing — a device that booted before the browser
+attached sat idle forever. `sketches/sos_wired` now defers SDK start to `loop()` (fires
+whenever PPP first comes up). `examples/arduino_onboard_wired` **still has the 60 s bail**,
+and the dashboard's committed golden bins predate this SDK fix — rebuild via
+`node nff-dashboard/scripts/build-firmware.mjs` when refreshing the ⚡ Flash baseline.
+
 ## Feature — OTA hardening: resumable download, deeper health gate, panic backtrace (2026-06-15)
 
 Implements three of the IOT_BRIDGE.md §3 "remaining work to make OTA production-grade" gaps

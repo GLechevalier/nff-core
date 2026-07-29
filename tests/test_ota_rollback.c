@@ -156,6 +156,7 @@ static void test_ota_cmd_downgrade_rejected(void) {
 
     extern void nff_port_posix_inject_mqtt(nff_mqtt_handle_t *, const char *, const char *);
     nff_port_posix_inject_mqtt(g_nff.mqtt, cmd_topic, json);
+    nff_loop();   /* the rx callback only parks the cmd; the loop drains + runs it */
 
     const char *resp = nff_port_posix_get_published(g_nff.mqtt,
                            "nff/test-project/devices/test-device/response");
@@ -412,6 +413,7 @@ static void test_qemu_simulated_adopt(void) {
              "\"timestamp\":0,"
              "\"cmd_sig\":\"3006020101020101\"}");
     nff_port_posix_inject_mqtt(g_nff.mqtt, cmd_topic, json);
+    nff_loop();   /* the rx callback only parks the cmd; the loop drains + runs it */
 
     /* committed published straight away — no reboot, no download, no rollback */
     const char *resp = nff_port_posix_get_published(g_nff.mqtt, RESP_TOPIC);

@@ -75,6 +75,9 @@ void nff_mqtt_init(void) {
                            g_nff.cfg->client_key,  g_nff.cfg->client_key_len,
                            g_nff.cfg->intermediate_cert, g_nff.cfg->intermediate_cert_len);
 
+    /* Runtime QEMU concession (see nff_config_t.tls_skip_cn_check) — false on real hardware. */
+    nff_port_mqtt_set_skip_cn_check(g_nff.mqtt, g_nff.cfg->tls_skip_cn_check);
+
     nff_port_mqtt_set_rx_callback(g_nff.mqtt, mqtt_rx_cb, NULL);
 
     /* Register LWT — broker publishes this automatically on unclean disconnect */

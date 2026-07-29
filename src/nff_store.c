@@ -166,12 +166,21 @@ int nff_store_load(const nff_config_t *base, nff_config_t *out) {
     if ((rc = load_blob("op_vkey",  &vkey,  &vkey_n))  != NFF_OK) goto fail;
 
     out->project_id      = project;
-    /* The device presents leaf+intermediate, so the mTLS client cert is the full chain. */
+    /* op_chain is raw leaf_DER || intermediate_DER (nff_claim). The port wraps client_cert in
+     * ONE PEM block and mbedTLS parses one cert per block, so the trailing intermediate would be
+     * silently dropped — the broker then can't chain leaf -> project CA -> root and aborts the
+     * handshake. Split here: the leaf blob (op_cert) gives the boundary, and intermediate_cert
+     * points into the chain buffer (no extra allocation; freed via client_cert). Images whose
+     * NFFxICRT patch slot is empty (every OTA-delivered image) depend on this split. */
     out->client_cert     = chain; out->client_cert_len = chain_n;
+    if (chain_n > cert_n && memcmp(chain, cert, cert_n) == 0) {
+        out->intermediate_cert     = chain + cert_n;
+        out->intermediate_cert_len = chain_n - cert_n;
+    }
     out->client_key      = key;   out->client_key_len  = key_n;
     out->ca_cert         = ca;    out->ca_cert_len     = ca_n;
     out->cmd_verify_key  = vkey;  out->cmd_verify_key_len = vkey_n;
-    free(cert);   /* leaf-only DER not needed once the chain is the presented cert */
+    free(cert);   /* leaf DER only needed to locate the chain split */
     return NFF_OK;
 
 fail:
@@ -187,4 +196,6 @@ void nff_store_free_loaded(nff_config_t *out) {
     free((void *)out->cmd_verify_key);
     out->project_id = NULL; out->client_cert = NULL; out->client_key = NULL;
     out->ca_cert = NULL; out->cmd_verify_key = NULL;
+    /* intermediate_cert may alias the freed chain buffer (set by nff_store_load's split). */
+    out->intermediate_cert = NULL; out->intermediate_cert_len = 0;
 }

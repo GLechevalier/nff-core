@@ -97,6 +97,14 @@ void nff_port_mqtt_set_tls(nff_mqtt_handle_t *h,
                             const uint8_t *inter, size_t inter_len);
 
 /**
+ * Skip the broker-cert CN/SAN hostname check (chain verification stays ON). Runtime carrier of
+ * nff_config_t.tls_skip_cn_check — set only by the QEMU L2 NVS identity loader, so one universal
+ * image keeps full hostname verification on real hardware. Ports without the concept no-op.
+ * Call after nff_port_mqtt_set_tls(), before nff_port_mqtt_connect().
+ */
+void nff_port_mqtt_set_skip_cn_check(nff_mqtt_handle_t *h, bool skip);
+
+/**
  * Register the receive callback. Called from MQTT thread or ISR with
  * the topic, raw payload bytes, and length.
  * user is the value passed to this function.
@@ -216,6 +224,18 @@ int nff_port_ota_mark_valid(void);
  * On single-image platforms this degrades to a plain reboot.
  */
 void nff_port_ota_rollback(void);
+
+/**
+ * Detect (and repair) a bootloader fallback: the bootloader was pointed at a
+ * freshly-flashed image but rejected it at boot and fell back to this one, so
+ * the configured boot partition no longer matches the running partition. When
+ * that happens, point the boot selection back at the RUNNING image (making the
+ * fallback durable across power cycles) and return 1. Return 0 when boot and
+ * running match (the normal case). Called by nff_ota_boot_check() on a trial
+ * boot so the SDK never runs probation — and never falsely commits — on an
+ * image that isn't actually the trial. Platforms without A/B slots return 0.
+ */
+int nff_port_ota_repair_boot_partition(void);
 
 /** Trigger a system reboot. Does not return. */
 void nff_port_reboot(void);

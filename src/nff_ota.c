@@ -49,7 +49,40 @@ typedef struct {
     nff_sha256_ctx_t  sha;
     size_t            written;
     int               error;
+    /* Mid-download progress telemetry (see ota_publish_progress) */
+    size_t            total;        /* expected image size; 0 = unknown */
+    int               last_pct;     /* percent at last publish */
+    uint32_t          last_pub_ms;  /* last publish/pump timestamp */
+    int               attempt;      /* 1-based; bumped on a from-scratch restart */
+    const char       *version;     /* wire version of the image being fetched */
+    const char       *topic;       /* response topic (alive for the whole download) */
 } ota_dl_ctx_t;
+
+/* Publish one QoS-0, non-retained ota_progress tick. pct < 0 = size unknown:
+   the "progress" field is omitted so the cloud treats it as a liveness keepalive
+   only. attempt lets the server accept the percent going backwards after a
+   from-scratch restart (resume unsupported). */
+static void ota_publish_progress(const char *topic, const char *version,
+                                 const char *stage, int pct,
+                                 size_t written, size_t total, int attempt) {
+    if (!nff_port_mqtt_is_connected(g_nff.mqtt)) return;
+    char msg[256];
+    if (pct >= 0) {
+        snprintf(msg, sizeof(msg),
+                 "{\"type\":\"ota_progress\",\"id\":\"%s\",\"version\":\"%s\","
+                 "\"stage\":\"%s\",\"progress\":%d,"
+                 "\"written\":%lu,\"size\":%lu,\"attempt\":%d}",
+                 g_nff.cfg->device_id, version, stage, pct,
+                 (unsigned long)written, (unsigned long)total, attempt);
+    } else {
+        snprintf(msg, sizeof(msg),
+                 "{\"type\":\"ota_progress\",\"id\":\"%s\",\"version\":\"%s\","
+                 "\"stage\":\"%s\",\"written\":%lu,\"attempt\":%d}",
+                 g_nff.cfg->device_id, version, stage,
+                 (unsigned long)written, attempt);
+    }
+    nff_port_mqtt_publish(g_nff.mqtt, topic, msg, 0, false);
+}
 
 static int ota_chunk_cb(const uint8_t *buf, size_t len, void *user_ctx) {
     ota_dl_ctx_t *ctx = (ota_dl_ctx_t *)user_ctx;
@@ -63,6 +96,23 @@ static int ota_chunk_cb(const uint8_t *buf, size_t len, void *user_ctx) {
         return -1;
     }
     ctx->written += len;
+
+    /* The blocking download starves nff_mqtt_tick() for its whole (multi-minute)
+       duration, so the MQTT client MUST be pumped here or keepalive dies and the
+       broker drops the session mid-OTA. The pump runs on the MIN_MS cadence
+       regardless of whether a progress tick also fires. */
+    uint32_t now = nff_port_millis();
+    if ((uint32_t)(now - ctx->last_pub_ms) >= NFF_OTA_PROGRESS_MIN_MS) {
+        int pct = ctx->total
+            ? (int)((uint64_t)ctx->written * 100u / ctx->total) : -1;
+        if (pct < 0 || pct >= ctx->last_pct + NFF_OTA_PROGRESS_STEP_PCT) {
+            ota_publish_progress(ctx->topic, ctx->version, "downloading", pct,
+                                 ctx->written, ctx->total, ctx->attempt);
+            if (pct > ctx->last_pct) ctx->last_pct = pct;
+        }
+        ctx->last_pub_ms = now;
+        nff_port_mqtt_loop(g_nff.mqtt);
+    }
     return 0;
 }
 
@@ -155,6 +205,23 @@ void nff_ota_boot_check(void) {
     nff_port_nvs_get_str("ota_version", g_nff.pending_ota_version,
                          sizeof(g_nff.pending_ota_version));
 
+    /* Bootloader fallback guard: the trial flag is set but the image running is NOT the
+       trial — the bootloader rejected the freshly-flashed slot at boot and fell back to
+       this (previous) image. Running probation here would falsely COMMIT an update this
+       device isn't running (the platform then records success and a wrong version). The
+       port has already repointed boot selection at this image; report rolled_back via the
+       same pending-result keys nff_ota_rollback uses (nff_core reads them right after this
+       call) and clear the trial. */
+    if (nff_port_ota_repair_boot_partition() != 0) {
+        nff_port_nvs_set_str("ota_pending",   "1");
+        nff_port_nvs_set_str("ota_version",   g_nff.pending_ota_version);
+        nff_port_nvs_set_str("ota_committed", "0");   /* 0 => rolled_back */
+        ota_clear_trial_nvs();                         /* also commits */
+        nff_log("nff: OTA trial v%s never booted (bootloader fallback) — reporting rolled_back",
+                g_nff.pending_ota_version);
+        return;
+    }
+
     /* Crash-loop guard: every unconfirmed boot bumps the counter. */
     uint32_t boots = 0;
     nff_port_nvs_get_u32("ota_boot_count", &boots);
@@ -191,7 +258,9 @@ static bool nff_ota_default_health_ok(void) {
 void nff_ota_trial_tick(void) {
     if (!g_nff.ota_trial) return;
 
-    bool connected = nff_port_mqtt_is_connected(g_nff.mqtt);
+    /* NULL guard: with the tick no longer gated on CONNECTED this can run before
+       the MQTT handle exists, and the Arduino ports dereference it unchecked. */
+    bool connected = g_nff.mqtt && nff_port_mqtt_is_connected(g_nff.mqtt);
     bool healthy   = connected &&
                      nff_ota_default_health_ok() &&
                      (g_nff.health_cb == NULL || g_nff.health_cb(g_nff.health_user));
@@ -328,10 +397,16 @@ void nff_ota_handle_cmd(const char *payload, char *resp, size_t resp_len) {
     }
 
     ota_dl_ctx_t ctx;
-    ctx.ota     = h;
-    ctx.sha     = nff_port_sha256_new();
-    ctx.written = 0;
-    ctx.error   = 0;
+    ctx.ota         = h;
+    ctx.sha         = nff_port_sha256_new();
+    ctx.written     = 0;
+    ctx.error       = 0;
+    ctx.total       = (size_t)size;         /* 0 = size unknown (optional field) */
+    ctx.last_pct    = 0;
+    ctx.last_pub_ms = nff_port_millis();
+    ctx.attempt     = 1;
+    ctx.version     = version;
+    ctx.topic       = topic;
 
     /* Resumable download (IOT_BRIDGE.md §3 gap #6): on a transient TLS stall the transfer is
        retried with an HTTP Range header from where it stopped — the OTA partition keeps
@@ -363,6 +438,11 @@ void nff_ota_handle_cmd(const char *payload, char *resp, size_t resp_len) {
             ctx.sha     = nff_port_sha256_new();
             ctx.written = 0;
             ctx.error   = 0;
+            /* Progress legitimately regresses to 0 here; the attempt bump is what
+               authorizes the decrease server-side. last_pct sinks below zero so
+               the restarted transfer's first tick publishes immediately. */
+            ctx.attempt += 1;
+            ctx.last_pct = -100;
             dl_rc       = -1;   /* not done yet; loop continues */
         }
         /* else: partial transfer (stall/short read) — loop and resume from ctx.written */
@@ -380,8 +460,10 @@ void nff_ota_handle_cmd(const char *payload, char *resp, size_t resp_len) {
                 ctx.error ? ctx.error : dl_rc,
                 (unsigned long)ctx.written, (unsigned long)size);
         snprintf(resp, resp_len, "{\"type\":\"error\",\"msg\":\"ota: download failed\"}");
+        /* Publish the failure — the ota_started ack was the last thing on the wire,
+           so without this the cloud would only learn of the failure via the reaper. */
+        nff_port_mqtt_publish(g_nff.mqtt, topic, resp, 1, false);
         g_nff.state = NFF_STATE_CONNECTED;
-        /* Response already published above; clear for caller */
         resp[0] = '\0';
         return;
     }
@@ -396,6 +478,10 @@ void nff_ota_handle_cmd(const char *payload, char *resp, size_t resp_len) {
         g_nff.state = NFF_STATE_CONNECTED;
         return;
     }
+
+    /* Image verified — surface the install step (partition finalise) to the cloud. */
+    ota_publish_progress(topic, version, "installing", 100,
+                         ctx.written, ctx.total, ctx.attempt);
 
     /* Finalise partition — this marks the new partition as bootable */
     if (nff_port_ota_end(h) != 0) {
@@ -417,10 +503,36 @@ void nff_ota_handle_cmd(const char *payload, char *resp, size_t resp_len) {
 
     nff_log("nff: OTA download complete, rebooting into trial v%s", version);
 
+    /* Long-lived stage: covers the reboot + the whole trial/health-soak window
+       until ota_result lands. The 500 ms flush below carries it out. */
+    ota_publish_progress(topic, version, "rebooting", 100,
+                         ctx.written, ctx.total, ctx.attempt);
+
     /* Small delay to let MQTT ACK flush */
     nff_port_delay_ms(500);
     nff_port_reboot();
 
     /* Never reached */
     resp[0] = '\0';
+}
+
+/* Drain a deferred OTA command (queued by nff_cmd.c) on the nff task. While the
+   flag is set no writer touches ota_cmd_buf (nff_cmd.c refuses with "busy"), so
+   the handler may read it in place. Mirrors nff_cmd_dispatch's publish-if-nonempty. */
+void nff_ota_pending_tick(void) {
+    if (!g_nff.ota_cmd_pending) return;
+
+    static char resp[NFF_RESPONSE_MAXLEN];
+    resp[0] = '\0';
+    nff_ota_handle_cmd(g_nff.ota_cmd_buf, resp, sizeof(resp));
+
+    nff_port_mutex_lock(g_nff.lock);
+    g_nff.ota_cmd_pending = false;
+    nff_port_mutex_unlock(g_nff.lock);
+
+    if (resp[0] != '\0') {
+        char topic[NFF_TOPIC_MAXLEN];
+        nff_topic_response(&g_nff, topic);
+        nff_port_mqtt_publish(g_nff.mqtt, topic, resp, 1, false);
+    }
 }

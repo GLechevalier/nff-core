@@ -113,6 +113,13 @@ typedef struct {
      * routes it to the real-compile path). A device can still not lie about being real hardware —
      * this is a build-baked value on images that are deliberately not real silicon. */
     const char    *device_type;                           /* NULL → use hw.device_type */
+
+    /* Skip the broker-cert CN/SAN hostname check (chain verification stays ON). QEMU-only: the
+     * fleet server cert's SAN omits the dialed guest IP. Set at RUNTIME by the L2 NVS identity
+     * loader (nff_l2_load_config_from_nvs) — never by real-hardware configs — so one universal
+     * image keeps full hostname verification on real silicon. Replaces the old compile-time
+     * #ifdef NFF_QEMU gate in the esp32 IDF port. */
+    bool           tls_skip_cn_check;                     /* default false: verify CN/SAN */
 } nff_config_t;
 
 /* ------------------------------------------------------------------ */
@@ -343,6 +350,22 @@ void nff_log(const char *fmt, ...);
  */
 nff_state_t nff_get_state(void);
 
+/**
+ * nff_log_recent — copy the RTC log ring into `out` (oldest first, newline-separated,
+ * NUL-terminated); returns the number of lines copied. For transport-constrained images
+ * (e.g. wired PPPoS, where UART0 belongs to PPP) to dump diagnostics over a side channel
+ * such as the wired config window.
+ */
+int nff_log_recent(char *out, size_t cap);
+
+/**
+ * nff_log_set_quiet — suppress the console echo of nff_log lines (the RTC ring still
+ * records). MANDATORY for images whose console UART carries a data protocol (wired
+ * PPPoS): the echo corrupts the link, and closing stdout instead crashes the next
+ * printf. Pair with nff_log_recent() to read diagnostics back.
+ */
+void nff_log_set_quiet(bool quiet);
+
 #if NFF_BOOTSTRAP_ENABLED
 /**
  * nff_get_mode — CLAIMED (NVS has a per-device cert) or BOOTSTRAP (unclaimed). Valid after nff_init.
@@ -437,6 +460,17 @@ int nff_bootstrap_run(void);
 #endif
 #ifndef NFF_OTA_MIN_HEALTHY_MS
 #  define NFF_OTA_MIN_HEALTHY_MS    5000   /* image must hold healthy this long before commit (soak) */
+#endif
+/* Mid-download OTA progress telemetry. Throttled ota_progress ticks (QoS 0,
+ * non-retained) are published on the response topic so the cloud can render a live
+ * progress bar; each tick also pumps the MQTT client, which the blocking download
+ * otherwise starves (keepalive). A tick fires only when BOTH thresholds are met;
+ * with an unknown image size the percent gate is skipped (bytes-only keepalive). */
+#ifndef NFF_OTA_PROGRESS_STEP_PCT
+#  define NFF_OTA_PROGRESS_STEP_PCT 5      /* min percent gained between publishes */
+#endif
+#ifndef NFF_OTA_PROGRESS_MIN_MS
+#  define NFF_OTA_PROGRESS_MIN_MS   2000   /* min interval between publishes / client pumps */
 #endif
 
 #ifdef __cplusplus

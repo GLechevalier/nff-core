@@ -170,12 +170,17 @@ void nff_loop(void) {
     if (!g_nff.cfg) return;
 
     nff_mqtt_tick();
+    nff_ota_pending_tick();   /* deferred OTA cmd — download runs here, off the rx callback */
+
+    /* Trial probation runs even while disconnected: an image that can never reach
+       the broker must still roll back at the confirm deadline (commit stays
+       unreachable — the health gate requires a live MQTT connection). */
+    if (g_nff.ota_trial) {
+        nff_ota_trial_tick();   /* commit a healthy trial image, or roll back */
+    }
 
     if (g_nff.state == NFF_STATE_CONNECTED) {
         nff_heartbeat_tick();
-        if (g_nff.ota_trial) {
-            nff_ota_trial_tick();   /* commit a healthy trial image, or roll back */
-        }
     }
 }
 

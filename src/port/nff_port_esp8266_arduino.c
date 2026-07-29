@@ -116,6 +116,10 @@ void nff_port_mqtt_set_tls(nff_mqtt_handle_t *hh,
     (void)ca; (void)ca_len; (void)cert; (void)cert_len; (void)key; (void)key_len;
 }
 
+void nff_port_mqtt_set_skip_cn_check(nff_mqtt_handle_t *hh, bool skip) {
+    (void)hh; (void)skip;   /* V1 already setInsecure() above — nothing further to relax */
+}
+
 void nff_port_mqtt_set_rx_callback(nff_mqtt_handle_t *hh,
                                     void (*cb)(const char *, const uint8_t *, size_t, void *),
                                     void *user) {
@@ -310,6 +314,10 @@ void nff_port_ota_rollback(void) {
        in software here — documented limitation; ESP8266 is the secondary port. */
     nff_log("nff: OTA rollback not supported on ESP8266 (single image) — rebooting");
     ESP.restart();
+}
+
+int nff_port_ota_repair_boot_partition(void) {
+    return 0;   /* single-image platform — no boot/running divergence to detect */
 }
 
 void nff_port_reboot(void) { ESP.restart(); }

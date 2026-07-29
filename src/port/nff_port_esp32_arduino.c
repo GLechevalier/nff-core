@@ -234,6 +234,12 @@ void nff_port_mqtt_set_tls(nff_mqtt_handle_t *hh,
     h->tls_configured = true;
 }
 
+void nff_port_mqtt_set_skip_cn_check(nff_mqtt_handle_t *hh, bool skip) {
+    /* WiFiClientSecure has no per-connection CN-skip that keeps chain verification; the QEMU L2
+     * concession only ever applies to the ESP-IDF port (the universal L2 image). No-op here. */
+    (void)hh; (void)skip;
+}
+
 void nff_port_mqtt_set_rx_callback(nff_mqtt_handle_t *hh,
                                     void (*cb)(const char *, const uint8_t *,
                                                size_t, void *),
@@ -395,6 +401,18 @@ void nff_port_ota_rollback(void) {
     const esp_partition_t *prev = esp_ota_get_next_update_partition(NULL);
     if (prev) esp_ota_set_boot_partition(prev);
     ESP.restart();
+}
+
+int nff_port_ota_repair_boot_partition(void) {
+    const esp_partition_t *running = esp_ota_get_running_partition();
+    const esp_partition_t *boot    = esp_ota_get_boot_partition();
+    /* Compare by flash address, not pointer — the two lookups may return distinct
+       esp_partition_t instances for the same slot. */
+    if (!running || !boot || running->address == boot->address) return 0;
+    /* The bootloader rejected the configured image and fell back to us: make
+       the fallback durable so a power cycle doesn't retry the bad image. */
+    esp_ota_set_boot_partition(running);
+    return 1;
 }
 
 void nff_port_reboot(void) { ESP.restart(); }

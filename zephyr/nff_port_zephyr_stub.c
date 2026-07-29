@@ -28,6 +28,7 @@ void nff_port_task_create(void (*fn)(void *), const char *name,
 nff_mqtt_handle_t *nff_port_mqtt_create(void) { return NULL; }
 void nff_port_mqtt_set_server(nff_mqtt_handle_t *h, const char *host, uint16_t p) { (void)h;(void)host;(void)p; }
 void nff_port_mqtt_set_tls(nff_mqtt_handle_t *h, const uint8_t *a, size_t al, const uint8_t *b, size_t bl, const uint8_t *c, size_t cl) { (void)h;(void)a;(void)al;(void)b;(void)bl;(void)c;(void)cl; }
+void nff_port_mqtt_set_skip_cn_check(nff_mqtt_handle_t *h, bool skip) { (void)h; (void)skip; }
 void nff_port_mqtt_set_rx_callback(nff_mqtt_handle_t *h, void(*cb)(const char*,const uint8_t*,size_t,void*), void *u) { (void)h;(void)cb;(void)u; }
 int  nff_port_mqtt_connect(nff_mqtt_handle_t *h, const char *i, const char *t, const char *p) { (void)h;(void)i;(void)t;(void)p; return NFF_ERR_NOT_SUPPORTED; }
 int  nff_port_mqtt_subscribe(nff_mqtt_handle_t *h, const char *t, int q) { (void)h;(void)t;(void)q; return NFF_ERR_NOT_SUPPORTED; }
@@ -46,6 +47,7 @@ nff_ota_handle_t nff_port_ota_begin(size_t s) { (void)s; return NFF_OTA_INVALID_
 int  nff_port_ota_write(nff_ota_handle_t h, const uint8_t *b, size_t l) { (void)h;(void)b;(void)l; return NFF_ERR_NOT_SUPPORTED; }
 int  nff_port_ota_end(nff_ota_handle_t h)   { (void)h; return NFF_ERR_NOT_SUPPORTED; }
 void nff_port_ota_abort(nff_ota_handle_t h) { (void)h; }
+int  nff_port_ota_repair_boot_partition(void) { return 0; }
 void nff_port_reboot(void)                  {}
 
 int nff_port_https_get_stream(const char *u, int(*cb)(const uint8_t*,size_t,void*), void *c, uint32_t t) {

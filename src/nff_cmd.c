@@ -98,9 +98,21 @@ void nff_cmd_dispatch(const char *topic, const uint8_t *payload, size_t len) {
         handle_reboot(buf, resp, sizeof(resp), NULL);
         return; /* handle_reboot publishes and reboots — never reaches here */
     } else if (strcmp(action, "ota") == 0) {
-        /* Forwarded to nff_ota — defined there to keep OTA logic co-located */
-        extern void nff_ota_handle_cmd(const char *payload, char *resp, size_t resp_len);
-        nff_ota_handle_cmd(buf, resp, sizeof(resp));
+        /* Defer to the nff task: running the download here would block this rx
+           callback (esp-mqtt task on IDF) for minutes — no PUBACK, no keepalive,
+           broker drops the session mid-download. Park the verified payload;
+           nff_ota_pending_tick() runs it from nff_loop. */
+        nff_port_mutex_lock(g_nff.lock);
+        if (g_nff.ota_cmd_pending || g_nff.state == NFF_STATE_OTA_ACTIVE) {
+            nff_port_mutex_unlock(g_nff.lock);
+            snprintf(resp, sizeof(resp), "{\"type\":\"error\",\"msg\":\"ota: busy\"}");
+        } else {
+            memcpy(g_nff.ota_cmd_buf, buf, len + 1);   /* len < NFF_CMD_MAXLEN, NUL included */
+            g_nff.ota_cmd_pending = true;
+            nff_port_mutex_unlock(g_nff.lock);
+            /* resp left empty: skip the generic response — ota_started, published
+               from the nff task moments later, stays the first response message. */
+        }
     } else if (strcmp(action, "diag") == 0) {
         extern void nff_diag_handle_cmd(const char *payload, char *resp, size_t resp_len);
         nff_diag_handle_cmd(buf, resp, sizeof(resp));

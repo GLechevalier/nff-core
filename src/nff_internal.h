@@ -33,6 +33,12 @@ typedef struct {
     char                pending_ota_version[32];
     bool                pending_ota_committed; /* true=committed, false=rolled_back */
 
+    /* Deferred OTA command: the rx callback (esp-mqtt task on IDF) parks the
+       verified payload here; nff_loop (nff task) drains it so the callback
+       returns immediately and PUBACK/keepalive keep flowing. Guarded by lock. */
+    bool                ota_cmd_pending;
+    char                ota_cmd_buf[NFF_CMD_MAXLEN];
+
     /* Automatic OTA rollback: probation state for a freshly-flashed image */
     bool                ota_trial;             /* true while awaiting the health gate */
     uint32_t            ota_trial_deadline_ms; /* nff_port_millis() target to commit-or-rollback by */
@@ -64,35 +70,43 @@ extern nff_ctx_t g_nff;
 #include <stdio.h>
 
 /* Topics are namespaced by project: nff/{project_id}/devices/{device_id}/{type}. The broker
- * derives (project_id, device_id) from the verified cert and only permits this namespace. */
+ * derives (project_id, device_id) from the verified cert and only permits this namespace.
+ *
+ * NFF_TSTR: %s on a NULL crashes newlib's ROM strlen (LoadProhibited in _svfprintf_r) — seen
+ * live when a credential-less config reached nff_mqtt_init with project_id NULL. A malformed
+ * topic just fails to match at the broker; a NULL must never take the device down. */
+#define NFF_TSTR(s) ((s) ? (s) : "")
 static inline void nff_topic_cmd(const nff_ctx_t *c, char *buf) {
     snprintf(buf, NFF_TOPIC_MAXLEN, "nff/%s/devices/%s/cmd",
-             c->cfg->project_id, c->cfg->device_id);
+             NFF_TSTR(c->cfg->project_id), NFF_TSTR(c->cfg->device_id));
 }
 static inline void nff_topic_response(const nff_ctx_t *c, char *buf) {
     snprintf(buf, NFF_TOPIC_MAXLEN, "nff/%s/devices/%s/response",
-             c->cfg->project_id, c->cfg->device_id);
+             NFF_TSTR(c->cfg->project_id), NFF_TSTR(c->cfg->device_id));
 }
 static inline void nff_topic_heartbeat(const nff_ctx_t *c, char *buf) {
     snprintf(buf, NFF_TOPIC_MAXLEN, "nff/%s/devices/%s/heartbeat",
-             c->cfg->project_id, c->cfg->device_id);
+             NFF_TSTR(c->cfg->project_id), NFF_TSTR(c->cfg->device_id));
 }
 static inline void nff_topic_crash(const nff_ctx_t *c, char *buf) {
     snprintf(buf, NFF_TOPIC_MAXLEN, "nff/%s/devices/%s/crash",
-             c->cfg->project_id, c->cfg->device_id);
+             NFF_TSTR(c->cfg->project_id), NFF_TSTR(c->cfg->device_id));
 }
 
 #if NFF_BOOTSTRAP_ENABLED
 /* Bootstrap (shared batch) namespace: nff/_bootstrap/{batch_id}/{hwid}/{type}. The broker confines
  * an unclaimed device to exactly this until it rolls over to a unique operational cert. */
 static inline void nff_topic_bootstrap_announce(const nff_ctx_t *c, char *buf) {
-    snprintf(buf, NFF_TOPIC_MAXLEN, "nff/_bootstrap/%s/%s/announce", c->cfg->batch_id, c->cfg->device_id);
+    snprintf(buf, NFF_TOPIC_MAXLEN, "nff/_bootstrap/%s/%s/announce",
+             NFF_TSTR(c->cfg->batch_id), NFF_TSTR(c->cfg->device_id));
 }
 static inline void nff_topic_bootstrap_cmd(const nff_ctx_t *c, char *buf) {
-    snprintf(buf, NFF_TOPIC_MAXLEN, "nff/_bootstrap/%s/%s/cmd", c->cfg->batch_id, c->cfg->device_id);
+    snprintf(buf, NFF_TOPIC_MAXLEN, "nff/_bootstrap/%s/%s/cmd",
+             NFF_TSTR(c->cfg->batch_id), NFF_TSTR(c->cfg->device_id));
 }
 static inline void nff_topic_bootstrap_response(const nff_ctx_t *c, char *buf) {
-    snprintf(buf, NFF_TOPIC_MAXLEN, "nff/_bootstrap/%s/%s/response", c->cfg->batch_id, c->cfg->device_id);
+    snprintf(buf, NFF_TOPIC_MAXLEN, "nff/_bootstrap/%s/%s/response",
+             NFF_TSTR(c->cfg->batch_id), NFF_TSTR(c->cfg->device_id));
 }
 #endif
 
@@ -126,6 +140,7 @@ void nff_ota_check_pending_result(void); /* publish committed/rolled_back if fla
 /* Automatic OTA rollback (nff_ota.c) */
 void nff_ota_boot_check(void);  /* at nff_init: arm probation, or roll back a crash-looping image */
 void nff_ota_trial_tick(void);  /* on the loop while on probation: commit when healthy, else roll back */
+void nff_ota_pending_tick(void); /* drain a deferred OTA cmd (queued by nff_cmd.c) on the nff task */
 
 #ifdef __cplusplus
 }

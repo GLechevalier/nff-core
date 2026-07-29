@@ -86,6 +86,7 @@ struct nff_mqtt_handle {
     const uint8_t           *cert;  size_t cert_len;
     const uint8_t           *key;   size_t key_len;
     const uint8_t           *inter; size_t inter_len;  /* project intermediate CA (optional) */
+    bool                     skip_cn;  /* runtime QEMU concession (cfg->tls_skip_cn_check) */
     /* PEM forms built at connect (esp-mqtt wants PEM to send a multi-cert client chain). */
     char                    *ca_pem;
     char                    *cert_pem;  /* leaf, or leaf||intermediate chain */
@@ -183,6 +184,11 @@ void nff_port_mqtt_set_tls(nff_mqtt_handle_t *h,
     mh->inter    = inter; mh->inter_len = inter_len;
 }
 
+void nff_port_mqtt_set_skip_cn_check(nff_mqtt_handle_t *h, bool skip) {
+    struct nff_mqtt_handle *mh = (struct nff_mqtt_handle *)h;
+    mh->skip_cn = skip;
+}
+
 void nff_port_mqtt_set_rx_callback(nff_mqtt_handle_t *h,
                                     void (*cb)(const char *, const uint8_t *,
                                                size_t, void *),
@@ -243,12 +249,11 @@ int nff_port_mqtt_connect(nff_mqtt_handle_t *h,
             .address.uri = uri,
             .verification.certificate     = mh->ca_pem,
             .verification.certificate_len = mh->ca_pem ? strlen(mh->ca_pem) + 1 : 0,
-#ifdef NFF_QEMU
-            /* L2/QEMU only: the fleet server cert's SAN omits the dialed guest IP, so the
-             * hostname check would reject it. Mirrors the Python mock's tls_insecure_hostname.
-             * NEVER set on real hardware — CN/SAN verification must stay on in production. */
-            .verification.skip_cert_common_name_check = true,
-#endif
+            /* L2/QEMU only, decided at RUNTIME (the image is universal): the fleet server cert's
+             * SAN omits the dialed guest IP, so the hostname check would reject it. Mirrors the
+             * Python mock's tls_insecure_hostname. Only the QEMU NVS identity loader sets the
+             * flag (via cfg->tls_skip_cn_check) — real hardware keeps CN/SAN verification on. */
+            .verification.skip_cert_common_name_check = mh->skip_cn,
         },
         .credentials = {
             .client_id         = client_id,
@@ -396,6 +401,18 @@ void nff_port_ota_rollback(void) {
     const esp_partition_t *prev = esp_ota_get_next_update_partition(NULL);
     if (prev) esp_ota_set_boot_partition(prev);
     esp_restart();
+}
+
+int nff_port_ota_repair_boot_partition(void) {
+    const esp_partition_t *running = esp_ota_get_running_partition();
+    const esp_partition_t *boot    = esp_ota_get_boot_partition();
+    /* Compare by flash address, not pointer — the two lookups may return distinct
+       esp_partition_t instances for the same slot. */
+    if (!running || !boot || running->address == boot->address) return 0;
+    /* The bootloader rejected the configured image and fell back to us: make
+       the fallback durable so a power cycle doesn't retry the bad image. */
+    esp_ota_set_boot_partition(running);
+    return 1;
 }
 
 void nff_port_reboot(void) {

@@ -51,6 +51,15 @@ static void rtc_log_init(void) {
     }
 }
 
+/* Quiet mode: suppress the console echo of nff_log lines. For transports that OWN the
+   console UART (the wired PPPoS image: UART0 carries PPP frames, so every echoed byte
+   corrupts the link — and closing stdout instead crashes the next printf on the freed
+   FILE lock, bench-proven via LoadProhibited in _vfprintf_r). The RTC ring keeps
+   recording either way; nff_log_recent() is the quiet-mode read path. */
+static bool s_log_quiet = false;
+
+void nff_log_set_quiet(bool quiet) { s_log_quiet = quiet; }
+
 /* Append a line to the RTC circular buffer. Called from nff_log(). */
 void nff_crash_log(const char *line) {
     rtc_log_init();
@@ -58,6 +67,8 @@ void nff_crash_log(const char *line) {
     strncpy(s_rtc_log[slot], line, NFF_LOG_LINE_LEN - 1);
     s_rtc_log[slot][NFF_LOG_LINE_LEN - 1] = '\0';
     s_rtc_head++;
+
+    if (s_log_quiet) return;
 
     /* Also output to UART via platform log */
 #if defined(ESP_PLATFORM)
@@ -67,6 +78,31 @@ void nff_crash_log(const char *line) {
 #else
     fprintf(stderr, "[nff] %s\n", line);
 #endif
+}
+
+/* Copy the RTC log ring into `out` (oldest first, newline-separated, NUL-terminated).
+   Returns the number of lines copied. Lets a transport-constrained image (e.g. the wired
+   PPPoS sketch, where UART0 belongs to PPP) dump recent diagnostics over whatever side
+   channel it does have — the wired config window, a display, a debug blink code. */
+int nff_log_recent(char *out, size_t cap) {
+    rtc_log_init();
+    if (!out || cap == 0) return 0;
+    out[0] = '\0';
+    size_t used = 0;
+    int copied = 0;
+    uint32_t start = s_rtc_head >= NFF_LOG_LINES ? s_rtc_head - NFF_LOG_LINES : 0;
+    for (uint32_t i = start; i < s_rtc_head; i++) {
+        const char *line = s_rtc_log[i % NFF_LOG_LINES];
+        if (!line[0]) continue;
+        size_t need = strlen(line) + 1; /* + newline */
+        if (used + need + 1 > cap) break;
+        memcpy(out + used, line, need - 1);
+        used += need - 1;
+        out[used++] = '\n';
+        copied++;
+    }
+    out[used] = '\0';
+    return copied;
 }
 
 /* ------------------------------------------------------------------ */

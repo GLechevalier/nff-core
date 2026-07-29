@@ -182,6 +182,10 @@ void nff_port_mqtt_set_tls(nff_mqtt_handle_t *h,
     /* No actual TLS on POSIX mock */
 }
 
+void nff_port_mqtt_set_skip_cn_check(nff_mqtt_handle_t *h, bool skip) {
+    (void)h; (void)skip;   /* no actual TLS on POSIX mock */
+}
+
 void nff_port_mqtt_set_rx_callback(nff_mqtt_handle_t *h,
                                     void (*cb)(const char *, const uint8_t *, size_t, void *),
                                     void *user) {
@@ -358,6 +362,10 @@ void nff_port_ota_rollback(void) {
        don't actually exit so the test can drive the next "boot". */
     s_ota_rollback_called = 1;
     s_reboot_called       = 1;
+}
+
+int nff_port_ota_repair_boot_partition(void) {
+    return 0;   /* no A/B slots on the POSIX mock — boot always matches running */
 }
 
 void nff_port_reboot(void) {
@@ -553,6 +561,28 @@ const char *nff_port_posix_get_published(nff_mqtt_handle_t *h, const char *topic
         int slot = i % MOCK_PUB_SLOTS;
         if (h->pub_slots[slot].used &&
             strcmp(h->pub_slots[slot].topic, topic) == 0) {
+            return h->pub_slots[slot].payload;
+        }
+    }
+    return NULL;
+}
+
+/**
+ * Return the newest message on a topic whose payload contains `needle`, or NULL.
+ * Unlike get_published (last message only), this searches the whole retained
+ * history — needed since ota_progress ticks now follow the ota_started ack on
+ * the same response topic.
+ */
+const char *nff_port_posix_find_published(nff_mqtt_handle_t *h,
+                                          const char *topic,
+                                          const char *needle) {
+    if (!h) return NULL;
+    int total = h->pub_head < MOCK_PUB_SLOTS ? h->pub_head : MOCK_PUB_SLOTS;
+    for (int i = total - 1; i >= 0; i--) {
+        int slot = i % MOCK_PUB_SLOTS;
+        if (h->pub_slots[slot].used &&
+            strcmp(h->pub_slots[slot].topic, topic) == 0 &&
+            strstr(h->pub_slots[slot].payload, needle) != NULL) {
             return h->pub_slots[slot].payload;
         }
     }
