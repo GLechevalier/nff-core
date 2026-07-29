@@ -1,5 +1,9 @@
 # Stage 3 toolchain-box runbook — validate the L2 firmware build + boot
 
+> **Real hardware over USB-serial?** See `docs/WIRED_PPPOS_OTA.md` (repo root) — the full field
+> guide to connecting an ESP32 through PPPoS/WiredLink and performing a safe OTA (credentials,
+> QoS, trial/rollback, Web Serial and lwIP gotchas), proven e2e on real silicon 2026-07-29.
+
 > **✅ STAGE 5 AUTOMATED + LIVE-VALIDATED 2026-07-01** — the manual Steps 3-4 below are now done by
 > `Supervisor.prepare_flash` (`nff_mock_l2/supervisor.py` → `credentials.generate_nvs_bin` +
 > `splice_nvs_into_flash`), and `NFF_MOCKCTL_MAX_LEVEL=2` is live. End-to-end proof on this box:
