@@ -446,8 +446,10 @@ void app_main(void) {
 
     // nff_connect() publishes any coredump left by a prior panic, so a crash-loop reports every boot.
     nff_connect();
-    ESP_LOGI(TAG, "=== wired console up (0xC0FF over PPP), fw=%s — nff services starting ===",
-             NFF_FW_VERSION);
+    // rst tells post-OTA reboots apart: 12 = SW_CPU (deliberate esp_restart, e.g. a completed
+    // flip) vs 1 = POWERON (external EN pulse — e.g. the serial link resetting the chip).
+    ESP_LOGI(TAG, "=== wired console up (0xC0FF over PPP), fw=%s rst=%d — nff services starting ===",
+             NFF_FW_VERSION, (int)esp_reset_reason());
 
     // nff services MQTT/heartbeat/commands/OTA on its own task (Core 0); the app runs on Core 1.
     nff_start_task();
