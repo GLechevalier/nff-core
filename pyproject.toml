@@ -9,7 +9,7 @@ description = "MCP server — automated IoT device pentesting via Claude Code"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "mcp>=1.24.0",
+    "mcp>=1.24.0,<2",  # 2.0 removed mcp.server.fastmcp
     "httpx>=0.28",
     "pydantic>=2.11",
     "pydantic-settings>=2.0",
