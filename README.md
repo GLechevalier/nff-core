@@ -11,6 +11,7 @@
   <img alt="Boards" src="https://img.shields.io/badge/boards-1000%2B%20(PlatformIO)-orange?logo=platformio&logoColor=white">
   <img alt="MCP" src="https://img.shields.io/badge/MCP-server-8A2BE2">
   <a href="https://nanoforgeflow.com"><img alt="nff platform" src="https://img.shields.io/badge/platform-nanoforgeflow.com-111"></a>
+  <a href="https://discord.com/invite/QkFCS3mShe"><img alt="Discord" src="https://img.shields.io/badge/Discord-join%20us-5865F2?logo=discord&logoColor=white"></a>
 </p>
 
 nff is an MCP server that gives coding agents direct control over physical hardware — on the bench during development, and in the field for maintenance and diagnosis.
