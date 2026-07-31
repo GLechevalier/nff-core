@@ -121,6 +121,14 @@ static int load_blob(const char *prefix, uint8_t **out, size_t *out_len) {
     return NFF_OK;
 }
 
+/* True when a chunked blob exists with at least one chunk (i.e. was stored non-empty). */
+static bool blob_present(const char *prefix) {
+    char key[24];
+    uint32_t chunks = 0;
+    snprintf(key, sizeof(key), "%s.n", prefix);
+    return nff_port_nvs_get_u32(key, &chunks) == 0 && chunks > 0;
+}
+
 /* ------------------------------------------------------------------ public */
 
 bool nff_store_is_claimed(void) {
@@ -162,7 +170,12 @@ int nff_store_load(const nff_config_t *base, nff_config_t *out) {
     if ((rc = load_blob("op_cert",  &cert,  &cert_n))  != NFF_OK) goto fail;
     if ((rc = load_blob("op_key",   &key,   &key_n))   != NFF_OK) goto fail;
     if ((rc = load_blob("op_chain", &chain, &chain_n)) != NFF_OK) goto fail;
-    if ((rc = load_blob("op_ca",    &ca,    &ca_n))    != NFF_OK) goto fail;
+    /* op_ca is optional: stores claimed before CA provisioning (or with an empty CA) have no
+     * chunks under this prefix. Absent/empty leaves ca NULL so the app supplies its own trust
+     * anchor (baked fleet root CA). A present-but-unreadable blob is still a hard failure. */
+    if (blob_present("op_ca")) {
+        if ((rc = load_blob("op_ca", &ca, &ca_n)) != NFF_OK) goto fail;
+    }
     if ((rc = load_blob("op_vkey",  &vkey,  &vkey_n))  != NFF_OK) goto fail;
 
     out->project_id      = project;

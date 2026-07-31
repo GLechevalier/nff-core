@@ -41,7 +41,9 @@ int  nff_store_save(const char *project_id,
 
 /* Load the stored operational creds into out (cert..vkey point at malloc'd buffers; project_id into
  * a malloc'd string). Scalar config (broker/fw/...) is inherited from base. Returns NFF_OK or error.
- * On success, the caller owns the buffers and must call nff_store_free_loaded() when done. */
+ * On success, the caller owns the buffers and must call nff_store_free_loaded() when done.
+ * ca_cert may come back NULL/0: stores claimed before op_ca provisioning (or with an empty CA)
+ * load fine without it — the caller must then supply its own trust anchor (e.g. a baked root CA). */
 int  nff_store_load(const nff_config_t *base, nff_config_t *out);
 void nff_store_free_loaded(nff_config_t *out);
 

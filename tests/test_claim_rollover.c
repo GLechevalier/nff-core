@@ -75,6 +75,45 @@ static void test_store_roundtrip(void) {
     printf("PASS: chunked NVS store round-trip (>256B forces multi-chunk)\n");
 }
 
+/* A store claimed before op_ca provisioning (or with an empty CA) must still load: the CA comes
+ * back NULL/0 and the app supplies its own trust anchor (baked root CA fallback). */
+static void test_store_load_missing_ca(void) {
+    nff_port_posix_reset_nvs();
+    uint8_t big[400];
+    for (int i = 0; i < 400; i++) big[i] = (uint8_t)(i * 7 + 3);
+    uint8_t small[8] = {1,2,3,4,5,6,7,8};
+
+    assert(nff_store_save("proj-noca", big, sizeof(big), small, sizeof(small),
+                          big, sizeof(big), small, sizeof(small), MOCK_VKEY, sizeof(MOCK_VKEY)) == NFF_OK);
+    /* Emulate a legacy/empty store: zero the op_ca chunk count. */
+    assert(nff_port_nvs_set_u32("op_ca.n", 0) == 0);
+
+    nff_config_t base = {0};
+    nff_config_t out;
+    assert(nff_store_load(&base, &out) == NFF_OK);
+    assert(out.ca_cert == NULL && out.ca_cert_len == 0);
+    assert(strcmp(out.project_id, "proj-noca") == 0);
+    assert(out.client_cert_len == sizeof(big));
+    assert(out.client_key_len == sizeof(small));
+    assert(out.cmd_verify_key_len == sizeof(MOCK_VKEY));
+    nff_store_free_loaded(&out);   /* NULL ca must not crash */
+    printf("PASS: store load with missing/empty op_ca (legacy claim) is non-fatal\n");
+}
+
+/* A present-but-unreadable op_ca (count says 3 chunks, chunks absent) is corruption → hard fail. */
+static void test_store_load_corrupt_ca(void) {
+    nff_port_posix_reset_nvs();
+    uint8_t small[8] = {1,2,3,4,5,6,7,8};
+    assert(nff_store_save("proj-cca", small, sizeof(small), small, sizeof(small),
+                          small, sizeof(small), small, sizeof(small), MOCK_VKEY, sizeof(MOCK_VKEY)) == NFF_OK);
+    assert(nff_port_nvs_set_u32("op_ca.n", 3) == 0);   /* claims chunks .0-.2; only .0 exists */
+
+    nff_config_t base = {0};
+    nff_config_t out;
+    assert(nff_store_load(&base, &out) != NFF_OK);
+    printf("PASS: store load with corrupt op_ca still fails\n");
+}
+
 static void test_mode_selection(void) {
     nff_port_posix_reset_nvs();
     assert(nff_get_mode() == NFF_MODE_BOOTSTRAP);
@@ -157,6 +196,57 @@ static void test_rollover_dispatch(void) {
     printf("PASS: rollover_cert dispatch → persist + ack + reboot\n");
 }
 
+/* A rollover whose ca_cert is empty must be rejected: the device stays unclaimed (and keeps
+ * retrying) rather than persisting a CA-less store. */
+static void test_rollover_empty_ca_rejected(void) {
+    nff_port_posix_reset_nvs();
+    nff_port_posix_reset_reboot();
+
+    static nff_config_t cfg = {0};
+    cfg.device_id = "";
+    cfg.project_id = "test-project";
+    cfg.broker_host = "localhost";
+    cfg.broker_port = 8883;
+    cfg.client_cert = MOCK_VKEY; cfg.client_cert_len = 1;
+    cfg.client_key  = MOCK_VKEY; cfg.client_key_len  = 1;
+    cfg.ca_cert     = MOCK_VKEY; cfg.ca_cert_len     = 1;
+    cfg.cmd_verify_key = MOCK_VKEY; cfg.cmd_verify_key_len = 65;
+    cfg.batch_id = "batch-test";
+
+    nff_init(&cfg);
+    assert(nff_get_mode() == NFF_MODE_BOOTSTRAP);
+    nff_connect();
+
+    uint8_t cert[20], key[16], inter[18];
+    for (int i = 0; i < 20; i++) cert[i]  = (uint8_t)(i + 1);
+    for (int i = 0; i < 16; i++) key[i]   = (uint8_t)(i + 40);
+    for (int i = 0; i < 18; i++) inter[i] = (uint8_t)(i + 80);
+
+    char fcert[256], fkey[256], finter[256], fvkey[256];
+    b64_field(fcert,  "device_cert",       cert,  sizeof(cert));
+    b64_field(fkey,   "device_key",        key,   sizeof(key));
+    b64_field(finter, "intermediate_cert", inter, sizeof(inter));
+    b64_field(fvkey,  "verify_key",        MOCK_VKEY, sizeof(MOCK_VKEY));
+
+    char json[2048];
+    snprintf(json, sizeof(json),
+        "{\"action\":\"rollover_cert\",\"nonce\":\"e5f6a7b8\",\"timestamp\":0,"
+        "\"project_id\":\"new-proj\",\"device_id\":\"deadbeef0001\",%s,%s,%s,\"ca_cert\":\"\",%s,"
+        "\"cmd_sig\":\"3006020101020101\"}",
+        fcert, finter, fkey, fvkey);
+
+    nff_security_reset_nonce_ring();
+    nff_port_posix_clear_published(g_nff.mqtt);
+    nff_port_posix_inject_mqtt(g_nff.mqtt, "nff/_bootstrap/batch-test/deadbeef0001/cmd", json);
+
+    assert(nff_store_is_claimed() == false);
+    const char *resp = nff_port_posix_get_published(g_nff.mqtt,
+        "nff/_bootstrap/batch-test/deadbeef0001/response");
+    assert(resp != NULL && strstr(resp, "rollover_error") != NULL);
+    assert(nff_port_posix_reboot_called() == 0);
+    printf("PASS: rollover with empty ca_cert rejected (stays unclaimed)\n");
+}
+
 /* ------------------------------------------------------------------ reconnect re-announce */
 
 /* Regression: a WiFi/MQTT drop while UNCLAIMED must reconnect, re-subscribe to the bootstrap
@@ -206,8 +296,11 @@ static void test_bootstrap_reconnect_reannounce(void) {
 int main(void) {
     test_base64();
     test_store_roundtrip();
+    test_store_load_missing_ca();
+    test_store_load_corrupt_ca();
     test_mode_selection();
     test_rollover_dispatch();
+    test_rollover_empty_ca_rejected();
     test_bootstrap_reconnect_reannounce();
     printf("All claim rollover tests passed.\n");
     return 0;

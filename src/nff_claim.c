@@ -80,6 +80,7 @@ void nff_claim_handle_rollover(const char *payload, size_t plen) {
     if (extract_der(payload, plen, "device_key",        &key,   &key_n)   != 0) goto err;
     if (extract_der(payload, plen, "intermediate_cert", &inter, &inter_n) != 0) goto err;
     if (extract_der(payload, plen, "ca_cert",           &ca,    &ca_n)    != 0) goto err;
+    if (ca_n == 0) goto err;   /* refuse to persist a CA-less store — stay unclaimed and retry */
     if (extract_der(payload, plen, "verify_key",        &vkey,  &vkey_n)  != 0) goto err;
 
     /* The presented mTLS cert is the chain leaf||intermediate (so the broker reaches root). */
