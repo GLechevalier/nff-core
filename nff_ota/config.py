@@ -72,6 +72,16 @@ class OtaSettings(BaseSettings):
     fix_job_stale_seconds: float = 2400.0
     fix_job_max_attempts: int = 2         # after this many claims, a stuck job fails terminally
 
+    # End-of-deployment agent hand-off: when a deployment reaches a terminal state
+    # (finished/aborted) nff-ota inserts ONE agent_messages row (the nff-github repair.py
+    # pattern) so the agent-worker summarizes the outcome — and, for non-pipeline failures,
+    # diagnoses and fixes. Demo/pool projects are skipped (they churn deployments constantly
+    # and the demo self-heal flow has its own trigger); the cooldown throttles all-success/
+    # abort summaries per project, but failure hand-offs always emit.
+    agent_on_finish: bool = True
+    agent_on_finish_skip_demo: bool = True
+    agent_on_finish_cooldown_seconds: float = 900.0  # 0 disables the cooldown
+
     # Blast-radius controls (gap #3).
     confirm_threshold_devices: int = 50  # creating a deployment targeting more than this many
                                          # devices requires confirm=true

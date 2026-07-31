@@ -7,7 +7,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Literal
 
-from nff_ota import fleet
+from nff_ota import agent_notify, fleet
 from nff_ota.client import get_client
 from nff_ota.config import settings
 from nff_ota.models.deployment import (
@@ -475,6 +475,9 @@ async def abort_deployment(deployment_id: str) -> DeploymentResult:
     # Abort all non-terminal per-device jobs
     non_terminal = ["pending", "downloading", "installing", "rebooting"]
     await client.table("ota_jobs").update({"status": "aborted"}).eq("deployment_id", deployment_id).in_("status", non_terminal).execute()
+
+    # Single-shot by construction: validate_transition above rejects aborted → aborted.
+    await agent_notify.notify_deployment_terminal(deployment_id, "aborted")
 
     dep["status"] = "aborted"
     return DeploymentResult(deployment=_dep_row_to_info(dep))
@@ -1062,7 +1065,18 @@ async def _recompute_deployment_status(deployment_id: str) -> None:
     statuses = [r["status"] for r in jobs]
     all_done = all(s in _TERMINAL_DD for s in statuses)
     if all_done:
-        await client.table("deployments").update({"status": "finished"}).eq("id", deployment_id).execute()
+        # Compare-and-swap on the status we read: the MCP loop and the background sweeps
+        # loop can both observe the last job going terminal, but only one update matches
+        # the pre-read status and returns a row — that winner emits the agent hand-off.
+        resp = (
+            await client.table("deployments")
+            .update({"status": "finished"})
+            .eq("id", deployment_id)
+            .eq("status", dep["status"])
+            .execute()
+        )
+        if resp.data:
+            await agent_notify.notify_deployment_terminal(deployment_id, "finished")
 
 
 def _dep_row_to_info(row: dict) -> DeploymentInfo:
