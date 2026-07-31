@@ -56,6 +56,10 @@ def build_rollover_payload(device_id: str, project_id: str) -> dict:
     root_der = load_pem_x509_certificate(settings.tls_ca_cert.read_bytes()).public_bytes(
         serialization.Encoding.DER
     )
+    if not root_der:
+        raise RuntimeError(
+            f"fleet root CA ({settings.tls_ca_cert}) produced an empty DER — refusing to enroll"
+        )
     verify_key = signing.public_key_uncompressed(project_id)
 
     payload = {
