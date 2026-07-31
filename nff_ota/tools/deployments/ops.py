@@ -669,6 +669,9 @@ async def _deliver_wave(
     # Sent alongside the OTA command (unsigned) so a software mock can adopt it and report
     # a matching heartbeat build_id; real firmware ignores it. None for legacy artifacts.
     ota_build_id = fw.get("build_id")
+    # Expected image size: lets the device detect a truncated (stalled) stream and resume
+    # with an HTTP Range retry instead of false-completing (see fleet.deliver_ota).
+    ota_size = fw.get("size_bytes")
 
     # Devices still waiting for this update, limited to the released wave(s).
     jobs_resp = (
@@ -750,7 +753,8 @@ async def _deliver_wave(
             ).eq("id", job["id"]).execute()
             try:
                 resp = await fleet.deliver_ota(
-                    mqtt_id, ota_version, sha256, url, project_id, build_id=ota_build_id
+                    mqtt_id, ota_version, sha256, url, project_id,
+                    build_id=ota_build_id, size=ota_size,
                 )
                 results.append(
                     DeviceDeliveryResult(

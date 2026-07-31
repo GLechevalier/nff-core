@@ -85,6 +85,7 @@ async def deliver_ota(
     project_id: str,
     timeout: float | None = None,
     build_id: str | None = None,
+    size: int | None = None,
 ) -> dict[str, Any]:
     """Deliver an OTA command for one device through nff-fleet.
 
@@ -100,6 +101,13 @@ async def deliver_ota(
     payload = {"action": "ota", "version": version, "sha256": sha256, "url": url}
     if build_id:
         payload["build_id"] = build_id
+    # Expected byte count (unsigned extra, optional on the device). Without it the SDK
+    # treats ANY cleanly-closed stream as complete (nff_ota.c: `size == 0` short-circuit),
+    # so a mid-download link stall that closes the connection "completes" with a truncated
+    # image, fails the SHA check, and the whole OTA aborts instead of resuming with an
+    # HTTP Range retry. Seen live on the wired PPPoS device 2026-07-30 (93 KB of 1.14 MB).
+    if size:
+        payload["size"] = size
     return await send_command(mqtt_id, payload, project_id, timeout=timeout)
 
 
