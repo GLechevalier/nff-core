@@ -19,6 +19,7 @@
 #include "nvs.h"
 #include "nvs_flash.h"
 #include "esp_https_ota.h"
+#include "esp_log.h"
 #include "esp_ota_ops.h"
 #include "esp_wifi.h"
 #include "mqtt_client.h"
@@ -356,11 +357,26 @@ int nff_port_nvs_commit(void) {
 
 struct ota_handle_s { esp_ota_handle_t esp_h; const esp_partition_t *part; };
 
+/* Flip-stage diagnostics ride esp_log (→ the 0xC0FF wired console), NOT nff_log (quieted on
+ * wired devices). They exist to tell a flip that silently never persisted otadata apart from a
+ * device that was externally reset between download-end and set_boot. */
+static const char *OTA_TAG = "nff-ota";
+
 nff_ota_handle_t nff_port_ota_begin(size_t expected_size) {
     struct ota_handle_s *h = malloc(sizeof(*h));
     if (!h) return NFF_OTA_INVALID_HANDLE;
     h->part = esp_ota_get_next_update_partition(NULL);
-    if (!h->part || esp_ota_begin(h->part, expected_size, &h->esp_h) != ESP_OK) {
+    if (!h->part) {
+        ESP_LOGE(OTA_TAG, "begin: no next update partition");
+        free(h);
+        return NFF_OTA_INVALID_HANDLE;
+    }
+    ESP_LOGI(OTA_TAG, "begin: slot %s @0x%06x size=%u expected=%u",
+             h->part->label, (unsigned)h->part->address,
+             (unsigned)h->part->size, (unsigned)expected_size);
+    esp_err_t e = esp_ota_begin(h->part, expected_size, &h->esp_h);
+    if (e != ESP_OK) {
+        ESP_LOGE(OTA_TAG, "begin: esp_ota_begin failed: 0x%x", e);
         free(h);
         return NFF_OTA_INVALID_HANDLE;
     }
@@ -374,8 +390,22 @@ int nff_port_ota_write(nff_ota_handle_t hh, const uint8_t *buf, size_t len) {
 
 int nff_port_ota_end(nff_ota_handle_t hh) {
     struct ota_handle_s *h = (struct ota_handle_s *)hh;
-    if (esp_ota_end(h->esp_h) != ESP_OK) { free(h); return -1; }
-    int rc = (esp_ota_set_boot_partition(h->part) == ESP_OK) ? 0 : -1;
+    esp_err_t e = esp_ota_end(h->esp_h);
+    if (e != ESP_OK) {
+        ESP_LOGE(OTA_TAG, "end: esp_ota_end failed: 0x%x (image invalid?)", e);
+        free(h);
+        return -1;
+    }
+    ESP_LOGI(OTA_TAG, "end: image valid in slot %s", h->part->label);
+    e = esp_ota_set_boot_partition(h->part);
+    if (e != ESP_OK) {
+        ESP_LOGE(OTA_TAG, "end: set_boot_partition(%s) failed: 0x%x", h->part->label, e);
+    } else {
+        const esp_partition_t *boot = esp_ota_get_boot_partition();
+        ESP_LOGI(OTA_TAG, "end: set_boot ok -> boot=%s @0x%06x (flip complete, reboot next)",
+                 boot ? boot->label : "?", boot ? (unsigned)boot->address : 0);
+    }
+    int rc = (e == ESP_OK) ? 0 : -1;
     free(h);
     return rc;
 }
@@ -424,6 +454,7 @@ void nff_port_reboot(void) {
 /* ------------------------------------------------------------------ */
 
 #include "esp_http_client.h"
+#include "esp_crt_bundle.h"
 
 typedef struct {
     int (*chunk_cb)(const uint8_t *, size_t, void *);
@@ -463,6 +494,12 @@ int nff_port_https_get_stream(const char *url, size_t resume_from,
         .event_handler = http_event_cb,
         .user_data     = &ctx,
         .timeout_ms   = (int)timeout_ms,
+        /* The artifact origin is a public host (Supabase pre-signed URL), so verify against the
+         * IDF certificate bundle — esp-tls REFUSES a config with no server-verification option
+         * (0x8017 ESP_ERR_MBEDTLS_SSL_SETUP_FAILED before any bytes go out). The fleet CA would
+         * not verify a public host; image integrity is additionally covered by the signed OTA
+         * command's SHA-256. */
+        .crt_bundle_attach = esp_crt_bundle_attach,
     };
     esp_http_client_handle_t client = esp_http_client_init(&cfg);
     ctx.client = client;
