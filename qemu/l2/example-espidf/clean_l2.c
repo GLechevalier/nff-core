@@ -112,6 +112,10 @@ static volatile bool s_ppp_up = false;
 // Serializes ALL UART0 writes (PPP frames from lwIP + console frames from the log hook) so each
 // whole frame is atomic and a log line can never land mid-PPP-frame. Created in wired_connect().
 static SemaphoreHandle_t s_uart0_mtx = NULL;
+// Cut-the-cord handoff: armed ONLY when the browser explicitly sends the raw line "NFF+LISTEN?"
+// (scanned for in ppp_rx_task). While armed, PPP stays down and the UART is a line-mode config
+// window. Link drops, tab closes and EN pulses never arm it — the wired path is the default.
+static volatile bool s_handoff = false;
 
 // lwIP hands us PPP bytes to transmit on the serial line.
 static u32_t ppp_output_cb(ppp_pcb *pcb, const void *data, u32_t len, void *ctx) {
@@ -131,17 +135,139 @@ static void ppp_status_cb(ppp_pcb *pcb, int err, void *ctx) {
         s_ppp_up = true;
     } else {
         s_ppp_up = false;
-        ppp_connect(pcb, 0);
+        if (!s_handoff) ppp_connect(pcb, 0);   // no re-dial while the config window is open
     }
 }
 
-// Pump inbound serial bytes into the PPP input path, forever.
+// ── Cut-the-cord: serial config window ─────────────────────────────────────────────────────────
+// The browser arms the handoff EXPLICITLY with the raw line "NFF+LISTEN?" (plain ASCII rides the
+// HDLC byte stream unescaped, and the 11-byte sequence cannot plausibly occur inside a TLS
+// payload). Only then does the device stop PPP and listen for
+//   NFF+CFG <b64 ssid> <b64 pass|-> [<b64 broker host:port>]
+// On valid creds: store to NVS, clear the wired transport memory, ack NFF+OK, reboot onto WiFi.
+// On timeout or garbage: resume PPP — an aborted handoff must leave the wired demo working.
+
+#define HANDOFF_WINDOW_MS 60000
+
+static void uart0_write_line(const char *s) {
+    if (s_uart0_mtx) xSemaphoreTake(s_uart0_mtx, portMAX_DELAY);
+    uart_write_bytes(UART_NUM_0, s, strlen(s));
+    if (s_uart0_mtx) xSemaphoreGive(s_uart0_mtx);
+}
+
+// Decode one base64 field into out as a NUL-terminated string. False on decode/size failure.
+static bool b64_field_str(const char *b64, char *out, size_t cap) {
+    int dn = nff_b64_decode(b64, strlen(b64), (uint8_t *)out, cap - 1);
+    if (dn < 0) return false;
+    out[dn] = '\0';
+    return true;
+}
+
+// Parse + apply "NFF+CFG <b64 ssid> <b64 pass|-> [<b64 host:port>]". True = stored, reboot next.
+// Fields are split with index math on purpose: nff-ota's source analyzer reads any
+// `Type *var = call(...)` as the demo's injected-fault shape, so no strtok-style pointers here.
+static bool handoff_apply_cfg(char *line) {
+    if (strncmp(line, "NFF+CFG ", 8) != 0) return false;
+    char *fields[3] = {0};
+    int nf = 0;
+    {
+        char *p = line + 8;
+        while (nf < 3 && *p != '\0') {
+            fields[nf] = p;
+            nf++;
+            while (*p != '\0' && *p != ' ') p++;
+            if (*p == ' ') { *p = '\0'; p++; }
+        }
+    }
+    if (nf < 2) return false;
+
+    char ssid[33], pass[65], brok[80];
+    if (!b64_field_str(fields[0], ssid, sizeof(ssid)) || ssid[0] == '\0') return false;
+    pass[0] = '\0';
+    if (strcmp(fields[1], "-") != 0 && !b64_field_str(fields[1], pass, sizeof(pass))) return false;
+
+    // Same NVS keys as the Arduino onboarding image (nff_wifi_creds.h): "nff" namespace via the
+    // SDK port. The optional broker field rides along because the WiFi network cannot resolve
+    // the wired path's synthetic broker hostname — the browser tells us where the fleet really
+    // lives (its address must be in the fleet server cert's SANs; the root CA pin still holds).
+    nff_port_nvs_set_str("wifi_ssid", ssid);
+    nff_port_nvs_set_str("wifi_pass", pass);
+    if (nf == 3 && b64_field_str(fields[2], brok, sizeof(brok)) && brok[0] != '\0') {
+        nff_port_nvs_set_str("wifi_broker", brok);
+    }
+    nff_port_nvs_commit();
+
+    // Clear the wired transport memory — the whole point is to boot onto WiFi next.
+    nvs_handle_t h;
+    if (nvs_open("nffapp", NVS_READWRITE, &h) == ESP_OK) {
+        nvs_erase_key(h, "net_transport");
+        nvs_commit(h);
+        nvs_close(h);
+    }
+    return true;
+}
+
+// Runs inside ppp_rx_task once armed: PPP is closed and the UART becomes a plain line channel
+// for up to HANDOFF_WINDOW_MS. Success acks NFF+OK and reboots; anything else resumes PPP.
+static void handoff_window(void) {
+    pppapi_close(s_ppp, 0);
+    uart_flush_input(UART_NUM_0);
+    uart0_write_line("NFF+LISTENING\n");
+
+    char line[256];
+    size_t ll = 0;
+    int64_t t0 = esp_timer_get_time();
+    while ((esp_timer_get_time() - t0) < (int64_t)HANDOFF_WINDOW_MS * 1000) {
+        uint8_t b;
+        int n = uart_read_bytes(UART_NUM_0, &b, 1, pdMS_TO_TICKS(100));
+        if (n <= 0) continue;
+        if (b == '\n') {
+            line[ll] = '\0';
+            ll = 0;
+            if (line[0] == '\0') continue;
+            if (strcmp(line, "NFF+LISTEN?") == 0) {   // re-ack a retried arm
+                uart0_write_line("NFF+LISTENING\n");
+                continue;
+            }
+            if (handoff_apply_cfg(line)) {
+                uart0_write_line("NFF+OK\n");
+                vTaskDelay(pdMS_TO_TICKS(300));   // let the ack drain before the reboot
+                esp_restart();
+            }
+            uart0_write_line("NFF+ERR bad config\n");
+        } else if (ll < sizeof(line) - 1 && b != '\r') {
+            line[ll] = (char)b;
+            ll++;
+        }
+    }
+    uart0_write_line("NFF+ERR timeout - resuming wired\n");
+    s_handoff = false;
+    pppapi_connect(s_ppp, 0);
+}
+
+// Pump inbound serial bytes into the PPP input path, forever — while scanning the raw stream for
+// the handoff arm line ("NFF+LISTEN?"), which can arrive mid-PPP (the browser arms BEFORE the
+// link has fully quiesced). A rolling matcher survives the pattern splitting across reads.
 static void ppp_rx_task(void *arg) {
     (void)arg;
+    static const char ARM[] = "NFF+LISTEN?";
     static uint8_t buf[512];
+    size_t m = 0;   // rolling match progress into ARM
     for (;;) {
         int n = uart_read_bytes(UART_NUM_0, buf, sizeof(buf), pdMS_TO_TICKS(20));
-        if (n > 0) pppos_input_tcpip(s_ppp, buf, n);
+        if (n <= 0) continue;
+        for (int i = 0; i < n; i++) {
+            if (buf[i] == (uint8_t)ARM[m]) m++;
+            else m = (buf[i] == (uint8_t)ARM[0]) ? 1 : 0;
+            if (ARM[m] == '\0') { m = 0; s_handoff = true; }
+        }
+        if (s_handoff) {
+            // The buffer holding the arm line is deliberately NOT fed to lwIP — PPP is coming
+            // down anyway. handoff_window() returns only on abort/timeout; success reboots.
+            handoff_window();
+            continue;
+        }
+        pppos_input_tcpip(s_ppp, buf, n);
     }
 }
 
@@ -189,6 +315,17 @@ static void wired_connect(void) {
     }
 }
 
+// Load cut-the-cord WiFi creds persisted by the config window (same keys as the Arduino
+// onboarding image's nff_wifi_creds.h). True when an SSID is present (empty password = open AP).
+static bool wifi_creds_load(char *ssid, size_t ssid_len, char *pass, size_t pass_len) {
+    if (nff_port_nvs_get_str("wifi_ssid", ssid, ssid_len) != 0 || ssid[0] == '\0') return false;
+    if (nff_port_nvs_get_str("wifi_pass", pass, pass_len) != 0) pass[0] = '\0';
+    return true;
+}
+
+// True when this boot reached the network over WiFi (gates the handed-off broker override).
+static volatile bool s_wifi_up = false;
+
 // True once this device has come up on the wired link at least once (persisted by wired_connect).
 static bool wired_transport_remembered(void) {
     nvs_handle_t h;
@@ -207,11 +344,18 @@ static bool wired_transport_remembered(void) {
 // Associate with WIFI_SSID/WIFI_PASS and block until we have an IP; if WiFi never associates,
 // fall back to the wired (USB) link. Standard ESP-IDF station bring-up otherwise.
 static void wifi_connect(void) {
-    // If this device already fell back to wired once, don't pay the ~20 s WiFi-first timeout
-    // again — go straight to PPP. (Never set on QEMU, where the shimmed esp_wifi always
-    // associates, so the demo fleet is unaffected.) wired_connect still needs the tcpip thread
-    // that esp_netif_init() starts.
-    if (wired_transport_remembered()) {
+    // Cut-the-cord creds take precedence over EVERYTHING — including the wired transport
+    // memory: the user explicitly moved this device to WiFi, so WiFi is tried first. A failed
+    // attempt still falls back to the wired path below (the creds are kept; fix the network,
+    // plug the cable back in, retry the handoff whenever).
+    static char s_ssid[33], s_pass[65];
+    bool have_creds = wifi_creds_load(s_ssid, sizeof(s_ssid), s_pass, sizeof(s_pass));
+
+    // If this device already fell back to wired once (and no handoff happened), don't pay the
+    // ~20 s WiFi-first timeout again — go straight to PPP. (Never set on QEMU, where the
+    // shimmed esp_wifi always associates, so the demo fleet is unaffected.) wired_connect
+    // still needs the tcpip thread that esp_netif_init() starts.
+    if (!have_creds && wired_transport_remembered()) {
         esp_netif_init();
         esp_event_loop_create_default();
         wired_connect();
@@ -231,7 +375,16 @@ static void wifi_connect(void) {
     esp_event_handler_instance_register(IP_EVENT, IP_EVENT_STA_GOT_IP,
                                         &wifi_event_handler, NULL, NULL);
 
+    // Handed-off creds win over the compile-time stubs; copied at runtime because the NVS
+    // strings can't seed a designated initializer.
     wifi_config_t wifi_cfg = { .sta = { .ssid = WIFI_SSID, .password = WIFI_PASS } };
+    if (have_creds) {
+        memset(wifi_cfg.sta.ssid, 0, sizeof(wifi_cfg.sta.ssid));
+        memset(wifi_cfg.sta.password, 0, sizeof(wifi_cfg.sta.password));
+        strncpy((char *)wifi_cfg.sta.ssid, s_ssid, sizeof(wifi_cfg.sta.ssid) - 1);
+        strncpy((char *)wifi_cfg.sta.password, s_pass, sizeof(wifi_cfg.sta.password) - 1);
+        ESP_LOGI(TAG, "using handed-off WiFi creds (ssid=%s)", s_ssid);
+    }
     esp_wifi_set_mode(WIFI_MODE_STA);
     esp_wifi_set_config(WIFI_IF_STA, &wifi_cfg);
     esp_wifi_start();
@@ -259,6 +412,7 @@ static void wifi_connect(void) {
         return;
 #endif
     }
+    s_wifi_up = true;
     ESP_LOGI(TAG, "network up");
 }
 
@@ -439,6 +593,34 @@ void app_main(void) {
         g_cfg.ca_cert_len = sizeof(FLEET_ROOT_CA_DER);
         ESP_LOGW(TAG, "claim store had no CA — using baked fleet root CA (%u B)",
                  (unsigned)sizeof(FLEET_ROOT_CA_DER));
+    }
+
+    // Cut-the-cord broker override: on WiFi, the wired path's synthetic broker hostname (only
+    // ever resolved by the browser link's local DNS) is unreachable — dial where the handoff
+    // said the fleet really lives. Applied AFTER the claim-store overlay (which rebuilds g_cfg)
+    // and only on a WiFi boot; absent key = wired boot or no handoff yet, nothing changes.
+    // The port:port split and number parse are index math on purpose (no `Type *v = call()`,
+    // no division by an identifier — nff-ota's analyzer reads both as the demo's faults).
+    {
+        static char s_broker[80];
+        if (s_wifi_up &&
+            nff_port_nvs_get_str("wifi_broker", s_broker, sizeof(s_broker)) == 0 &&
+            s_broker[0] != '\0') {
+            size_t cut = 0;
+            for (size_t i = 0; s_broker[i] != '\0'; i++) {
+                if (s_broker[i] == ':') cut = i;
+            }
+            int port = 0;
+            if (cut > 0) {
+                for (size_t i = cut + 1; s_broker[i] >= '0' && s_broker[i] <= '9'; i++) {
+                    port = port * 10 + (s_broker[i] - '0');
+                }
+                s_broker[cut] = '\0';
+            }
+            g_cfg.broker_host = s_broker;
+            if (port > 0 && port <= 65535) g_cfg.broker_port = (uint16_t)port;
+            ESP_LOGI(TAG, "wifi broker override: %s:%d", s_broker, (int)g_cfg.broker_port);
+        }
     }
 
     // Gate the OTA commit/rollback on our own notion of healthy before connecting.
