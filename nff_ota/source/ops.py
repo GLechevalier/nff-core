@@ -40,6 +40,21 @@ _SEMVER = re.compile(r"^(\d+)\.(\d+)\.(\d+)$")
 QEMU_DEVICE_TYPE = "nff-qemu-esp32"
 
 
+def _real_hardware_error(device_id: str) -> str:
+    """Why this device may not use the mock self-heal path, and what to use instead.
+
+    Shared by the submit-time pre-check and the build path itself so the caller sees the same
+    message whether it arrives synchronously or via a job status.
+    """
+    return (
+        f"device {device_id!r} is real hardware, not an L1 mock — submit_firmware_fix only "
+        "serves the mock self-heal path (it registers a JSON sketch, it does not compile "
+        "firmware). Ship real firmware with nff-builder instead: create_feature_branch → "
+        "commit_feature_files → build_and_deploy_feature, which compiles the branch into a "
+        "genuine ESP32 image."
+    )
+
+
 def _semver(s: str | None) -> tuple[int, int, int] | None:
     m = _SEMVER.match((s or "").strip())
     return (int(m.group(1)), int(m.group(2)), int(m.group(3))) if m else None
@@ -127,6 +142,16 @@ async def build_and_deploy_source(
             project_id=project_id, group_id=group_id, device_type=device_type,
             parent_version=parent_version, changelog=changelog,
         )
+
+    # Everything below this line ships a JSON "sketch" that only the L1 mock's regex analyzer
+    # pretends to run — so a device that boots real bytes must never get here. Refuse it now,
+    # at the point of the mistake: the artifact gate would catch it later anyway, but only
+    # after a revision row was written, and it reports an image-format error that reads like a
+    # broken build backend rather than a wrong-tool call. Provenance (`mock-` id), NOT
+    # device_type — L1 mocks and real hardware both self-attest "esp32" (see the gate's own
+    # note in tools/artifacts/ops.py). QEMU already returned above via real_build_and_deploy.
+    if not device_id.startswith("mock-"):
+        return SubmitFirmwareFixResult(error=_real_hardware_error(device_id))
 
     sketch, fault, build_id = compile_sketch(source, version=version)
 
@@ -290,13 +315,24 @@ async def _device_project_id(device_id: str) -> tuple[str | None, str | None]:
     """(project_id, error) for a device — a fast pre-check so a bad target fails at submit."""
     client = get_client()
     resp = (
-        await client.table("devices").select("project_id").eq("id", device_id).limit(1).execute()
+        await client.table("devices")
+        .select("project_id, device_type")
+        .eq("id", device_id)
+        .limit(1)
+        .execute()
     )
     if not resp.data:
         return None, f"device {device_id!r} not found"
     project_id = resp.data[0].get("project_id")
     if not project_id:
         return None, f"device {device_id!r} has no project_id (tenant) — re-provision it"
+    # Reject real hardware HERE rather than letting the job enqueue: the build path guards
+    # itself too, but a job would only surface the error minutes later through polling, which
+    # reads as a slow build failure instead of a wrong-tool call. QEMU (L2) is exempt — it is
+    # genuinely compiled by realcompile.
+    device_type = (resp.data[0].get("device_type") or "").strip()
+    if device_type != QEMU_DEVICE_TYPE and not device_id.startswith("mock-"):
+        return None, _real_hardware_error(device_id)
     return project_id, None
 
 

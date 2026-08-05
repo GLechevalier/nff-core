@@ -10,6 +10,9 @@ from nff_ota.models.source import FirmwareFixJob, SubmitFirmwareFixResult
 from nff_ota.source import fix_worker, jobs, ops
 
 SRC = "void setup(){}\nvoid loop(){}\n"
+# submit_firmware_fix serves the mock self-heal path only, and mocks are `mock-` minted — a
+# non-mock id is real hardware and is rejected before enqueue (see test_submit_fix_guard.py).
+MOCK_DEV = "mock-p1-dev1"
 
 
 def _resp(data):
@@ -21,11 +24,11 @@ async def test_submit_enqueues_and_returns_pending(mock_supabase):
     mock_supabase.table.return_value.execute = AsyncMock(
         side_effect=[_resp([{"project_id": "p1"}]), _resp([]), _resp([{"id": "j"}])]
     )
-    res = await ops.submit_firmware_fix("dev-1", "2.0.0", SRC)
+    res = await ops.submit_firmware_fix(MOCK_DEV, "2.0.0", SRC)
     assert isinstance(res, FirmwareFixJob)
     assert res.status == "pending"
     assert res.job_id  # a real uuid was minted
-    assert res.device_id == "dev-1"
+    assert res.device_id == MOCK_DEV
     assert res.version == "2.0.0"
     # The last table op was the job insert.
     mock_supabase.table.return_value.insert.assert_called()
@@ -43,7 +46,7 @@ async def test_submit_rejects_downgrade_without_enqueue(mock_supabase):
     mock_supabase.table.return_value.execute = AsyncMock(
         side_effect=[_resp([{"project_id": "p1"}]), _resp([{"version": "5.0.0"}])]
     )
-    res = await ops.submit_firmware_fix("dev-1", "4.0.0", SRC)
+    res = await ops.submit_firmware_fix(MOCK_DEV, "4.0.0", SRC)
     assert res.status == "error"
     assert "not strictly greater" in res.error
     mock_supabase.table.return_value.insert.assert_not_called()
