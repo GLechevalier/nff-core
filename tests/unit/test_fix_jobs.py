@@ -19,7 +19,11 @@ def _resp(data):
     return MagicMock(data=data)
 
 
-async def test_submit_enqueues_and_returns_pending(mock_supabase):
+async def test_submit_enqueues_and_returns_pending(mock_supabase, monkeypatch):
+    # No revision on record → submit tries to materialise the L2 baseline first, to give the
+    # anti-downgrade check a floor (see source/baseline.py). That path is covered by
+    # test_baseline.py; stub it out here so this stays a test of the queue alone.
+    monkeypatch.setattr(ops.baseline, "ensure_baseline", AsyncMock(return_value=False))
     # devices lookup → a tenant; latest revision → none; insert → ok.
     mock_supabase.table.return_value.execute = AsyncMock(
         side_effect=[_resp([{"project_id": "p1"}]), _resp([]), _resp([{"id": "j"}])]

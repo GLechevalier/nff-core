@@ -30,14 +30,49 @@ from nff_ota.config import settings
 
 
 class GithubError(RuntimeError):
-    """Raised when nff-github cannot compile the submitted source (transport or build error)."""
+    """Raised when nff-github cannot serve a request (transport, auth, or build error)."""
 
 
 def _require_config() -> None:
     if not settings.github_url:
-        raise GithubError("OTA_GITHUB_URL is not configured — cannot compile L2 source")
+        raise GithubError("OTA_GITHUB_URL is not configured — cannot reach nff-github")
     if not settings.github_secret:
         raise GithubError("OTA_GITHUB_SECRET is not configured — cannot authenticate to nff-github")
+
+
+async def read_repo_file(repo_full_name: str, path: str, ref: str = "main") -> str:
+    """Read one file's text from a connected repo via nff-github's GET /internal/repo-file.
+
+    Used to resolve the L2 baseline firmware source (see source/baseline.py). Deliberately an
+    HTTP hop rather than a local read: nff-github is the process that owns the L2 workspace
+    mount, so asking it keeps this container free of that dependency.
+
+    Raises GithubError on transport, auth, or a not-found file.
+    """
+    _require_config()
+    url = settings.github_url.rstrip("/") + "/internal/repo-file"
+    params = {"repo_full_name": repo_full_name, "path": path, "ref": ref}
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
+            resp = await client.get(
+                url, params=params, headers={"X-Fleet-Secret": settings.github_secret}
+            )
+    except httpx.HTTPError as exc:
+        raise GithubError(f"nff-github repo-file request failed: {exc}") from exc
+
+    if resp.status_code != 200:
+        raise GithubError(f"nff-github repo-file returned {resp.status_code}: {resp.text[:300]}")
+    try:
+        data = resp.json()
+    except ValueError as exc:
+        raise GithubError("nff-github repo-file returned a non-JSON body") from exc
+    # The handler reports a missing file as a 200 with an `error` field, not a 404.
+    if data.get("error"):
+        raise GithubError(f"nff-github repo-file: {data['error']}")
+    content = data.get("content")
+    if not isinstance(content, str) or not content:
+        raise GithubError(f"nff-github repo-file returned no content for {path!r}")
+    return content
 
 
 async def compile_source(

@@ -26,7 +26,7 @@ from nff_ota.models.source import (
     GetFirmwareSourceResult,
     SubmitFirmwareFixResult,
 )
-from nff_ota.source import jobs
+from nff_ota.source import baseline, jobs
 from nff_ota.source.compile import build_id_for, compile_sketch, detect_fault
 from nff_ota.tools.artifacts.ops import upload_artifact_impl
 from nff_ota.tools.deployments.ops import create_deployment, start_deployment
@@ -294,6 +294,12 @@ async def get_firmware_source(
     """
     rev = await _latest_revision(device_id)
     if not rev:
+        # An L2 with no revision row still HAS a known source — the universal baseline image
+        # every L2 boots. Record it rather than claiming the device has no firmware, so a crashing
+        # device is never a dead end for the agent. No-op for L1 / real hardware.
+        if await baseline.ensure_baseline(device_id):
+            rev = await _latest_revision(device_id)
+    if not rev:
         return GetFirmwareSourceResult(
             error=f"no firmware source on record for device {device_id!r}"
         )
@@ -361,6 +367,12 @@ async def submit_firmware_fix(
         return FirmwareFixJob(job_id="", status="error", device_id=device_id, error=dev_err)
 
     current = await _latest_revision(device_id)
+    if current is None and await baseline.ensure_baseline(device_id):
+        # No revision row means the anti-downgrade rule below is skipped entirely — so the device
+        # with the LEAST history gets the WEAKEST guard, which is backwards. Materialise the
+        # baseline to give the check a floor. Costs nothing on the common path (a device that
+        # already has revisions never gets here).
+        current = await _latest_revision(device_id)
     if current is not None:
         cur = _semver(current.get("version"))
         if cur is not None and new <= cur:
