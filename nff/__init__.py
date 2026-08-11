@@ -1,6 +1,6 @@
 """nff — Claude Code IoT Bridge."""
 
-__version__ = "0.2.38"
+__version__ = "0.2.39"
 
 
 def run() -> None:
