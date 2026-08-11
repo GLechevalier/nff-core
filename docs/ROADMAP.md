@@ -17,7 +17,7 @@ Keep this table honest and in sync with `README.md`. `stable` = works on the shi
 
 | Command | State | Notes |
 |---|---|---|
-| `nff init` | stable | Currently forces cloud login — see P1 #4 |
+| `nff init` | stable | Local-first: no sign-in by default; `--cloud` opts into the platform (P1 #4 — done) |
 | `nff compile` | stable | PlatformIO (default) + arduino backends |
 | `nff flash` | stable | |
 | `nff monitor` | stable | |

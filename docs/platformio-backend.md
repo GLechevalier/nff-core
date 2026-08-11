@@ -7,7 +7,7 @@ This document explains the migration that added **PlatformIO** as nff's build ba
 - nff can now build/flash through **PlatformIO** in addition to **arduino-cli**. The two coexist; you pick one per-run or persist a choice.
 - **PlatformIO is the default** (in the Python implementation). It makes nff **board-universal** — any of PlatformIO's ~1000 board ids works, and the toolchain for a board family auto-installs on first build.
 - Nothing about the existing arduino-cli path changed; opt back in with `NFF_BUILD_BACKEND=arduino` or `nff init --backend arduino`.
-- **Scope:** Python implementation only (`nff/nff/`). The shipped Rust binary (`nff-rs/`) still uses arduino-cli — the port is pending.
+- **Scope:** both implementations. The PlatformIO backend has since been ported to the shipped Rust binary (`nff-rs/`) and is the default there too; this document describes the original Python migration.
 
 ## Why
 

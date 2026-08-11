@@ -235,3 +235,50 @@ return "OK: flash complete\n---compile---\n…\n---upload---\n…"
   ▼
 Claude Code receives TextContent response
 ```
+
+---
+
+## 8. Repository Layout
+
+```
+nff/
+├── nff/                         # Python package — reference / prototyping implementation
+│   ├── cli.py                   # Click CLI — wires every subcommand
+│   ├── config.py                # ~/.nff/config.json read/write
+│   ├── mcp_server.py            # streamable-HTTP MCP server (Bearer-authed /mcp)
+│   ├── commands/
+│   │   ├── init.py
+│   │   ├── compile_cmd.py       # port-free build check
+│   │   ├── flash.py
+│   │   ├── monitor.py
+│   │   ├── connect.py           # autonomous log-analysis + repair loop
+│   │   ├── repair.py            # route crash output to the diagnosis server
+│   │   ├── auth_cmd.py          # nff auth login / status / logout
+│   │   ├── ota.py               # nff ota — OTA rollout to a device group
+│   │   ├── fleet.py             # nff fleet — live fleet/OTA view
+│   │   ├── provision.py
+│   │   ├── doctor.py
+│   │   ├── clean.py
+│   │   ├── install_deps.py
+│   │   └── mcp_cmd.py
+│   ├── tools/
+│   │   ├── boards.py            # USB ID detection + PlatformIO board catalog
+│   │   ├── serial.py            # serial read/write/stream/reset
+│   │   ├── toolchain.py         # backend dispatcher + arduino-cli/esptool wrappers
+│   │   ├── backends/
+│   │   │   └── platformio.py    # PlatformIO backend (project scaffold, pio run)
+│   │   ├── installer.py         # arduino-cli auto-install
+│   │   ├── ota_client.py        # /api/ota/* client (deploy, status, fleet snapshot)
+│   │   └── auth.py              # diagnosis-server token handling
+│   └── skills/                  # /nff skill (ships with the package)
+├── nff-rs/                      # Rust port — the shipped binary (full parity)
+├── docs/                        # user documentation (linked from README)
+├── sketches/
+│   ├── blink_esp32/
+│   └── servo_button/
+└── .claude/
+    └── commands/
+        └── nff.md               # /nff Claude Code skill
+```
+
+The Rust crate under `nff-rs/nff/` is the **shipped binary** and is at full feature parity with the Python package — every CLI command and MCP tool runs natively (no Python runtime). Build it with `cargo build --release` (binary at `nff-rs/target/release/nff`). The Python package under `nff/nff/` is the reference/prototyping implementation and is kept in sync version-for-version; when you add a feature, land it in both so the two never drift.

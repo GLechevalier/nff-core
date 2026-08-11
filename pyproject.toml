@@ -5,7 +5,7 @@ build-backend = "maturin"
 [project]
 name = "nff"
 version = "0.2.38"
-description = "Claude Code IoT Bridge — connect Claude to hardware via USB"
+description = "let coding agents iterate on hardware — MCP server for compiling, flashing, and debugging MCUs"
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]
