@@ -157,9 +157,24 @@ else
 EOF
 fi
 cp "$SHIM/nff_idf_shim.h" "$SHIM/nff_idf_shim.c" "$PROJ/main/"
+# Build-injected fleet root CA (see shim nff_l2_idf_init_from_nvs): nff-github fetches the TARGET
+# fleet's root CA and ships it as main/nff_injected_ca.c so real-silicon boots trust the broker they
+# will actually dial. Absent (fetch failed / standalone build) → a stub TU keeps the SRCS list static
+# and the shim's #ifdef path dark — exactly today's behavior (baked-CA fallback), never a build break.
+if [ -f "$SKETCH_DIR/main/nff_injected_ca.c" ]; then
+  cp "$SKETCH_DIR/main/nff_injected_ca.c" "$PROJ/main/nff_injected_ca.c"
+  NFF_CA_DEF='target_compile_definitions(${COMPONENT_LIB} PRIVATE "NFF_INJECT_FLEET_CA=1")'
+  echo "build_espidf.sh: injecting fleet root CA (env-correct broker trust anchor)"
+else
+  _write_if_changed "$PROJ/main/nff_injected_ca.c" <<'EOF'
+/* stub — no build-injected fleet CA; the app's own trust chain applies. */
+typedef int nff_injected_ca_stub_t;
+EOF
+  NFF_CA_DEF=''
+fi
 cat > "$PROJ/main/CMakeLists.txt" <<'EOF'
 idf_component_register(
-    SRCS "main.c" "nff_idf_shim.c"
+    SRCS "main.c" "nff_idf_shim.c" "nff_injected_ca.c"
     INCLUDE_DIRS "."
     REQUIRES nff nff_l2_net esp_wifi esp_event esp_netif nvs_flash esp_timer driver
 )
@@ -168,6 +183,7 @@ idf_component_register(
 # reaches the real nff_init as `(nff_init)` — a parenthesised identifier is not a macro invocation.)
 target_compile_options(${COMPONENT_LIB} PRIVATE -include "${CMAKE_CURRENT_LIST_DIR}/nff_idf_shim.h")
 EOF
+[ -n "$NFF_CA_DEF" ] && echo "$NFF_CA_DEF" >> "$PROJ/main/CMakeLists.txt"
 _fw_ident_defs "$PROJ/main/CMakeLists.txt"   # per-build build_id/fw_version, scoped for ccache
 
 # ---- shared openeth + NVS-identity component (copied so we can bake identity into its CMakeLists) ----

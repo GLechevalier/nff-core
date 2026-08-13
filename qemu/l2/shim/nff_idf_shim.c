@@ -15,8 +15,19 @@
 #include "nff_idf_shim.h"
 
 #include "esp_event.h"
+#include "esp_log.h"
 #include "esp_netif.h"
 #include "freertos/FreeRTOS.h"
+
+#ifdef NFF_INJECT_FLEET_CA
+/* Build-injected fleet root CA (generated main/nff_injected_ca.c, fetched from the TARGET fleet's
+ * /internal/fleet-ca at build time by nff-github). Pipeline-built universal images previously fell
+ * back to whatever FLEET_ROOT_CA_DER snapshot the customer source happened to bake — a DIFFERENT
+ * fleet's root fails TLS verify (-0x2700) against this fleet's broker, so the OTA trial can never
+ * connect and always rolls back. The injected anchor is env-correct by construction. */
+extern const unsigned char nff_injected_fleet_ca[];
+extern const unsigned int  nff_injected_fleet_ca_len;
+#endif
 
 esp_err_t nff_l2_idf_wifi_init(const wifi_init_config_t *cfg) {
     if (nff_l2_identity_present()) { (void)cfg; return ESP_OK; }   /* QEMU: no radio to init */
@@ -60,6 +71,16 @@ int nff_l2_idf_init_from_nvs(nff_config_t *cfg) {
         /* Real silicon: no spliced identity — the real nff_init() resolves the device's operational
          * creds from the nff claim store (claimed) or fails cleanly (unclaimed: this credential-less
          * universal image cannot bootstrap). The RTC/SNTP story is the platform's own. */
+#ifdef NFF_INJECT_FLEET_CA
+        /* Broker trust anchor: the build-injected CA WINS over whatever the app placed here (claim
+         * store op_ca or its baked fallback). The image is deployed by the same stack that built
+         * it, so the build-time fleet CA is correct for the broker it will dial — and a stale
+         * op_ca / stale bake can never re-arm the -0x2700 rollback loop. CA rotation still works:
+         * each new build re-fetches the live root. */
+        cfg->ca_cert = (const uint8_t *)nff_injected_fleet_ca;
+        cfg->ca_cert_len = nff_injected_fleet_ca_len;
+        ESP_LOGI("nff_shim", "using build-injected fleet root CA (%u B)", nff_injected_fleet_ca_len);
+#endif
         return (nff_init)(cfg);
     }
     /* QEMU: the clock has to be set BEFORE any TLS handshake — no RTC, so without it mbedTLS rejects
