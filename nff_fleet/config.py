@@ -39,6 +39,11 @@ class NffFleetSettings(BaseSettings):
     # cert on every sweep. A few sweeps' worth.
     enroll_reconcile_grace_s: int = 60
 
+    # Wired-link serial console capture (device_serial_logs, written by the
+    # dashboard browser): fleet prunes rows older than this every sweep.
+    serial_log_retention_days: int = 7
+    serial_prune_interval: float = 3600.0
+
     audit_log: Path = Path("/data/audit/commands.jsonl")
 
     mcp_secret: str = "change-me-in-production"

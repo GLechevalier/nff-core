@@ -41,6 +41,7 @@ POST /internal/store-elf
 
 from __future__ import annotations
 
+import base64
 import hmac
 import logging
 import shutil
@@ -379,6 +380,39 @@ async def _inject_crash(request: Request) -> JSONResponse:
     return JSONResponse({"device_id": device_id, "injected": True})
 
 
+async def _fleet_ca(request: Request) -> JSONResponse:
+    """Return this fleet's root CA certificate (DER, base64).
+
+    nff-github calls this at branch-build time to inject the env-correct trust
+    anchor into pipeline-built images (the hardcoded FLEET_ROOT_CA_DER fallback
+    in customer source is a snapshot of ONE fleet's CA and cannot match every
+    environment — see the -0x2700 rollback loop on real hardware). Read-only,
+    no side effects; the root CA cert is not secret (every flashed device
+    carries it), but the endpoint stays behind the shared secret like the rest
+    of the internal surface.
+
+        POST {} -> 200 {"ca_der_b64": "<base64 DER>", "not_after": "..."}
+    """
+    if not _secret_ok(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    try:
+        from cryptography.hazmat.primitives.serialization import Encoding
+        from cryptography.x509 import load_pem_x509_certificate
+
+        pem = settings.tls_ca_cert.read_bytes()
+        cert = load_pem_x509_certificate(pem)
+        der = cert.public_bytes(Encoding.DER)
+    except Exception as exc:  # noqa: BLE001 — missing/unreadable CA file
+        logger.warning("fleet-ca export failed: %s", exc)
+        return JSONResponse({"error": f"fleet CA unavailable: {exc}"}, status_code=500)
+    return JSONResponse(
+        {
+            "ca_der_b64": base64.b64encode(der).decode(),
+            "not_after": cert.not_valid_after_utc.isoformat(),
+        }
+    )
+
+
 def register(mcp) -> None:
     """Register the internal control routes on the FastMCP HTTP app."""
     mcp.custom_route("/internal/command", methods=["POST"])(_deliver_command)
@@ -389,3 +423,4 @@ def register(mcp) -> None:
     mcp.custom_route("/internal/store-elf", methods=["POST"])(_store_elf)
     mcp.custom_route("/internal/store-bin", methods=["POST"])(_store_bin)
     mcp.custom_route("/internal/inject-crash", methods=["POST"])(_inject_crash)
+    mcp.custom_route("/internal/fleet-ca", methods=["POST"])(_fleet_ca)

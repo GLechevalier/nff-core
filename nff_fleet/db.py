@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -167,6 +167,43 @@ async def _insert_telemetry(device_id: str, payload: dict[str, Any]) -> None:
             "project_id": payload.get("project_id") or None,
         }
     ).execute()
+
+
+# ---------------------------------------------------------------------------
+# Wired-link serial console (device_serial_logs; the dashboard browser writes
+# rows under the user's JWT/RLS — fleet only reads and prunes, service role)
+# ---------------------------------------------------------------------------
+
+async def get_serial_lines(
+    device_id: str,
+    limit: int = 100,
+    since: str | None = None,
+    grep: str | None = None,
+) -> list[dict[str, Any]]:
+    """Newest `limit` console lines for a device, returned oldest-first.
+
+    `since` is an ISO timestamp lower bound; `grep` a case-insensitive
+    substring filter. Rows only exist for periods when a dashboard tab held
+    the wired USB link to the device (the browser is the writer).
+    """
+    if not _enabled:
+        return []
+    q = _client.table("device_serial_logs").select("ts, seq, line").eq("device_id", device_id)
+    if since:
+        q = q.gte("ts", since)
+    if grep:
+        q = q.ilike("line", f"%{grep}%")
+    resp = await q.order("ts", desc=True).order("seq", desc=True).limit(limit).execute()
+    return list(reversed(resp.data or []))
+
+
+async def prune_serial_logs(days: int = 7) -> None:
+    """Delete console lines older than the retention window. Called from the
+    hourly maintenance loop in server lifespan; no-op when persistence is off."""
+    if not _enabled:
+        return
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+    await _client.table("device_serial_logs").delete().lt("ts", cutoff).execute()
 
 
 # ---------------------------------------------------------------------------

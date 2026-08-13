@@ -103,12 +103,14 @@ def on_response(payload):
 | `fleet_get_crash` | `tools/crash.py` | Read retained crash topic (works offline) |
 | `fleet_resolve_backtrace` | `tools/crash.py` | Run `addr2line` against stored ELF¹ |
 | `fleet_get_diag` | `tools/diag.py` | Send diag command, return heap + FreeRTOS task list |
+| `fleet_get_serial_log` | `tools/serial.py` | Read wired-link serial console history (device_serial_logs, uploaded by the dashboard) — first stop for OTA rollbacks / boot / TLS failures |
 
 OTA is **not** a fleet tool — nff-ota owns it and delivers via the internal HTTP endpoint:
 
 | Endpoint | Module | Description |
 |---|---|---|
 | `POST /internal/command` | `control.py` | Shared-secret service endpoint nff-ota calls to sign + deliver any command (incl. OTA) over MQTT |
+| `POST /internal/fleet-ca` | `control.py` | Returns this fleet's root CA (DER, b64); nff-github bakes it into pipeline images at build time |
 
 ¹ `fleet_store_elf` + `fleet_resolve_backtrace` + the ELF store are crash *symbolication*,
 which is really nff-diagnosis's job (it already owns the ELF catalog + `addr2line` via
