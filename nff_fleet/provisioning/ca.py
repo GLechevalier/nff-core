@@ -196,7 +196,13 @@ def issue_server_cert(sans: str | list[str]) -> tuple[Path, Path]:
     name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "nff-fleet-server")])
     now = _now()
     alt = []
-    for entry in [*sans, "127.0.0.1", "localhost"]:
+    # "nff-fleet-server" MUST always be a dNSName SAN: real-silicon firmware dials
+    # mqtts://nff-fleet-server:8883 (nff_idf_shim.h NFF_SHIM_BROKER_HOST) with full
+    # CN/SAN verification, and mbedtls matches the hostname against dNSName SANs ONLY
+    # — the matching CN above does not count. Every mock skips hostname checking, so
+    # dropping this SAN breaks only real hardware. "nff-fleet" is the docker service
+    # name, kept for clients on the compose network.
+    for entry in [*sans, "nff-fleet-server", "nff-fleet", "127.0.0.1", "localhost"]:
         if any(getattr(g, "value", None) == entry or str(getattr(g, "value", "")) == entry for g in alt):
             continue  # de-dup repeated addresses
         try:
