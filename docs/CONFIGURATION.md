@@ -49,7 +49,7 @@ Update state lives in `~/.nff/update.json`; the background job logs to `~/.nff/u
 
 ## Claude Code skills
 
-nff ships Claude Code skills bundled inside the package:
+nff ships one Claude Code skill:
 
 | Skill | When to use |
 |---|---|
@@ -59,6 +59,13 @@ nff ships Claude Code skills bundled inside the package:
 /nff
 ```
 
-Skill files live at `nff/skills/` (the source of truth — edit them there) so they ship with every `pip install nff`, and are also mirrored in `.claude/commands/` for project-level use. Copy them into `~/.claude/commands/` to make the slash commands available globally.
+The skill lives at `skills/nff/SKILL.md` (the source of truth — edit it there) and is delivered by the Claude Code plugin:
+
+```
+/plugin marketplace add GLechevalier/nff
+/plugin install nff@nff
+```
+
+The plugin also registers the MCP server over stdio (`nff mcp --stdio`), so plugin users can skip the `claude mcp add` step below. Without the plugin, copy `skills/nff/SKILL.md` into `~/.claude/commands/nff.md` to make `/nff` available globally.
 
 > The `/wokwi-diagram` simulation skill moved to the **[nff-sim](../../nff-sim)** package.

@@ -135,6 +135,23 @@ def test_record_error(isolated_config):
     assert updater.load_state()["error_surfaced"] is False
 
 
+def test_plugin_ping_once_per_version(isolated_config, monkeypatch):
+    monkeypatch.setenv("NFF_NO_TELEMETRY", "")
+    sent = []
+    monkeypatch.setattr(updater, "send_event", sent.append)
+    updater.maybe_plugin_ping()
+    updater.maybe_plugin_ping()
+    assert sent == ["plugin"]
+    assert updater.load_state()["plugin_ping_version"] == updater.current_version()
+
+
+def test_plugin_ping_respects_opt_out(isolated_config, monkeypatch):
+    monkeypatch.setenv("NFF_NO_TELEMETRY", "1")
+    monkeypatch.setattr(updater, "send_event", lambda m: pytest.fail("pinged despite opt-out"))
+    updater.maybe_plugin_ping()
+    assert updater.load_state()["plugin_ping_version"] is None
+
+
 # ---------------------------------------------------------------------------
 # Throttle
 # ---------------------------------------------------------------------------

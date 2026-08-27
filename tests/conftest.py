@@ -16,6 +16,12 @@ def _pin_arduino_backend(request, monkeypatch):
     monkeypatch.setenv("NFF_BUILD_BACKEND", "arduino")
 
 
+@pytest.fixture(autouse=True)
+def _no_telemetry(monkeypatch):
+    """Never let a test's simulated install/update send a real install-event ping."""
+    monkeypatch.setenv("NFF_NO_TELEMETRY", "1")
+
+
 @pytest.fixture()
 def isolated_config(tmp_path, monkeypatch):
     """Redirect config paths to tmp_path so tests never touch ~/.nff/config.json."""

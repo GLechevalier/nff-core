@@ -1,3 +1,8 @@
+---
+name: nff
+description: IoT CLI bridge — use whenever writing, compiling, flashing, monitoring, or debugging a sketch on real Arduino/ESP32/ESP8266 hardware via the nff CLI or the mcp__nff__* tools.
+---
+
 # nff — IoT CLI Bridge for Claude Code
 
 `nff` connects Claude Code to embedded hardware (Arduino, ESP32, ESP8266) over USB.

@@ -270,15 +270,14 @@ nff/
 │   │   ├── installer.py         # arduino-cli auto-install
 │   │   ├── ota_client.py        # /api/ota/* client (deploy, status, fleet snapshot)
 │   │   └── auth.py              # diagnosis-server token handling
-│   └── skills/                  # /nff skill (ships with the package)
 ├── nff-rs/                      # Rust port — the shipped binary (full parity)
+├── skills/
+│   └── nff/SKILL.md             # /nff skill (delivered via the Claude Code plugin)
+├── .claude-plugin/              # Claude Code plugin + marketplace manifests
 ├── docs/                        # user documentation (linked from README)
-├── sketches/
-│   ├── blink_esp32/
-│   └── servo_button/
-└── .claude/
-    └── commands/
-        └── nff.md               # /nff Claude Code skill
+└── sketches/
+    ├── blink_esp32/
+    └── servo_button/
 ```
 
 The Rust crate under `nff-rs/nff/` is the **shipped binary** and is at full feature parity with the Python package — every CLI command and MCP tool runs natively (no Python runtime). Build it with `cargo build --release` (binary at `nff-rs/target/release/nff`). The Python package under `nff/nff/` is the reference/prototyping implementation and is kept in sync version-for-version; when you add a feature, land it in both so the two never drift.

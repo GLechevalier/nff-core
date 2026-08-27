@@ -8,21 +8,28 @@ import click
 @click.group("mcp", invoke_without_command=True)
 @click.option("--host", default="127.0.0.1", show_default=True, help="Bind address")
 @click.option("--port", default=3010, type=int, show_default=True, help="Bind port")
+@click.option("--stdio", is_flag=True,
+              help="Serve MCP over stdio (for the Claude Code plugin) instead of HTTP.")
 @click.pass_context
-def mcp(ctx, host, port):
+def mcp(ctx, host, port, stdio):
     """Start the nff MCP server (HTTP on host:port/mcp), or manage it.
 
     Run bare `nff mcp` to start it; use `stop`/`restart`/`logs` to manage the
     background server that `nff init` launched."""
     ctx.obj = {"host": host, "port": port}
     if ctx.invoked_subcommand is None:
-        _start(host, port)
+        _start(host, port, stdio)
 
 
-def _start(host, port):
+def _start(host, port, stdio=False):
     from nff import mcp_server
     from nff.tools import daemon
 
+    # stdio binds no port, so it must run even when the HTTP daemon is already up
+    # (the Claude Code plugin spawns one stdio process per session).
+    if stdio:
+        asyncio.run(mcp_server.run_stdio())
+        return
     # `nff init` already starts the server in the background, so a manual `nff mcp`
     # would otherwise crash on the bound port. Bail out cleanly if it's already up.
     if daemon.is_running(host, port):

@@ -1253,3 +1253,21 @@ async def run_server(host: str = "127.0.0.1", port: int = 3010) -> None:
     config = uvicorn.Config(asgi_app, host=host, port=port, log_level="warning")
     server = uvicorn.Server(config)
     await server.serve()
+
+
+async def run_stdio() -> None:
+    """`nff mcp --stdio` — the Claude Code plugin entry point: same lowlevel Server
+    over stdio. One process per session, no port bound, so it coexists with the
+    background HTTP daemon. stdout carries JSON-RPC only."""
+    import threading
+
+    from mcp.server.stdio import stdio_server
+
+    from nff.tools import updater
+
+    # Anonymous once-per-version install/update ping (opt-out: NFF_NO_TELEMETRY).
+    # Daemon thread: the server outlives the 3s-bounded request.
+    threading.Thread(target=updater.maybe_plugin_ping, daemon=True).start()
+
+    async with stdio_server() as (read_stream, write_stream):
+        await app.run(read_stream, write_stream, app.create_initialization_options())

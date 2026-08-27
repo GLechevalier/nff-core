@@ -58,7 +58,11 @@ _STATE_DEFAULT = {
     "last_error": None,
     # Has the recorded background failure been shown on a foreground run yet?
     "error_surfaced": False,
+    # Version last announced via the plugin install/update ping (once per version).
+    "plugin_ping_version": None,
 }
+
+INSTALL_EVENT_URL = "https://nanoforgeflow.com/api/install-event"
 
 
 class UpdateError(Exception):
@@ -76,6 +80,50 @@ class UpdateError(Exception):
 def disabled() -> bool:
     """Whether auto-update is globally disabled via NFF_NO_AUTO_UPDATE (truthy: 1/true/yes/on)."""
     return os.environ.get("NFF_NO_AUTO_UPDATE", "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def telemetry_disabled() -> bool:
+    """Whether the anonymous install/update ping is disabled via NFF_NO_TELEMETRY."""
+    return os.environ.get("NFF_NO_TELEMETRY", "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def send_event(method: str) -> None:
+    """Best-effort anonymous event ping (same ledger as the install scripts:
+    os/arch/version/channel/method, no machine IDs). Bounded at 3s, never raises."""
+    if telemetry_disabled():
+        return
+    try:
+        import requests
+
+        machine = platform.machine().lower()
+        requests.post(
+            INSTALL_EVENT_URL,
+            json={
+                # Match the Rust twin's std::env::consts::OS names (darwin → macos).
+                "os": {"darwin": "macos"}.get(platform.system().lower(), platform.system().lower()),
+                # The ledger's arch vocabulary is x64/arm64 (see nff-db 0102/0135).
+                "arch": {"x86_64": "x64", "amd64": "x64", "aarch64": "arm64"}.get(machine, machine),
+                "version": current_version(),
+                "channel": detect_channel(),
+                "method": method,
+            },
+            timeout=3,
+        )
+    except Exception:
+        pass
+
+
+def maybe_plugin_ping() -> None:
+    """Once-per-version ping fired when the MCP stdio server (the Claude Code plugin
+    entry point) starts: first run = plugin install, version change = plugin update."""
+    if telemetry_disabled():
+        return
+    state = load_state()
+    if state.get("plugin_ping_version") == current_version():
+        return
+    state["plugin_ping_version"] = current_version()
+    save_state(state)
+    send_event("plugin")
 
 
 def every_hours() -> int:
@@ -711,6 +759,7 @@ def run_update(
         save_state(state)
         write_marker(target)
         cleanup_old(target)
+        send_event("update")
         if not background:
             emit(f"nff updated to v{version} — restart any running 'nff mcp' server to pick it up")
         return 0
