@@ -1,0 +1,11 @@
+{
+  "name": "nff",
+  "owner": { "name": "Gauthier Lechevalier", "url": "https://nanoforgeflow.com" },
+  "plugins": [
+    {
+      "name": "nff",
+      "source": "./",
+      "description": "IoT bench for Claude Code — compile, flash, monitor, and debug ESP32/Arduino hardware (34 MCP tools + skill). Requires the nff CLI: irm https://nanoforgeflow.com/install.ps1 | iex (Windows) or curl -fsSL https://nanoforgeflow.com/install.sh | sh"
+    }
+  ]
+}
