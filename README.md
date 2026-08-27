@@ -28,19 +28,6 @@ nff is an MCP server that gives coding agents direct control over physical hardw
 
 Connect your board over USB and Claude writes, compiles, flashes, and reads serial output autonomously. Deploy devices with the `nff-sdk-c` library and Claude can reach them remotely: capture crash state, diagnose failures, and push fixes — without physical access.
 
-> **nff is the open-source bench CLI of the [nff platform](https://nanoforgeflow.com)** — an end-to-end, agent-driven system for developing, shipping, and operating ESP32-class firmware (bench → OTA → fleet diagnosis). This repo and the device library (`nff-sdk-c`) are the two **MIT-licensed** pieces that run on your laptop and hardware; the hosted backend is proprietary.
-
-<p align="center">
-  <img src="public/images/PlatformScreen.jpg" alt="nff platform" width="800">
-</p>
-
-```
-you: "Run the sensor init sequence and assert the calibration values over serial"
-LLM: [writes firmware] → [compiles] → [flashes ESP32] → [reads serial] → returns structured output
-
-you: "Why did the unit in the field just hard-fault?"
-LLM: [captures panic over OTA] → [reads registers + backtrace] → "Stack overflow in your sensor ISR at line 47"
-```
 
 ## features
 
@@ -53,6 +40,15 @@ LLM: [captures panic over OTA] → [reads registers + backtrace] → "Stack over
 - **one Rust binary** — self-contained, no Python runtime, and it self-updates in the background like Claude Code does.
 
 ## get started
+
+In Claude Code (two separate prompts):
+
+```
+/plugin marketplace add GLechevalier/nff
+/plugin install nff@nff
+```
+
+That installs the MCP server (all 34 tools, spawned on demand — no daemon setup) and the `/nff` skill. The plugin runs the `nff` CLI, so install it first if you haven't:
 
 macOS / Linux:
 
@@ -69,11 +65,13 @@ irm https://nanoforgeflow.com/install.ps1 | iex
 Then plug in your board and run:
 
 ```bash
-nff init      # detects the board, writes config, registers + starts the MCP server
+nff init      # detects the board, writes config
 nff doctor    # verify
 ```
 
-Restart Claude Code so it picks up the MCP server, then just describe what you want:
+> No plugin? `nff init` also registers the MCP server the classic way (HTTP on `127.0.0.1:3010/mcp`) — restart Claude Code after it so the registration is picked up.
+
+Then just describe what you want:
 
 ```
 you: "Flash sketches/blink_esp32 and confirm the LED is toggling over serial"
@@ -84,7 +82,7 @@ Full install options, `--cloud` sign-in, and first-run detail: [quick start →]
 
 ## mcp tools
 
-34 tools over streamable HTTP on `127.0.0.1:3010/mcp`, started in the background by `nff init`.
+34 tools, served two ways: over stdio by the Claude Code plugin (`nff mcp --stdio`, spawned per session), or over streamable HTTP on `127.0.0.1:3010/mcp`, started in the background by `nff init`.
 
 | Group | Tools | Covers |
 |---|---|---|

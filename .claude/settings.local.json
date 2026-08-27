@@ -34,5 +34,6 @@
   ],
   "disabledMcpjsonServers": [
     "nff-diagnosis"
-  ]
+  ],
+  "model": "fable"
 }
