@@ -1411,3 +1411,26 @@ pub async fn run(bind: &str) -> anyhow::Result<()> {
     axum::serve(listener, app).await?;
     Ok(())
 }
+
+/// `nff mcp --stdio` — the Claude Code plugin entry point: same tool router as the
+/// HTTP server, served over stdio. One process per session, no port bound, so it
+/// coexists with the background HTTP daemon. stdout carries JSON-RPC only — all
+/// logging in this file goes to stderr.
+pub async fn run_stdio() -> anyhow::Result<()> {
+    use rmcp::{transport::stdio, ServiceExt};
+
+    // Anonymous once-per-version install/update ping (opt-out: NFF_NO_TELEMETRY).
+    // Plain thread: reqwest::blocking must not run on the tokio runtime, and the
+    // server outlives it, so fire-and-forget is safe here.
+    std::thread::spawn(crate::tools::updater::maybe_plugin_ping);
+
+    let server = NffServer {
+        pending_auth: Arc::new(Mutex::new(None)),
+        debug_session: Arc::new(Mutex::new(None)),
+        mcp_call_count: Arc::new(AtomicU64::new(0)),
+        policy_state: Arc::new(Mutex::new(None)),
+    };
+    let service = server.serve(stdio()).await?;
+    service.waiting().await?;
+    Ok(())
+}

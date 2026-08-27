@@ -25,8 +25,8 @@ which       = "6"
 sha2        = "0.10"
 thiserror   = "1"
 anyhow      = "1"
-rmcp        = { version = "1", features = ["server", "macros", "transport-streamable-http-server"] }
-tokio       = { version = "1", features = ["rt", "rt-multi-thread", "macros", "net"] }
+rmcp        = { version = "1", features = ["server", "macros", "transport-streamable-http-server", "transport-io"] }
+tokio       = { version = "1", features = ["rt", "rt-multi-thread", "macros", "net", "io-std"] }
 axum        = { version = "0.8", features = ["http1", "tokio"] }
 schemars    = { version = "1", features = ["derive"] }
 getrandom   = "0.3"

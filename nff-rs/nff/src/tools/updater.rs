@@ -108,6 +108,9 @@ pub struct UpdateState {
     /// Has the recorded background failure been shown on a foreground run yet?
     #[serde(default)]
     pub error_surfaced: bool,
+    /// Version last announced via the plugin install/update ping (once per version).
+    #[serde(default)]
+    pub plugin_ping_version: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -128,6 +131,60 @@ pub fn disabled() -> bool {
         Ok(v) => matches!(v.trim().to_lowercase().as_str(), "1" | "true" | "yes" | "on"),
         Err(_) => false,
     }
+}
+
+/// Whether the anonymous install/update ping is disabled via NFF_NO_TELEMETRY.
+pub fn telemetry_disabled() -> bool {
+    match std::env::var("NFF_NO_TELEMETRY") {
+        Ok(v) => matches!(v.trim().to_lowercase().as_str(), "1" | "true" | "yes" | "on"),
+        Err(_) => false,
+    }
+}
+
+/// Best-effort anonymous event ping (same ledger as the install scripts:
+/// os/arch/version/channel/method, no machine IDs). Bounded at 3s, never fails.
+/// Blocking — call from a plain thread when inside a tokio runtime.
+pub fn send_event(method: &str) {
+    if telemetry_disabled() {
+        return;
+    }
+    let Ok(client) = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(3))
+        .build()
+    else {
+        return;
+    };
+    // The ledger's arch vocabulary is x64/arm64 (see nff-db 0102/0135).
+    let arch = match std::env::consts::ARCH {
+        "x86_64" => "x64",
+        "aarch64" => "arm64",
+        other => other,
+    };
+    let _ = client
+        .post("https://nanoforgeflow.com/api/install-event")
+        .json(&serde_json::json!({
+            "os": std::env::consts::OS,
+            "arch": arch,
+            "version": current_version(),
+            "channel": detect_channel().name(),
+            "method": method,
+        }))
+        .send();
+}
+
+/// Once-per-version ping fired when the MCP stdio server (the Claude Code plugin
+/// entry point) starts: first run = plugin install, version change = plugin update.
+pub fn maybe_plugin_ping() {
+    if telemetry_disabled() {
+        return;
+    }
+    let mut state = load_state();
+    if state.plugin_ping_version.as_deref() == Some(current_version()) {
+        return;
+    }
+    state.plugin_ping_version = Some(current_version().to_string());
+    save_state(&state);
+    send_event("plugin");
 }
 
 /// Throttle window in hours: NFF_UPDATE_EVERY_HOURS if it parses to a positive int.
@@ -852,6 +909,7 @@ fn run_update_locked(
     save_state(&state);
     write_marker(&target);
     cleanup_old(&target);
+    send_event("update");
     if !background {
         println!("nff updated to v{version} — restart any running 'nff mcp' server to pick it up");
     }

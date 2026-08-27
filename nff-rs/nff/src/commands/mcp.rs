@@ -1,6 +1,11 @@
 use crate::tools::daemon;
 
 pub async fn run(args: &crate::cli::McpArgs) -> anyhow::Result<()> {
+    // stdio binds no port, so it must run even when the HTTP daemon is already up
+    // (the Claude Code plugin spawns one stdio process per session).
+    if args.stdio {
+        return crate::mcp_server::run_stdio().await;
+    }
     // `nff init` already starts the server in the background, so a manual `nff mcp`
     // would otherwise crash on the bound port. Bail out cleanly if it's already up.
     if daemon::is_running(&args.host, args.port) {

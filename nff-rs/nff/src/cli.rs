@@ -281,6 +281,11 @@ pub struct McpArgs {
         help = "Port to listen on."
     )]
     pub port: u16,
+    #[arg(
+        long,
+        help = "Serve MCP over stdio (for the Claude Code plugin) instead of HTTP."
+    )]
+    pub stdio: bool,
 }
 
 #[derive(Subcommand)]
