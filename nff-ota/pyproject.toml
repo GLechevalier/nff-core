@@ -1,0 +1,49 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "nff-ota"
+version = "0.1.19"
+description = "MCP server — Mender-inspired OTA firmware update manager for IoT fleets"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "mcp>=1.24.0,<2",  # 2.0 removed mcp.server.fastmcp
+    "pydantic>=2.11",
+    "pydantic-settings>=2.0",
+    "supabase>=2.0",
+    "cryptography>=42.0",
+    "python-dotenv>=1.1",
+    "httpx>=0.27",
+]
+
+[project.scripts]
+nff-ota = "nff_ota.server:main"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "pytest-mock>=3.14",
+    "ruff>=0.4",
+    "mypy>=1.10",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["nff_ota"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true

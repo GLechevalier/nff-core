@@ -1,0 +1,92 @@
+from typing import Literal
+
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class OtaSettings(BaseSettings):
+    model_config = SettingsConfigDict(env_prefix="OTA_", env_file=(".env", ".env.dev"), extra="ignore")
+
+    supabase_url: str = ""
+    supabase_key: str = ""
+    artifact_bucket: str = "artifacts"
+    log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
+
+    # MCP server transport — runs over streamable-http so Claude (and other hosts)
+    # connect over the network, alongside nff-fleet (3001).
+    mcp_host: str = "0.0.0.0"
+    mcp_port: int = 3002
+    default_max_devices_in_flight: int = 10
+    default_max_retries: int = 3
+    trusted_signing_key_path: str = ""
+
+    # ESP32 image-validity gate: reject uploaded artifacts that are not plausible ESP32
+    # firmware images (magic byte 0xE9 + a size floor) unless the upload is explicitly
+    # allowed to be synthetic (mock-only targets — the mock verifies bytes by SHA-256,
+    # it never boots them). Prevents the "text blob shipped as firmware" failure a real
+    # device is the first to expose. Disable as a rollback lever, not a workaround.
+    esp_image_gate_enabled: bool = True
+    esp_image_min_bytes: int = 32768  # real app images are >100 KB; 32 KB is conservative
+
+    # nff-fleet is the command-delivery plane. nff-ota decides what to push and asks
+    # fleet to deliver it over MQTT via fleet's POST /internal/command endpoint.
+    fleet_url: str = ""          # e.g. http://nff-fleet:3001
+    fleet_secret: str = ""       # must match nff-fleet's NFF_FLEET_MCP_SECRET; also the
+                                 # shared secret for the inbound /internal/ota-result webhook
+    fleet_timeout: float = 120.0  # seconds to await a device response for an OTA command
+
+    # nff-github is the server-side build plane. For an L2 (nff-qemu-esp32) device the
+    # source build/deploy path compiles the submitted firmware for real via nff-github's
+    # POST /internal/compile-source (instead of L1's regex analyzer) — see source/realcompile.py.
+    github_url: str = ""          # e.g. http://nff-github:3003
+    github_secret: str = ""       # must match nff-github's NFF_GITHUB_INTERNAL_SECRET
+    github_timeout: float = 1800.0  # an IDF+arduino compile is slow (minutes)
+
+    # Stuck-job reaper: a device that downloads but never reports an ota_result
+    # (bricked / never reconnects) would leave its ota_jobs row in 'downloading'
+    # forever. The reaper marks such jobs 'timed_out' so the deployment can finish.
+    download_timeout: float = 600.0  # seconds in 'downloading' before a job is timed out
+    reaper_interval: float = 60.0    # how often the reaper sweeps
+
+    # Deployment poller: the nff-dashboard writes a 'scheduled' deployment row directly
+    # to Supabase rather than calling start_deployment. This background sweep picks such
+    # rows up, materializes their pending ota_jobs from the device group, and runs the
+    # normal fleet-delivery path. Without it, dashboard-created deployments never start.
+    deployment_poller_enabled: bool = True
+    deployment_poller_interval: float = 15.0  # how often the poller sweeps
+
+    # Phased / canary rollout supervisor (IOT_BRIDGE.md §3 gap #2). Watches each active
+    # phased deployment: auto-advances a healthy, soaked wave to the next cohort, or pauses
+    # the deployment when a wave's failure rate exceeds its failure_threshold (auto-halt).
+    supervisor_enabled: bool = True
+    supervisor_interval: float = 30.0          # how often the supervisor sweeps
+    default_failure_threshold: float = 0.05    # default per-deployment auto-halt threshold (5%)
+
+    # Firmware-fix worker: submit_firmware_fix enqueues a firmware_fix_jobs row and returns
+    # immediately (so the agent→nff-ota MCP call never idles through the ~15-18 min L2 compile
+    # and gets dropped by Docker Desktop's vpnkit proxy). This worker, on the process-level
+    # sweeps loop, claims pending jobs and runs the compile+deploy. See source/fix_worker.py.
+    fix_worker_enabled: bool = True
+    fix_worker_interval: float = 3.0      # how often the worker claims the next pending job
+    # A job claimed but not finished within this window (a worker that died mid-compile) is
+    # re-queued — generous vs build_timeout (1800s) so a slow-but-live build is never stolen.
+    fix_job_stale_seconds: float = 2400.0
+    fix_job_max_attempts: int = 2         # after this many claims, a stuck job fails terminally
+
+    # End-of-deployment agent hand-off: when a deployment reaches a terminal state
+    # (finished/aborted) nff-ota inserts ONE agent_messages row (the nff-github repair.py
+    # pattern) so the agent-worker summarizes the outcome — and, for non-pipeline failures,
+    # diagnoses and fixes. Demo/pool projects are skipped (they churn deployments constantly
+    # and the demo self-heal flow has its own trigger); the cooldown throttles all-success/
+    # abort summaries per project, but failure hand-offs always emit.
+    agent_on_finish: bool = True
+    agent_on_finish_skip_demo: bool = True
+    agent_on_finish_cooldown_seconds: float = 900.0  # 0 disables the cooldown
+
+    # Blast-radius controls (gap #3).
+    confirm_threshold_devices: int = 50  # creating a deployment targeting more than this many
+                                         # devices requires confirm=true
+    rate_limit_seconds: float = 3600.0   # min seconds between OTAs to the same device across
+                                         # different deployments (0 disables the rate limit)
+
+
+settings = OtaSettings()
