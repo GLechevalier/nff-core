@@ -1,0 +1,135 @@
+name: Deploy
+
+# Push to main -> bump+tag the version -> build the image (cached layers only) ->
+# push to GHCR -> SSH to the VPS and recreate this service's container(s).
+#
+# nff-diagnosis is profile-gated (`profiles: [diagnosis]`) and is currently OFF on
+# the shared prod box. Its image backs TWO compose services (nff-diagnosis REST +
+# nff-diagnosis-mcp). This pipeline always pushes the new image and pulls it on the
+# box; it only recreates the containers if they are actually running there, so it is
+# safe while diagnosis stays disabled and "just works" once it's enabled.
+#
+# Required secrets (repo or org level):
+#   VPS_SSH_KEY  - private key for ubuntu@<VPS_HOST> (the deploy.sh key)
+#   GHCR_PAT     - optional; PAT with read:packages for the VPS-side `docker login`.
+#                  Falls back to the run's GITHUB_TOKEN when unset.
+on:
+  push:
+    branches: [main]
+
+concurrency:
+  group: deploy-main
+  cancel-in-progress: false
+
+permissions:
+  contents: write   # commit the version bump + push the tag
+  packages: write   # push the image to GHCR
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_OWNER: glechevalier
+  IMAGE_NAME: nff-diagnosis  # ghcr.io/<owner>/<IMAGE_NAME>
+  # Both compose services share this one image. The first is used for the
+  # running-state probe; both are pulled and (if active) recreated.
+  SERVICES: nff-diagnosis nff-diagnosis-mcp
+  PROBE_SERVICE: nff-diagnosis
+  VPS_HOST: 152.228.219.243
+  VPS_USER: ubuntu
+  VPS_PATH: /opt/nff
+
+jobs:
+  # 1. Bump the patch version, commit it back to main, create a git tag ----------
+  version:
+    if: ${{ !contains(github.event.head_commit.message, '[skip ci]') }}
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.bump.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
+
+      - name: Bump patch version (pyproject.toml)
+        id: bump
+        run: |
+          python - <<'PY' >> "$GITHUB_OUTPUT"
+          import re, pathlib
+          p = pathlib.Path("pyproject.toml")
+          t = p.read_text()
+          m = re.search(r'version\s*=\s*"(\d+)\.(\d+)\.(\d+)"', t)
+          maj, mn, pa = int(m[1]), int(m[2]), int(m[3])
+          v = f"{maj}.{mn}.{pa + 1}"
+          p.write_text(re.sub(r'version\s*=\s*"\d+\.\d+\.\d+"', f'version = "{v}"', t, count=1))
+          print(f"version={v}")
+          PY
+
+      - name: Commit and tag
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add pyproject.toml
+          git commit -m "chore: bump ${IMAGE_NAME} to v${{ steps.bump.outputs.version }} [skip ci]"
+          git tag "v${{ steps.bump.outputs.version }}"
+          git push origin HEAD:main
+          git push origin "v${{ steps.bump.outputs.version }}"
+
+  # 2. Build the image (BuildKit layer cache) and push to GHCR ------------------
+  build:
+    needs: version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: v${{ needs.version.outputs.version }}
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          labels: |
+            org.opencontainers.image.version=v${{ needs.version.outputs.version }}
+            org.opencontainers.image.revision=${{ github.sha }}
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_OWNER }}/${{ env.IMAGE_NAME }}:latest
+            ${{ env.REGISTRY }}/${{ env.IMAGE_OWNER }}/${{ env.IMAGE_NAME }}:v${{ needs.version.outputs.version }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_OWNER }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
+
+  # 3. On the VPS: pull the new :latest and recreate the container(s) if running -
+  deploy:
+    needs: [version, build]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Recreate ${{ env.IMAGE_NAME }} on the VPS
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ env.VPS_HOST }}
+          username: ${{ env.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          script: |
+            set -e
+            cd ${{ env.VPS_PATH }}
+            echo "${{ secrets.GHCR_PAT || secrets.GITHUB_TOKEN }}" \
+              | docker login ${{ env.REGISTRY }} -u ${{ env.IMAGE_OWNER }} --password-stdin
+            export TAG=latest
+            # The profile makes compose aware of the gated services so we can pull
+            # (and, if they're enabled, recreate) them.
+            export COMPOSE_PROFILES=diagnosis
+            docker compose pull ${{ env.SERVICES }}
+            if docker compose ps --services --status running | grep -qx "${{ env.PROBE_SERVICE }}"; then
+              docker compose up -d --no-deps --force-recreate ${{ env.SERVICES }}
+              echo "recreated ${{ env.SERVICES }} from :latest"
+            else
+              echo "::notice::diagnosis is profile-gated OFF on this box; new image pulled and staged, not started."
+            fi
+            docker image prune -f --filter "until=24h" || true

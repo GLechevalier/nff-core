@@ -1,0 +1,11 @@
+Guru Meditation Error: Core  1 panic'ed (IllegalInstruction). Exception was unhandled.
+
+Core  1 register dump:
+PC      : 0x3ffb7188  PS      : 0x00060f30  A0      : 0x800d5120  A1      : 0x3ffb7160
+A2      : 0x00000000  A3      : 0x3ffb7200  A4      : 0x0000abcd  A5      : 0x00000000
+A6      : 0x00000000  A7      : 0x00000000  A8      : 0x800d5120  A9      : 0x3ffb7140
+SAR     : 0x00000000  EXCCAUSE: 0x00000000  EXCVADDR: 0x00000000
+
+Backtrace: 0x3ffb7188:0x3ffb7160 0x400d5120:0x3ffb7180 0x400d1500:0x3ffb71a0
+
+ELF file SHA256: dec0de00000000000000000000000000000000000000000000000000000000dd

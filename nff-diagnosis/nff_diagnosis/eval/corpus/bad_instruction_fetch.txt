@@ -1,0 +1,7 @@
+Guru Meditation Error: Core  0 panic'ed (InstrFetchProhibited). Exception was unhandled.
+
+Core  0 register dump:
+PC      : 0x00000000  PS      : 0x00060330  A0      : 0x800d4a1c  A1      : 0x3ffb6300
+EXCCAUSE: 0x00000014  EXCVADDR: 0x00000000
+
+Backtrace: 0x00000000:0x3ffb6300 0x400d4a1c:0x3ffb6320 0x400d1500:0x3ffb6340

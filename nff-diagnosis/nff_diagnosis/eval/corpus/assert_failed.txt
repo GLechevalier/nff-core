@@ -1,0 +1,5 @@
+assert failed: xQueueSemaphoreTake queue.c:1545 (pxQueue->uxItemSize == 0)
+
+abort() was called at PC 0x400845e4 on core 0
+
+Backtrace: 0x40084668:0x3ffb1b80 0x400845e4:0x3ffb1bc0 0x400d18a0:0x3ffb1be0
