@@ -1,0 +1,32 @@
+# The mock image build context is the nff-mock/ root (so core/ + the per-level device
+# package are both visible). Keep that context lean — only source needs to ship.
+
+# Sibling packages: excluded by default so the device/L2 images don't drag them in.
+controller/
+targets/
+
+# ...but the controller image (controller/Dockerfile) DOES build from this same root
+# context and needs its own source. Re-include only the controller package source.
+# The device/qemu images never COPY controller/, so this is harmless to them.
+!controller/pyproject.toml
+!controller/README.md
+!controller/nff_mock_controller
+!controller/nff_mock_controller/**
+
+# Build/cache artifacts — keep these LAST so last-match-wins strips them even from the
+# re-included controller/ tree above.
+**/__pycache__/
+**/*.pyc
+**/.pytest_cache/
+**/.mypy_cache/
+**/*.egg-info/
+**/.venv/
+**/.env
+**/.env.*
+# Local ESP-IDF build artifacts under qemu/l2/project (127 MB of build/ output). The L2 image
+# never builds firmware from these — seed_baseline.sh compiles in a SEPARATE container — so they
+# only bloat the context and, over a large transfer, can trip Docker Desktop's buildkit session.
+**/build/
+**/managed_components/
+**/dependencies.lock
+**/sdkconfig.old

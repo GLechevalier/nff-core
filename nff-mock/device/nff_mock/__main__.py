@@ -1,0 +1,4 @@
+from nff_mock.cli import cli
+
+if __name__ == "__main__":
+    cli()

@@ -1,0 +1,12 @@
+{
+  "version": "1.1.0",
+  "heartbeat_extra": { "led": "off", "fw_channel": "plumb-demo", "ota_demo": true },
+  "telemetry_extra": {
+    "sensor_temp": { "random_walk": [18, 26] },
+    "sensor_humidity": { "random_walk": [35, 65] }
+  },
+  "commands": {
+    "set_led": { "sets_state": "led", "response": { "type": "led_ack" } },
+    "blink": { "response": { "type": "blinked", "times": 5 } }
+  }
+}

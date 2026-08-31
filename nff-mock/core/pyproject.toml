@@ -1,0 +1,18 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "nff-mock-core"
+version = "0.1.0"
+description = "Shared contract/identity layer for nff mock devices (all complexity levels)"
+# 3.10 floor so the L2 supervisor installs into the espressif/idf image's Python env (3.10);
+# the code only uses `from __future__ import annotations` + PEP-604 unions, both 3.10-safe.
+requires-python = ">=3.10"
+dependencies = [
+    "cryptography>=42.0",
+    "pydantic-settings>=2.0",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["nff_mock_core"]

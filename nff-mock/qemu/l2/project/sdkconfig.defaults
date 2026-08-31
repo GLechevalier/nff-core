@@ -1,0 +1,42 @@
+# sdkconfig.defaults — maintained nff Level-2 (QEMU) firmware. Carried over from the proven Stage-0
+# spike (nff-mock/qemu/spike/firmware/sdkconfig.defaults). Pinned so the image is reproducible.
+# NFF_QEMU (the L2-only build define enabling the SDK's hostname-check skip + any shim) is passed on
+# the compile line, NOT here — see main/CMakeLists.txt.
+
+# -- Target ----------------------------------------------------------------
+CONFIG_IDF_TARGET="esp32"
+
+# -- openeth (the only NIC QEMU's esp32 machine emulates; no WiFi radio) ----
+CONFIG_ETH_USE_OPENETH=y
+CONFIG_ETH_OPENETH_DMA_RX_BUFFER_NUM=4
+CONFIG_ETH_OPENETH_DMA_TX_BUFFER_NUM=1
+
+# -- Flash / partitions -----------------------------------------------------
+# 4 MB image to match the L2 supervisor's flash.bin assumption (config.flash = 4194304).
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+CONFIG_ESPTOOLPY_FLASHSIZE="4MB"
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+
+# -- Coredump -> flash (ELF) ------------------------------------------------
+# So a real panic yields a resolvable backtrace via the IDF port's nff_port_get_crash_info
+# (#if CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH). This is what Stage 6 asserts a resolved frame against.
+CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH=y
+CONFIG_ESP_COREDUMP_DATA_FORMAT_ELF=y
+CONFIG_ESP_COREDUMP_CHECKSUM_CRC32=y
+
+# -- mbedTLS — ECDSA P-256 + the cert sizes the fleet chain needs -----------
+CONFIG_MBEDTLS_ECP_DP_SECP256R1_ENABLED=y
+CONFIG_MBEDTLS_ECDSA_C=y
+
+# -- Watchdogs OFF (QEMU openeth quirk) -------------------------------------
+# QEMU's emulated openeth interrupt timing trips the Interrupt WDT during the TLS socket select(),
+# panicking mid-handshake. Disable the interrupt + task watchdogs for the emulated target only.
+CONFIG_ESP_INT_WDT=n
+CONFIG_ESP_TASK_WDT_INIT=n
+CONFIG_ESP_TASK_WDT_EN=n
+
+# -- Misc -------------------------------------------------------------------
+# Roomy main task stack — TLS + MQTT run from app_main before handing off to the nff task.
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
+CONFIG_LOG_DEFAULT_LEVEL_INFO=y
