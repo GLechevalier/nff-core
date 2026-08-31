@@ -1,0 +1,165 @@
+import asyncio
+import logging
+import socket
+import ssl
+from pathlib import Path
+
+from amqtt.broker import Broker
+from amqtt.session import Session
+
+from nff_fleet.broker.acl import topic_allowed
+from nff_fleet.config import settings
+
+logger = logging.getLogger(__name__)
+
+_broker_instance: Broker | None = None
+
+
+class NffBroker(Broker):
+    """amqtt Broker with retained-message replay scoped to the connecting client's ACL.
+
+    Stock amqtt 0.11.3 replays retained messages for **every** global subscription filter to
+    **every** connecting client (``_handle_client_session`` iterates ``self._subscriptions``) and
+    ``_publish_retained_messages_for_subscription`` does so with **no ACL check**. Because the
+    internal router subscribes to ``nff/+/devices/#`` + ``nff/_bootstrap/#``, that means any device
+    that connects is handed the whole fleet's retained heartbeats and announces — a flood that
+    starves the device's keepalive (it disconnects/reconnects, re-flooding) **and** a tenant-
+    isolation leak (a device sees other devices', even other tenants', retained state — violates
+    DEVICE_OWNERSHIP_DESIGN.md §7). We override the replay to deliver only retained topics the
+    target session is authorised to receive (its own project+device namespace; the router keeps
+    full access). Couples to amqtt 0.11.3 internals (``_retained_messages``/``_matches``/
+    ``_get_handler``) by necessity — revisit on an amqtt upgrade.
+    """
+
+    @staticmethod
+    def _create_ssl_context(listener) -> ssl.SSLContext:
+        """amqtt's context, capped at TLS 1.2.
+
+        Python's ssl negotiates TLS 1.3 by default, but mbedtls 3.x device clients (arduino-esp32
+        core 3.x) prefer 1.3 while their CLIENT-CERTIFICATE auth only works on 1.2 — the mTLS
+        handshake then dies deterministically right at the certificate stage (observed live:
+        device receives the full server flight, aborts before/mid client Certificate). mTLS is
+        the fleet's whole auth model, so pin the ceiling where client certs work everywhere.
+        """
+        ctx = Broker._create_ssl_context(listener)
+        ctx.maximum_version = ssl.TLSVersion.TLSv1_2
+        return ctx
+
+    async def add_subscription(self, subscription: tuple[str, int], session: Session) -> int:
+        """Grant every subscription at QoS 0 — cap downlink delivery so no PUBACK waiter is armed.
+
+        amqtt delivers a downlink at the *granted* subscription QoS (min of what the client asked
+        for and this cap) and then waits — a hard-coded 5 s in 0.11.3, ``handler.py`` — for the
+        device's PUBACK. A wired PPPoS device saturating its only pipe with a ~1 MB firmware
+        download cannot PUBACK an OTA command in time, so amqtt drops it from ``inflight_out``
+        mid-download and the session flaps → the OTA never commits. Downlinks are lossy by design
+        in this fleet: command redelivery rides the next heartbeat (``router._maybe_redeliver``)
+        and enrollment finalizes by presence (``claim_enrollment_by_device``), so a QoS-0 grant
+        costs no reliability we were actually relying on. Uplink (device→broker) QoS is untouched,
+        so heartbeats/crash/response stay reliable. (0.11.3's own ``max-qos`` config key is rejected
+        by its typed ``BrokerConfig``, hence this override rather than a config entry.)
+        """
+        topic_filter, _requested_qos = subscription
+        return await super().add_subscription((topic_filter, 0), session)
+
+    async def _publish_retained_messages_for_subscription(
+        self, subscription: tuple[str, int], session: Session
+    ) -> None:
+        topic_filter, qos = subscription
+        handler = self._get_handler(session)
+        if handler is None:
+            return
+        tasks = [
+            asyncio.ensure_future(
+                handler.mqtt_publish(
+                    retained.topic, retained.data, min(qos, retained.qos or qos), retain=True
+                )
+            )
+            for topic, retained in list(self._retained_messages.items())
+            if self._matches(topic, topic_filter) and topic_allowed(session, topic, quiet=True)
+        ]
+        if tasks:
+            await asyncio.wait(tasks)
+
+
+def _build_config(
+    ca_cert: Path,
+    server_cert: Path,
+    server_key: Path,
+    port: int,
+) -> dict:
+    return {
+        "listeners": {
+            "default": {
+                "type": "tcp",
+                "bind": "127.0.0.1:11883",
+                "ssl": False,
+            },
+            "tls": {
+                "type": "tcp",
+                "bind": f"0.0.0.0:{port}",
+                "ssl": True,
+                "cafile": str(ca_cert),
+                "certfile": str(server_cert),
+                "keyfile": str(server_key),
+            },
+        },
+        "sys_interval": 10,
+        # Plugins are loaded directly from this dict (amqtt 0.11.x). The cert-auth plugin is the
+        # sole authentication authority — there is NO anonymous fallback: a TLS client is
+        # identified by its verified cert, and the non-TLS internal listener is trusted by the
+        # same plugin (ssl_object is None). The topic ACL scopes each client to its own
+        # project+device namespace. When plugins come from this dict, the legacy "auth" /
+        # "topic-check" config sections are intentionally omitted (amqtt ignores them).
+        "plugins": {
+            "nff_fleet.broker.auth.NffCertAuthPlugin": {},
+            "nff_fleet.broker.acl.NffTopicAclPlugin": {},
+        },
+    }
+
+
+def _listener_already_up(port: int, host: str = "127.0.0.1") -> bool:
+    """Return True if a live TCP listener is already bound to ``port``.
+
+    A bind-probe is unreliable here: on Windows ``SO_REUSEADDR`` lets a second ``bind()``
+    succeed even when the port is held by a live socket, so it false-negatives the very zombie
+    we are guarding against. A short ``connect()`` is the portable signal — it only succeeds
+    when something is actually accepting connections. The TLS listener binds ``0.0.0.0`` so a
+    loopback connect reaches it.
+    """
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.settimeout(0.25)
+        return s.connect_ex((host, port)) == 0
+
+
+async def start_broker() -> Broker:
+    global _broker_instance
+    # Fail loud on a zombie instance instead of silently colliding: a stale fleet still holding
+    # the MQTT TLS port shadows this one, the internal router can't relay, devices hang, and
+    # HTTP returns silent 404s. Abort with remediation rather than start a half-dead broker.
+    if _listener_already_up(settings.mqtt_port):
+        raise RuntimeError(
+            f"MQTT port {settings.mqtt_port} already has a live listener — a zombie nff-fleet "
+            f"is probably still running. Stop it before starting "
+            f"(Windows: netstat -ano | findstr :{settings.mqtt_port} ; "
+            f"Linux/macOS: lsof -ti:{settings.mqtt_port} | xargs kill)."
+        )
+    config = _build_config(
+        ca_cert=settings.tls_ca_cert,
+        server_cert=settings.tls_server_cert,
+        server_key=settings.tls_server_key,
+        port=settings.mqtt_port,
+    )
+    broker = NffBroker(config)
+    await broker.start()
+    _broker_instance = broker
+    logger.info("MQTT broker started on port %d", settings.mqtt_port)
+    return broker
+
+
+async def stop_broker() -> None:
+    global _broker_instance
+    if _broker_instance is not None:
+        await _broker_instance.shutdown()
+        _broker_instance = None
+        logger.info("MQTT broker stopped")
