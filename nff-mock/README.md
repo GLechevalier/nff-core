@@ -173,3 +173,5 @@ here; it goes through the existing fleet and nff-ota planes against the spawned 
 
 Quick start for each package is in its own README. The controller is wired into
 `docker-compose.dev.yml` as `nff-mock-controller` (`:3004`).
+
+<!-- merged into nff-observability -->
