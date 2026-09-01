@@ -1,4 +1,4 @@
-# nff-fleet
+# nff-fleet — merged into nff-observability
 
 Containerized Python microservice that gives an AI agent (Claude) real-time control over a fleet of IoT devices via MQTT.
 
