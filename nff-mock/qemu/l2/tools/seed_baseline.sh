@@ -26,7 +26,11 @@ case "$SRC" in
   *.ino) FRAMEWORK=arduino; PROJ_NAME=ardproj ;;
   *)     echo "!! unknown source type: $SRC (expected .c or .ino)"; exit 2 ;;
 esac
-REPO="$(cd "$(dirname "$0")/../../../.." && pwd)"          # repo root (…/nff_cli_mcp)
+REPO="$(cd "$(dirname "$0")/../../../.." && pwd)"          # …/nff-observability (holds nff-mock/)
+# nff-sdk-c lives at the WORKSPACE root (a sibling of nff-observability). The build
+# recipe expects the VPS l2-workspace layout — /repo/nff-mock and /repo/nff-sdk-c side
+# by side — so it gets a second, nested bind below.
+SDKC="$(cd "$REPO/.." && pwd)/nff-sdk-c"
 FLEET_URL="${FLEET_URL:-http://localhost:3001}"
 FLEET_SECRET="${FLEET_SECRET:-dev-fleet-secret}"
 FW_VERSION="${FW_VERSION:-1.0.0}"
@@ -73,6 +77,7 @@ echo ">> compiling ($FRAMEWORK, ${IDF_IMAGE}) — cold ~15 min, warm ~1 min (reu
 # is then just an unused env var. So this whole block is a no-op off Windows.
 win_path() { cygpath -w "$1" 2>/dev/null || printf '%s' "$1"; }
 REPO_MNT="$(win_path "$REPO")"
+SDKC_MNT="$(win_path "$SDKC")"
 WORK_MNT="$(win_path "$WORK")"
 if [ "$FRAMEWORK" = espidf ]; then
   inner="SKETCH_DIR=/work PROJ=$proj ${artifact_env}bash /repo/nff-mock/qemu/l2/example-espidf/build_espidf.sh"
@@ -80,7 +85,7 @@ else
   inner="SKETCH_DIR=/work ARDUINO_VER=\"$ARDUINO_VER\" PROJ=$proj ${artifact_env}bash /repo/nff-mock/qemu/l2/example-arduino/build_arduino_shim.sh"
 fi
 MSYS_NO_PATHCONV=1 docker run --rm -e NFF_BUILD_ID="$BUILD_ID" -e NFF_FW_VERSION="$FW_VERSION" \
-  -v "$REPO_MNT":/repo:ro -v "$WORK_MNT":/work $cache_mounts "$IDF_IMAGE" \
+  -v "$REPO_MNT":/repo:ro -v "$SDKC_MNT":/repo/nff-sdk-c:ro -v "$WORK_MNT":/work $cache_mounts "$IDF_IMAGE" \
   bash -lc "$inner"
 
 MERGED="$WORK/out/$PROJ_NAME/merged.bin"
