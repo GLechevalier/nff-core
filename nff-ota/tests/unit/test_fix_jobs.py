@@ -83,6 +83,31 @@ async def test_get_status_missing_job(mock_supabase):
     assert "not found" in res.error
 
 
+async def test_get_status_waits_until_terminal(mock_supabase, monkeypatch):
+    # wait_seconds blocks server-side: the polling agent has no timer, so the wait lives here.
+    running = {"id": "job-1", "status": "running", "device_id": "dev-1", "version": "2.0.0"}
+    done = dict(running, status="done", deployment_id="dep-1")
+    mock_supabase.table.return_value.execute = AsyncMock(
+        side_effect=[_resp([running]), _resp([done])]
+    )
+    sleep = AsyncMock()
+    monkeypatch.setattr(ops.asyncio, "sleep", sleep)
+    res = await ops.get_firmware_fix_status("job-1", wait_seconds=60)
+    assert res.status == "done"
+    assert res.deployment_id == "dep-1"
+    sleep.assert_awaited_once()
+
+
+async def test_get_status_wait_zero_reads_once(mock_supabase, monkeypatch):
+    running = {"id": "job-1", "status": "running", "device_id": "dev-1", "version": "2.0.0"}
+    mock_supabase.table.return_value.execute = AsyncMock(return_value=_resp([running]))
+    sleep = AsyncMock()
+    monkeypatch.setattr(ops.asyncio, "sleep", sleep)
+    res = await ops.get_firmware_fix_status("job-1")
+    assert res.status == "running"
+    sleep.assert_not_awaited()
+
+
 async def test_worker_claims_runs_and_finishes(mock_supabase, monkeypatch):
     job = {
         "id": "job-1", "device_id": "dev-1", "version": "2.0.0", "source": SRC,

@@ -94,8 +94,9 @@ def build_failure_playbook(dep: dict, jobs: list[dict], *, repo_full_name: str |
             "source=<the full fixed source>)`. `version` MUST be a bare semver strictly greater "
             "than the version of the source you just read.\n"
             "4. `submit_firmware_fix` only ENQUEUES the build — it returns a `job_id` with "
-            "`status='pending'`. Poll `get_firmware_fix_status(job_id=...)` until `status` is "
-            "`done` or `error`. On `error`, read the `error` field, correct the source, and "
+            "`status='pending'`. Call `get_firmware_fix_status(job_id=..., wait_seconds=60)` "
+            "repeatedly — it blocks server-side, so never sleep or set a timer yourself — until "
+            "`status` is `done` or `error`. On `error`, read the `error` field, correct the source, and "
             "resubmit at a higher semver. Do NOT report success until you have seen "
             "`status='done'` with `fault_remaining` false."
         )

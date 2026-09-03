@@ -10,10 +10,12 @@ sketch, adopts it, and crash-loops iff the held source is buggy.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
 import tempfile
+import time
 import uuid
 from pathlib import Path
 
@@ -398,9 +400,23 @@ async def submit_firmware_fix(
     return FirmwareFixJob(job_id=job_id, status="pending", device_id=device_id, version=version)
 
 
-async def get_firmware_fix_status(job_id: str) -> FirmwareFixJob:
-    """Read the status of a firmware fix job enqueued by ``submit_firmware_fix``."""
-    job = await jobs.get(job_id)
-    if job is None:
-        return FirmwareFixJob(job_id=job_id, status="error", error=f"job {job_id!r} not found")
-    return job
+# Longest server-side wait a single status call may block. Well under the Docker Desktop proxy's
+# idle window (~7 min, see nff-github config.l2_compile_keepalive_interval) and MCP tool timeouts.
+FIX_STATUS_MAX_WAIT_S = 90
+
+
+async def get_firmware_fix_status(job_id: str, wait_seconds: int = 0) -> FirmwareFixJob:
+    """Read the status of a firmware fix job enqueued by ``submit_firmware_fix``.
+
+    ``wait_seconds`` > 0 blocks server-side (capped at ``FIX_STATUS_MAX_WAIT_S``) until the job is
+    terminal or the wait elapses. The agent that polls this has NO timer of its own (its tool
+    allowlist is MCP-only), so "poll every 30-60s" is only actionable if the wait lives here.
+    """
+    deadline = time.monotonic() + min(max(int(wait_seconds or 0), 0), FIX_STATUS_MAX_WAIT_S)
+    while True:
+        job = await jobs.get(job_id)
+        if job is None:
+            return FirmwareFixJob(job_id=job_id, status="error", error=f"job {job_id!r} not found")
+        if job.status in ("done", "error") or time.monotonic() >= deadline:
+            return job
+        await asyncio.sleep(5)

@@ -32,7 +32,8 @@ def build_crash_repair_prompt(device_id: str, scenario: str | None) -> str:
         f"semver (major.minor.patch) strictly greater than the version the device runs now — "
         f"the device's anti-downgrade gate rejects anything not strictly higher.\n"
         f"4. That tool returns a job ({{\"job_id\", \"status\": \"pending\"}}) — the real "
-        f"compile takes several minutes. Poll `get_firmware_fix_status(job_id=...)` every "
-        f"~30-60s until `status` is `done` or `error`. On `done`, `fault_remaining=true` means "
+        f"compile takes several minutes. Call `get_firmware_fix_status(job_id=..., wait_seconds=60)` "
+        f"repeatedly — it blocks server-side, so never sleep or set a timer yourself — until "
+        f"`status` is `done` or `error`. On `done`, `fault_remaining=true` means "
         f"the bug is still present, so fix the source and submit again with a higher version."
     )

@@ -37,8 +37,9 @@ async def submit_firmware_fix(
     This is ASYNCHRONOUS: compiling the firmware for real takes many minutes, so the tool
     does NOT wait for the build. It validates your request and returns a job handle right
     away — ``{"job_id": ..., "status": "pending"}`` — or ``{"status": "error", "error": ...}``
-    if the version/target is invalid (nothing was enqueued in that case). You MUST then poll
-    ``get_firmware_fix_status(job_id=...)`` every ~30-60s until ``status`` becomes ``done`` or
+    if the version/target is invalid (nothing was enqueued in that case). You MUST then call
+    ``get_firmware_fix_status(job_id=..., wait_seconds=60)`` repeatedly — it blocks server-side,
+    so never sleep or set a timer yourself — until ``status`` becomes ``done`` or
     ``error``. On ``done``, check ``fault_remaining``: if it is true the build still found the
     bug in your source (the fix did not work and the device will keep crash-looping), so edit
     the source and submit again with a higher version.
@@ -46,14 +47,17 @@ async def submit_firmware_fix(
     return await _core.submit_firmware_fix(device_id, version, source, changelog)
 
 
-async def get_firmware_fix_status(job_id: str) -> FirmwareFixJob:
+async def get_firmware_fix_status(job_id: str, wait_seconds: int = 0) -> FirmwareFixJob:
     """Poll the status of a firmware fix started with ``submit_firmware_fix``.
 
     Returns ``{"job_id", "status", ...}`` where ``status`` is one of ``pending`` (queued),
     ``running`` (compiling+deploying now), ``done`` (rolled out — check ``fault_remaining``),
-    or ``error`` (``error`` explains why). Keep polling every ~30-60s while ``status`` is
-    ``pending`` or ``running``; a real firmware build takes many minutes, so do not give up
-    early. On ``done`` with ``fault_remaining`` false the fix shipped and the device should
-    recover on its next OTA cycle.
+    or ``error`` (``error`` explains why).
+
+    Pass ``wait_seconds=60`` to block SERVER-SIDE until the job finishes or the wait elapses
+    (max 90), then call again while ``status`` is ``pending`` or ``running``. Never sleep or
+    set a timer client-side — this tool is the wait. A real firmware build takes minutes, so
+    do not give up early. On ``done`` with ``fault_remaining`` false the fix shipped and the
+    device should recover on its next OTA cycle.
     """
-    return await _core.get_firmware_fix_status(job_id)
+    return await _core.get_firmware_fix_status(job_id, wait_seconds=wait_seconds)
