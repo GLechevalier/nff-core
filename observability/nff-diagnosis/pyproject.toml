@@ -1,0 +1,47 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "nff-diagnosis"
+version = "0.1.4"
+description = "Diagnosis layer for ESP32 embedded device crashes"
+requires-python = ">=3.11"
+authors = [{ name = "Gauthier Lechevalier", email = "gauthier.lechevalier26@gmail.com" }]
+dependencies = [
+    "pydantic>=2.0",
+    "pydantic-settings>=2.0",
+    "click>=8.0",
+    "rich>=13.0",
+    "fastapi>=0.111",
+    "uvicorn[standard]>=0.30",
+    "httpx>=0.27",
+    "anthropic>=0.28",
+    "python-dotenv>=1.0",
+    "mcp>=1.24.0,<2",  # 2.0 removed mcp.server.fastmcp
+]
+
+[project.scripts]
+nff-diag = "nff_diagnosis.cli.main:cli"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "ruff>=0.4",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+addopts = "-m 'not elf'"
+markers = [
+    "elf: needs a real ESP32 ELF + xtensa-esp32-elf-addr2line for true symbolication",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP"]

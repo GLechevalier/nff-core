@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+dist/
+build/
+
+# Caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Secrets & local config — never bake into an image (provided via env_file at runtime)
+.env
+*.pem
+
+# VCS / dev
+.git/
+.github/
+.claude/
+graphify-out/
+tests/
+docs/
+*.md
+!README.md
+
+# Runtime data (mounted as a volume instead)
+data/

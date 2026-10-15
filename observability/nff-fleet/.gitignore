@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg
+*.egg-info/
+dist/
+build/
+build_ota/
+build_v2/
+.eggs/
+.venv/
+venv/
+env/
+
+# Environment
+.env
+.env*
+
+# Data volumes (runtime-generated, contain secrets)
+/data/
+
+# Arduino / ESP32 build artifacts
+sketches/**/build/
+sketches/**/credentials.h
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+build_*/

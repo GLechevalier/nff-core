@@ -1,0 +1,42 @@
+# Launch both vulnerable targets on an isolated network for a repeatable demo.
+#
+# Ports are published to distinct loopback addresses so each target keeps the
+# *standard* ports the pentester vuln-tree keys on (port_scan checks 22/23/5683):
+#   nff-mock-linux → 127.0.0.1   (telnet 23, ssh 22, http 80, coap 5683/udp)
+#   nff-mock-esp32 → 127.0.0.2   (http 80, mqtt 1883)
+# Both live inside 127.0.0.0/8, which the pentester .env.demo allowlist covers.
+# (127.0.0.2 is a real loopback alias on Linux/the demo Pi.)
+#
+#   docker compose -f docker-compose.demo.yml up --build
+#
+# Then point the pentester at 127.0.0.1 (linux) or 127.0.0.2 (esp32).
+
+services:
+  nff-mock-linux:
+    build:
+      context: .
+      dockerfile: Dockerfile.linux
+    image: nff-mock-linux:demo
+    networks: [nff-demo]
+    ports:
+      - "127.0.0.1:22:22"
+      - "127.0.0.1:23:23"
+      - "127.0.0.1:80:80"
+      - "127.0.0.1:5683:5683/udp"
+    restart: unless-stopped
+
+  nff-mock-esp32:
+    build:
+      context: .
+      dockerfile: Dockerfile.esp32
+    image: nff-mock-esp32:demo
+    networks: [nff-demo]
+    ports:
+      - "127.0.0.2:80:80"
+      - "127.0.0.2:1883:1883"
+    restart: unless-stopped
+
+networks:
+  nff-demo:
+    driver: bridge
+    internal: true   # no venue uplink — targets cannot reach the outside network

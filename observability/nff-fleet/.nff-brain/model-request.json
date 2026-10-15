@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "sessionId": "e10c2246-5b50-483a-a9cf-93d04b2b2b03",
+  "cwd": "D:\\IntraMap\\Carto\\R_D\\MCPIOT\\nff_cli_mcp\\nff-fleet",
+  "model": "fable",
+  "novelty": 0.9657904692330772,
+  "ts": "2026-08-13T22:09:51.245Z",
+  "source": "prompt",
+  "top": [
+    {
+      "id": "gauth",
+      "title": "gauth",
+      "score": 0.05986667884211487,
+      "degree": 0,
+      "strength": 0.2
+    }
+  ]
+}

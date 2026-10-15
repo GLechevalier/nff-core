@@ -1,0 +1,3 @@
+# Never convert line endings on checkout: shell/python/config files here run
+# inside Linux containers via bind mounts, where CRLF breaks them.
+* -text
