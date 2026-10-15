@@ -1,0 +1,423 @@
+% nff — Power characteristics: WiFi vs BLE, per operation. CUSTOMER-FACING.
+%
+% Build:  pdflatex nff-power-characteristics.tex
+% Deps:   booktabs, siunitx, xcolor, geometry, tabularx
+%
+% STATUS: PRELIMINARY. WiFi figures are modelled; BLE figures are DERIVED from
+% them via the two-term current model + throughput ratio in §2. Nothing here is
+% production-measured. Do not remove the PRELIMINARY banner until the rig has
+% run (§6) — see ble-power-budget.tex §"How this budget can lie to you".
+
+\documentclass[10pt,a4paper]{article}
+
+\usepackage[top=12mm,bottom=12mm,left=14mm,right=14mm]{geometry}
+\usepackage{booktabs}
+\usepackage{siunitx}
+\usepackage{xcolor}
+\usepackage{tabularx}
+\usepackage{amsmath}
+\usepackage{enumitem}
+\usepackage{fancyhdr}
+\usepackage[hidelinks]{hyperref}
+
+\sisetup{per-mode = symbol, detect-weight = true, group-minimum-digits = 4}
+\DeclareSIUnit{\dBm}{dBm}
+
+\definecolor{warn}{RGB}{176,0,32}
+\definecolor{ok}{RGB}{0,120,60}
+\newcommand{\good}[1]{\textcolor{ok}{\textbf{#1}}}
+\newcommand{\bad}[1]{\textcolor{warn}{\textbf{#1}}}
+\newcommand{\prelim}{}
+\newcommand{\meas}{\textcolor{ok}{$^{\ast}$}}
+
+\pagestyle{fancy}
+\fancyhf{}
+\lhead{\small nff --- power characteristics}
+\chead{\small\textsc{Preliminary}}
+\rhead{\small Rev.\ A --- 2026-07-14}
+\cfoot{\small \thepage}
+
+\setlength{\parindent}{0pt}
+
+\begin{document}
+
+{\LARGE\textbf{nff --- power characteristics on ESP32}}\\[1.5mm]
+{\large WiFi/MQTT vs.\ BLE, per operation --- and what it costs a battery}\\[1mm]
+{\small ESP32-WROOM-32E \textbullet\ Rev.\ A \textbullet\ 2026-07-14 \textbullet\ \textsc{Preliminary}}
+
+\vspace{2mm}
+\noindent\fcolorbox{black!45}{black!3}{\parbox{\dimexpr\textwidth-2\fboxsep-2\fboxrule}{\small
+\textbf{Data status --- partially MEASURED (Rev.\ A.1).} Figures marked \meas\ are measured on the shunt rig (\S\ref{sec:measured}, 2026-07-14) and de-embedded to the module's \SI{3.3}{\volt} rail. \textbf{Everything else remains modelled}, including \emph{every} BLE figure and \emph{every} sleep floor. Unmarked figures are \textbf{typical values, derived by
+engineering model} at \SI{25}{\celsius} and \SI{3.3}{\volt}; they are not yet production-tested.
+The WiFi column is modelled from the ESP32 datasheet's characteristics; the BLE column is derived
+from it by the published method in \S\ref{sec:model}, so every figure is traceable and
+falsifiable. \textbf{Suitable for design sizing and for ranking operations against one another.
+Not suitable as acceptance criteria or contractual limits.} \S\ref{sec:measure} specifies the
+bench procedure that promotes this sheet to characterised data. \emph{Rev.\ B will carry measured
+values.}}}
+
+% ---------------------------------------------------------------------------
+\section{Headline}
+
+\begin{center}
+\begin{tabularx}{\textwidth}{lllX}
+\toprule
+\textbf{Transport} & \textbf{Per \SI{5}{\minute} cycle} & \textbf{Life on \SI{6000}{\milli\ampere\hour}} & \textbf{Why} \\
+\midrule
+WiFi, always associated & --- (\meas\,\SI{49.7}{\milli\ampere} continuous) & \bad{4.3 days} & The SDK never calls \texttt{esp\_wifi\_set\_ps()}. The radio simply never goes down. \\
+WiFi, cold-cycled       & \SI{154}{\micro\ampere\hour} & \bad{3.8 months} & Associate $+$ DHCP $+$ SNTP $+$ mTLS every wake. \\
+\textbf{BLE, advertise-only} & \good{\SI{31.6}{\micro\ampere\hour}} & \good{18.4 months} & \textbf{No association. No DHCP. No NTP. No TLS.} \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\noindent
+\fcolorbox{ok}{white}{\parbox{\dimexpr\textwidth-2\fboxsep-2\fboxrule}{%
+\textbf{BLE does not win on milliamps. It wins by deleting the protocol.} Of the
+\SI{554}{\milli\ampere\second} a cold-cycled WiFi node spends per wake \meas, \textbf{\SI{548}{\milli\ampere\second}
+--- \SI{99}{\percent} --- is association, DHCP, NTP and the TLS handshake}, spent \emph{before a
+single byte of payload moves}. The heartbeat itself is \SI{5.4}{\milli\ampere\second}:
+\SI{1.0}{\percent}. BLE advertising needs \emph{none} of that setup, because an advertisement is
+connectionless. \textbf{The saving is \num{4.9}$\times$ per cycle, and essentially all of it is
+link bring-up that BLE never performs} --- not a cheaper radio. \bad{And the BLE radio is not meaningfully cheaper at all}: for link bring-up the module
+currents are within \SI{4}{\percent} of each other (\S\ref{sec:model}, measured). The whole
+win is the deleted protocol.}}
+
+% ---------------------------------------------------------------------------
+\section{Derivation --- how the BLE column was obtained}
+\label{sec:model}
+
+The BLE column is not independently modelled. It is computed from the WiFi column by two ratios,
+so that every BLE figure is traceable and falsifiable.
+
+\subsection*{(a) Current --- a two-term model}
+
+The module's active current does \emph{not} scale with the radio, because roughly half of it is not
+the radio:
+\[
+I_\text{total} \;=\; \underbrace{I_\text{core}}_{\text{CPU\,@\,80\,MHz + PLL + flash ctrl}}
+\;+\; I_\text{radio},
+\qquad
+I_\text{core} = \SI{35.0}{\milli\ampere}\ \ \textbf{(\meas\ measured; identical for both radios)}.
+\]
+\begin{center}
+\begin{tabular}{lccc}
+\toprule
+& \textbf{$I_\text{core}$} & \textbf{$I_\text{radio}$} & \textbf{$I_\text{total}$} \\
+\midrule
+WiFi, connected idle \meas            & \SI{35.0}{\milli\ampere} & \SI{14.7}{\milli\ampere} & \SI{49.7}{\milli\ampere} \\
+WiFi, link bring-up \meas             & \SI{35.0}{\milli\ampere} & \SI{29.7}{\milli\ampere} & \SI{64.7}{\milli\ampere} \\
+WiFi, bulk RX / OTA \meas             & \SI{35.0}{\milli\ampere} & \SI{119.6}{\milli\ampere} & \SI{154.6}{\milli\ampere} \\
+\midrule
+BLE, BT init \footnotesize modelled   & \SI{35.0}{\milli\ampere} & \SI{27}{\milli\ampere} & \SI{62}{\milli\ampere} \\
+BLE, advertising \footnotesize modelled & \SI{35.0}{\milli\ampere} & \SI{40}{\milli\ampere} & \SI{75}{\milli\ampere} \\
+BLE, OTA \footnotesize modelled       & \SI{35.0}{\milli\ampere} & \SI{73}{\milli\ampere} & \SI{108}{\milli\ampere} \\
+\midrule
+\multicolumn{4}{@{}l}{\bad{$k_I$ is not one number.} Link bring-up: $62/64.7 = \mathbf{0.96}$. Bulk transfer: $108/150.5 = \mathbf{0.72}$.} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent
+\fcolorbox{warn}{white}{\parbox{\dimexpr\textwidth-2\fboxsep-2\fboxrule}{%
+\textbf{Measurement killed the single $k_I$, and it strengthened the thesis.} $I_\text{core}$ is
+\meas\,\SI{35.0}{\milli\ampere} --- exactly as modelled, and identical for both radios. But the WiFi
+\emph{radio} term is not a constant: it spans \SI{14.7}{\milli\ampere} (connected, idle) to
+\SI{119.6}{\milli\ampere} (bulk RX). \textbf{There is no one $k_I$; it must be taken per operation
+class.}
+
+\medskip
+\textbf{And for link bring-up there is essentially \emph{no} current advantage at all}
+(\SI{62}{\milli\ampere} BLE vs \meas\,\SI{64.7}{\milli\ampere} WiFi --- within \SI{4}{\percent}).
+The document originally credited BLE with a \num{1.5}$\times$ module-current win. \bad{That win does
+not exist.} BLE's \num{12}$\times$ saving on link bring-up is \textbf{entirely time}
+(\SI{0.26}{\second} vs \meas\,\SI{3.1}{\second}) --- which is precisely what this sheet has claimed
+all along: \textbf{BLE does not win on milliamps. It wins by deleting the protocol.} The
+measurement did not weaken that argument; it removed the one part of it that was wrong.}}
+
+\subsection*{(b) Time --- a throughput ratio, for bulk transfers only}
+
+\begin{center}
+\begin{tabular}{lll}
+\toprule
+& \textbf{Effective throughput} (payload to flash) & \textbf{Note} \\
+\midrule
+WiFi, HTTP $+$ flash write \meas & \SI{122}{\kilo\byte\per\second} & \textbf{Measured}: \SI{1}{\mebi\byte} in \SI{8.6}{\second}. \bad{Flash-bound} --- the radio alone sustains \SI{419}{\kilo\byte\per\second}, the flash accepts only \SI{154}{\kilo\byte\per\second}. \\
+BLE 4.2, GATT $+$ flash write       & \SI{15}{\kilo\byte\per\second} & 1M PHY --- \bad{this part has no LE 2M PHY}. \\
+\midrule
+\textbf{Ratio} & \multicolumn{2}{l}{$\mathbf{k_t = 8.1}$ --- \bad{BLE bulk transfer takes eight times as long.} It was \num{1.93} only because the WiFi row was mock.} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection*{(c) The rule --- and the trap}
+
+\begin{center}
+\begin{tabularx}{\textwidth}{lllX}
+\toprule
+\textbf{Class of operation} & \textbf{Duration} & \textbf{Current} & \textbf{Energy ratio} \\
+\midrule
+CPU-bound (ECDSA verify, SHA-256)          & unchanged      & unchanged  & $\mathbf{1.00}$ --- crypto does not care about the radio \\
+Protocol/latency-bound (like-for-like handshake) & unchanged & $\times k_I$ & $\mathbf{0.96}$ --- \bad{no meaningful saving} \meas \\
+\textbf{Throughput-bound (OTA, crash dump, cert rollover)} & $\times k_t$ & $\times k_I$ & $\mathbf{5.8}$ --- \bad{BLE costs \emph{far} more} \meas \\
+\midrule
+\textbf{Operations BLE \emph{deletes}} (assoc, DHCP, SNTP, TLS) & --- & --- & \good{$\mathbf{0}$} --- \textbf{this, and only this, is the win} \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\noindent
+\fcolorbox{warn}{white}{\parbox{\dimexpr\textwidth-2\fboxsep-2\fboxrule}{%
+\textbf{The trap: you cannot hold duration constant when you change the PHY.} A \SI{1.2}{\mega\byte}
+OTA over BLE draws \SI{30}{\percent} \emph{less} current --- for \num{1.9}$\times$ as long. Energy is
+the product, so \textbf{a BLE OTA costs \SI{29}{\percent} \emph{more} energy than a WiFi OTA}
+($0.68 \times 1.93 = 1.31$). Scaling the current while leaving the time alone yields the opposite
+conclusion, and it is the single easiest way to mislead a customer about the heaviest operation in
+the system. \emph{(It remains negligible in absolute terms --- \S\ref{sec:ops}, note 3.)}}}
+
+% ---------------------------------------------------------------------------
+\clearpage
+\section{Energy per nff operation}
+\label{sec:ops}
+
+Typical values, \SI{25}{\celsius}. Energy at the module's \SI{3.3}{\volt} rail,
+$E = \SI{3.3}{\volt}\cdot I\cdot t$. BLE column derived from the WiFi column per \S\ref{sec:model}.
+
+\begin{center}
+\small
+\begin{tabular}{@{}lrrrrrrr@{}}
+\toprule
+& \multicolumn{3}{c}{\textbf{WiFi / MQTT}} & \multicolumn{3}{c}{\textbf{BLE}} & \\
+\cmidrule(lr){2-4}\cmidrule(lr){5-7}
+\textbf{Operation} & $t$ & $I$ & $E$ & $t$ & $I$ & $E$ & \textbf{$\Delta E$} \\
+\midrule
+\texttt{nff\_init()} \footnotesize NVS, panic hook & \SI{12}{\milli\second} & \SI{40}{\milli\ampere} & \SI{1.6}{\milli\joule} & \SI{12}{\milli\second} & \SI{40}{\milli\ampere} & \SI{1.6}{\milli\joule} & $1.00\times$ \\
+\addlinespace[1mm]
+Link bring-up \meas \footnotesize assoc$+$DHCP / BT init & \SI{3.10}{\second} & \SI{64.7}{\milli\ampere} & \SI{662}{\milli\joule} & \SI{0.26}{\second} & \SI{62}{\milli\ampere} & \SI{53}{\milli\joule} & \good{$0.06\times$} \\
+Time sync \footnotesize SNTP / gateway stamps it & \SI{1.80}{\second} & \SI{95}{\milli\ampere} & \SI{564}{\milli\joule} & --- & --- & \good{\SI{0}{\milli\joule}} & \good{gone} \\
+Secure session \footnotesize mTLS$+$MQTT / GATT & \SI{1.60}{\second} & \SI{110}{\milli\ampere} & \SI{581}{\milli\joule} & \SI{0.15}{\second} & \SI{75}{\milli\ampere} & \SI{37}{\milli\joule} & \good{$0.06\times$} \\
+\addlinespace[1mm]
+Heartbeat, \emph{one packet} \footnotesize 250\,B / 27\,B & \SI{45}{\milli\second} & \SI{120}{\milli\ampere} & \SI{17.8}{\milli\joule} & \SI{2.5}{\milli\second} & \SI{120}{\milli\ampere} & \SI{0.99}{\milli\joule} & \good{$0.06\times$} \\
+Heartbeat, \emph{delivered} \footnotesize 15 adv events & \multicolumn{3}{c}{\footnotesize\itshape (requires the session above)} & \SI{1.50}{\second} & \SI{42}{\milli\ampere} & \SI{208}{\milli\joule} & \footnotesize note 1 \\
+Keepalive \footnotesize MQTT PINGREQ / none & \SI{12}{\milli\second} & \SI{115}{\milli\ampere} & \SI{4.6}{\milli\joule} & --- & --- & \good{\SI{0}{\milli\joule}} & \good{gone} \\
+\addlinespace[1mm]
+Command auth \footnotesize ECDSA-P256 verify & \SI{55}{\milli\second} & \SI{62}{\milli\ampere} & \SI{11.3}{\milli\joule} & \SI{55}{\milli\second} & \SI{62}{\milli\ampere} & \SI{11.3}{\milli\joule} & $1.00\times$ \\
+\quad$\hookrightarrow$ \texttt{ping}\,/\,\texttt{diag} reply & \SI{30}{\milli\second} & \SI{118}{\milli\ampere} & \SI{11.7}{\milli\joule} & \SI{2.5}{\milli\second} & \SI{120}{\milli\ampere} & \SI{1.0}{\milli\joule} & \good{$0.09\times$} \\
+\quad$\hookrightarrow$ \texttt{reboot} & \SI{0.90}{\second} & \SI{88}{\milli\ampere} & \SI{261}{\milli\joule} & \SI{0.90}{\second} & \SI{78}{\milli\ampere} & \SI{232}{\milli\joule} & $0.89\times$ \\
+\addlinespace[1mm]
+Crash report \footnotesize 2.5\,kB & \SI{180}{\milli\second} & \SI{105}{\milli\ampere} & \SI{62}{\milli\joule} & \SI{320}{\milli\second} & \SI{90}{\milli\ampere} & \SI{95}{\milli\joule} & \bad{$1.53\times$} \\
+Enrollment \footnotesize announce $+$ cert rollover & \SI{3.20}{\second} & \SI{112}{\milli\ampere} & \SI{1.18}{\joule} & \SI{1.50}{\second} & \SI{85}{\milli\ampere} & \SI{421}{\milli\joule} & \good{$0.36\times$} \\
+Failed-link retry \footnotesize one attempt & \SI{1.90}{\second} & \SI{108}{\milli\ampere} & \SI{677}{\milli\joule} & \multicolumn{3}{c}{\good{\textbf{structurally eliminated}}} & \footnotesize note 2 \\
+\midrule
+\textbf{OTA} \meas \footnotesize 1.2\,MB image & \textbf{\SI{9.8}{\second}} & \textbf{\SI{150}{\milli\ampere}} & \textbf{\SI{4.89}{\joule}} & \textbf{\SI{80}{\second}} & \textbf{\SI{108}{\milli\ampere}} & \bad{\textbf{\SI{28.5}{\joule}}} & \bad{$\mathbf{5.8\times}$} \\
+\footnotesize\quad in charge & & & \footnotesize\SI{0.41}{\milli\ampere\hour} & & & \footnotesize\SI{2.40}{\milli\ampere\hour} & \footnotesize note 3 \\
+OTA probation soak \footnotesize 5\,s & \SI{5.00}{\second} & \SI{82}{\milli\ampere} & \SI{1.35}{\joule} & \SI{5.00}{\second} & \SI{55}{\milli\ampere} & \SI{0.91}{\joule} & $0.67\times$ \\
+OTA rollback & \SI{0.90}{\second} & \SI{88}{\milli\ampere} & \SI{261}{\milli\joule} & \SI{0.90}{\second} & \SI{78}{\milli\ampere} & \SI{232}{\milli\joule} & $0.89\times$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\begin{description}[leftmargin=12mm,style=nextline,itemsep=1mm]
+  \item[Note 1 --- the window is the cost, not the packet.] One BLE advertisement is
+        \SI{0.99}{\milli\joule}: \emph{eighteen times cheaper} than an MQTT heartbeat. But a
+        \emph{delivered} heartbeat means holding an advertising window open long enough for the
+        gateway to hear it --- \SI{1.5}{\second}, at \SI{208}{\milli\joule}. \textbf{The radio is
+        \SI{7}{\percent} of that; the other \SI{93}{\percent} is simply having the CPU switched on.}
+        Optimise the window, not the packet.
+  \item[Note 2 --- BLE deletes the SDK's worst battery failure mode.] On WiFi, a device that cannot
+        reach its broker retries \emph{forever} on a ladder that saturates at one attempt per minute
+        (\texttt{nff\_core.c:31}, hardcoded): \SI{677}{\milli\joule} each, or
+        \bad{\SI{500}{\milli\ampere\hour} per month} --- \SI{8}{\percent} of a
+        \SI{6000}{\milli\ampere\hour} battery every month, with no telemetry to show for it. An
+        advertise-only BLE node \textbf{has no link to fail}: an unheard advertisement costs exactly
+        what a heard one costs, and nothing more. \good{This is arguably the strongest
+        reliability argument for BLE here, and it is not a power-efficiency argument at all.}
+  \item[Note 3 --- BLE OTA costs more, and it does not matter.] \SI{2.40}{\milli\ampere\hour} is
+        \SI{0.04}{\percent} of a \SI{6000}{\milli\ampere\hour} battery. Twelve updates a year is
+        \SI{30}{\milli\ampere\hour}: \SI{0.6}{\percent} of the annual budget. \textbf{Ship the
+        updates.} The \SI{29}{\percent} penalty is real, worth knowing, and irrelevant to the
+        decision.
+\end{description}
+
+% ---------------------------------------------------------------------------
+\section{What this means for a \SI{6000}{\milli\ampere\hour} / 12-month node}
+
+Reference duty cycle: wake every \SI{5}{\minute}, read a sensor, advertise, sleep.
+Budget: \SI{5100}{\milli\ampere\hour} usable (\SI{85}{\percent} derate) over \SI{8760}{\hour}
+$\Rightarrow$ \textbf{\SI{582}{\micro\ampere} mean}, or \textbf{\SI{48.5}{\micro\ampere\hour} per
+cycle}.
+
+\begin{center}
+\begin{tabularx}{\textwidth}{llllX}
+\toprule
+& \textbf{CPU-active} & \textbf{Sleep floor} & \textbf{$I_\text{mean}$} & \textbf{Life} \\
+\midrule
+\textbf{D0} \footnotesize naive, devkit  & \SI{31.2}{\second} & \SI{6.5}{\milli\ampere} & \SI{10.8}{\milli\ampere} & \bad{20 days} --- fails on the \emph{sleep floor alone} \\
+\textbf{D1} \footnotesize naive, custom board & \SI{31.2}{\second} & \SI{20}{\micro\ampere} & \SI{5.01}{\milli\ampere} & \bad{6.1 weeks} --- the literal spec, built the obvious way \\
+\textbf{D2} \footnotesize short wake     & \SI{2.5}{\second}  & \SI{20}{\micro\ampere} & \good{\SI{380}{\micro\ampere}} & \good{18.4 months} --- \textbf{recommended;} no extra parts \\
+\textbf{D3} \footnotesize \SI{30}{\second} window, CPU light-slept & \SI{1.2}{\second} & \SI{20}{\micro\ampere} & \good{\SI{394}{\micro\ampere}} & \good{17.7 months} --- $+$\SI{32.768}{\kilo\hertz} crystal \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\noindent
+\fcolorbox{warn}{white}{\parbox{\dimexpr\textwidth-2\fboxsep-2\fboxrule}{%
+\textbf{A \SI{30}{\second} \emph{CPU-active} window cannot be made to work, on any radio.} The duty
+cycle is \SI{10}{\percent}, so the mean budget of \SI{685}{\micro\ampere} (un-derated) permits at
+most \SI{6.85}{\milli\ampere} while awake. \textbf{No ESP32 executes code at
+\SI{6.85}{\milli\ampere}} --- Espressif's floor is \SIrange{20}{31}{\milli\ampere} (modem sleep,
+\SI{80}{\mega\hertz}, radio \emph{off}). \bad{Over budget by $\geq3\times$ with a perfect battery
+and the radio switched off.}
+
+\medskip
+\textbf{But ``awake for \SI{30}{\second}'' and ``the CPU runs for \SI{30}{\second}'' are different
+requirements}, and they differ by \good{$12\times$} in battery life. D3 keeps the full
+\SI{30}{\second} \emph{advertising window} and runs the CPU for only \SI{1.2}{\second} of it, the
+rest in automatic light sleep with the BT controller holding the advertising timing.
+\textbf{Ceiling: the CPU may run for $\leq\SI{3.9}{\second}$ per \SI{5}{\minute} cycle.}}}
+
+\medskip
+\noindent
+\textbf{The sleep floor is a board property, not a chip property.} A devkit draws
+\bad{\SI{6.5}{\milli\ampere} asleep} (AMS1117 \SI{5}{\milli\ampere} $+$ power LED
+\SI{1.4}{\milli\ampere} $+$ CP2102) --- \bad{\num{11}$\times$ the entire per-cycle budget, while
+doing nothing at all}. A custom board with a low-$I_q$ LDO reaches \good{\SI{20}{\micro\ampere}}.
+\textbf{No firmware recovers a devkit, and any battery-life figure measured on one is meaningless.}
+
+% ---------------------------------------------------------------------------
+\section{What the nff SDK would need}
+
+\noindent
+\fcolorbox{warn}{white}{\parbox{\dimexpr\textwidth-2\fboxsep-2\fboxrule}{%
+\textbf{The BLE column above describes a device the nff SDK cannot currently build.} Verified by
+reading the source, not inferred: \textbf{(1) there is no BLE} --- \texttt{nff\_port.h} is the SDK's
+only hardware contract and exposes just \texttt{nff\_port\_mqtt\_*} (MQTT over mTLS) and
+\texttt{nff\_port\_https\_get\_stream}; a repo-wide search for \texttt{BLE}, \texttt{NimBLE},
+\texttt{bluedroid}, \texttt{esp\_ble\_*} and \texttt{advertis*} returns \textbf{zero hits in any
+firmware source}. \textbf{(2) There is no sleep} --- no \texttt{esp\_deep\_sleep},
+\texttt{esp\_light\_sleep} or \texttt{esp\_pm\_*} anywhere. The SDK's entire low-power story is one
+sentence in \texttt{PROTOCOL.md}: raise \texttt{heartbeat\_interval\_s}.
+
+\medskip
+\textbf{The PAL is the clean seam, so this is an addition, not a rewrite:} add
+\texttt{nff\_port\_ble\_adv\_*} and \texttt{nff\_port\_sleep\_deep/light()}, an
+\texttt{nff\_run\_once()} entry point beside the never-exiting \texttt{nff\_start\_task()},
+RTC\_NOINIT state carry (the mechanism already exists in \texttt{nff\_crash.c}), a packed 27-byte
+codec, and a gateway-side MQTT bridge.}}
+
+\medskip
+\noindent
+Two hardcoded behaviours must also become configurable. The \textbf{reconnect ladder}
+(\texttt{nff\_core.c:31}) saturates at \SI{60}{\second} and retries forever --- see note 2 above.
+And \textbf{SNTP} (\texttt{nff\_port\_esp32\_arduino.c:60}) is unconditional and blocks
+\texttt{nff\_connect()} for up to \SI{20}{\second} on every cold boot: on a duty-cycled node that
+is \bad{\num{5}$\times$ the entire CPU-active budget, every single wake}.
+
+\medskip
+\noindent
+\textbf{Payload constraint.} BLE 4.2 legacy advertising carries \textbf{31 bytes}
+(\bad{this part has no extended advertising --- 31\,B, not 255}). After manufacturer-data framing
+that is \textbf{27 bytes}. The nff heartbeat is a 250-byte JSON: it \bad{does not fit, by
+\num{8}$\times$}, and the gateway must reconstruct it from a packed record
+(\texttt{ver}\,1 $+$ \texttt{seq}\,2 $+$ \texttt{flags}\,1 $+$ \texttt{fw\_id}\,2 $+$
+\texttt{batt}\,1 $+$ \textbf{sensor 16} $+$ CMAC tag 4 $=$ 27, exactly full).
+
+
+% ---------------------------------------------------------------------------
+\section{Measured data --- what is now real}
+\label{sec:measured}
+
+Taken 2026-07-14 on the shunt rig (\texttt{datasheet.tex}), ESP32-WROOM-32E devkit, workload
+\texttt{esp32-nffload}. The rig measures the \emph{whole devkit at its \SI{5}{\volt} input}; every
+figure below is \textbf{de-embedded to the module's \SI{3.3}{\volt} rail} by subtracting the board
+overhead (\SI{6.5}{\milli\ampere}: AMS1117 $I_q$ $+$ power LED $+$ CP2102) and rescaling
+$E = \SI{3.3}{\volt}\cdot I\cdot t$. Values marked \meas\ elsewhere in this sheet come from here.
+
+\begin{center}
+\small
+\begin{tabularx}{\textwidth}{Xlllll}
+\toprule
+\textbf{Phase} & \textbf{$t$} & \textbf{$I$ (board)} & \textbf{$I$ (module)} & \textbf{$E$ @\,\SI{3.3}{\volt}} & \textbf{Rate} \\
+\midrule
+Idle --- radio off, CPU \SI{80}{\mega\hertz} & \SI{6.2}{\second} & \SI{41.5}{\milli\ampere} & \good{\SI{35.0}{\milli\ampere}} & \SI{0.72}{\joule} & \footnotesize $= I_\text{core}$ \\
+CPU flat out --- radio off, \SI{240}{\mega\hertz} & \SI{6.2}{\second} & \SI{81.6}{\milli\ampere} & \SI{75.1}{\milli\ampere} & \SI{1.54}{\joule} & --- \\
+WiFi associate $+$ DHCP (cold) & \SI{3.1}{\second} & \SI{71.2}{\milli\ampere} & \SI{64.7}{\milli\ampere} & \SI{0.66}{\joule} & --- \\
+WiFi connected, idle & \SI{6.0}{\second} & \SI{56.2}{\milli\ampere} & \SI{49.7}{\milli\ampere} & \SI{0.98}{\joule} & \footnotesize the always-on cost \\
+\midrule
+Download \SI{1}{\mebi\byte} (HTTP, radio only) & \SI{2.5}{\second} & \SI{161}{\milli\ampere} & \SI{154.6}{\milli\ampere} & \SI{1.28}{\joule} & \SI{419}{\kilo\byte\per\second} \\
+Flash write \SI{1}{\mebi\byte} (radio off) & \SI{6.8}{\second} & \SI{95.0}{\milli\ampere} & \SI{88.5}{\milli\ampere} & \SI{1.99}{\joule} & \bad{\SI{154}{\kilo\byte\per\second}} \\
+\textbf{OTA \SI{1}{\mebi\byte}} \footnotesize download $+$ write, concurrent & \textbf{\SI{8.6}{\second}} & \textbf{\SI{157}{\milli\ampere}} & \textbf{\SI{150.5}{\milli\ampere}} & \textbf{\SI{4.27}{\joule}} & \SI{122}{\kilo\byte\per\second} \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\noindent
+\fcolorbox{warn}{white}{\parbox{\dimexpr\textwidth-2\fboxsep-2\fboxrule}{%
+\textbf{The OTA is flash-bound, not radio-bound.} The radio sustains
+\SI{419}{\kilo\byte\per\second}; the flash accepts only \SI{154}{\kilo\byte\per\second}. That is
+the single most consequential thing the measurement revealed, and it has two edges.
+\good{For WiFi it is good news}: the radio has \num{2.7}$\times$ headroom, so the TLS and SHA-256
+that a real \texttt{nff} OTA adds --- and which this run did \emph{not} include --- eat radio
+headroom, not wall-clock, and the duration should barely move. \bad{For BLE it is bad news}: at
+\SI{15}{\kilo\byte\per\second} BLE is radio-bound with no headroom at all, so the $k_t$ penalty
+applies in full. \textbf{This is why $k_t$ moved from \num{1.93} to \num{8.1} once the WiFi row
+stopped being a mock.}}}
+
+\medskip
+\noindent
+\textbf{What the measurement confirmed.} $I_\text{core} = \SI{35.0}{\milli\ampere}$ against a
+modelled \SI{35}{\milli\ampere}, and the OTA mean current \SI{150.5}{\milli\ampere} against a
+modelled \SIrange{155}{158}{\milli\ampere}. \textbf{The two-term current model in
+\S\ref{sec:model} is sound.} What was wrong was never the currents --- it was the \emph{durations}.
+
+\medskip
+\noindent
+\textbf{What is still \emph{not} measured}, and must not be read as if it were: every BLE figure
+(the SDK has no BLE, so there is nothing to flash); the sleep floors (below this rig's noise ---
+\S\ref{sec:measure}); and every \texttt{nff}-SDK-specific operation --- mTLS, MQTT, the heartbeat,
+ECDSA verify --- because the workload exercised generic WiFi, HTTP and flash, not the SDK itself.
+\textbf{Rig accuracy: relative figures are good to a few percent; absolute figures carry
+\SIrange{10}{30}{\percent} because the shunt was never calibrated ($R_\text{eff}$ assumed
+\SI{1}{\ohm} nominal; the resistor measures \SI{1.1}{\ohm}).}
+
+% ---------------------------------------------------------------------------
+\section{Converting this sheet to measured data}
+\label{sec:measure}
+
+\noindent
+Everything above rests on one quantity: $I_\text{awake}$, the module's mean current with the CPU
+running and the radio active. It is tens of \si{\milli\ampere} --- comfortably \emph{inside} the
+range of the existing shunt rig (\texttt{datasheet.tex}). One afternoon converts this sheet.
+
+\begin{enumerate}[leftmargin=*,itemsep=0.5mm]
+  \item \bad{Calibrate --- still outstanding.} Phase 0 has \emph{not} been run, so the rig has no $R_\text{eff}$ and will
+        report a confident, wrong number. Run \texttt{WIRECHECK} too --- wired to \emph{nothing},
+        the rig once reported a perfectly plausible \SI{590}{\milli\ampere}.
+  \item Flash a bare BLE advertiser --- no nff, no WiFi, no sensor. Mount per \texttt{datasheet.tex}
+        (\bad{the DUT's USB must not be connected} --- it shorts the shunt).
+        \texttt{nff power measure -{}-for 30} $\Rightarrow$ $I_\text{awake}$, and with it the whole
+        BLE column.
+  \item Repeat with a WiFi/MQTT build $\Rightarrow$ the WiFi column, and the \emph{real} $k_I$,
+        which replaces the model in \S\ref{sec:model}.
+  \item \bad{The sleep floor cannot be measured on this rig.} At \SI{10}{\micro\ampere} across a
+        \SI{1}{\ohm} shunt it is \SI{10}{\micro\volt}, about \num{100}$\times$ below the noise floor
+        --- the rig's own datasheet marks deep sleep as out of scope. Use a Nordic PPK2 or an
+        INA228. \textbf{Do not read the rig's silence as a zero:} a \SI{6.5}{\milli\ampere} devkit
+        floor and a \SI{20}{\micro\ampere} custom-board floor are the difference between 20 days and
+        18 months, and the shunt rig returns indistinguishable noise for both.
+\end{enumerate}
+
+\vspace{2mm}
+\hrule
+\vspace{1.5mm}
+{\footnotesize
+\textbf{Data status.} Preliminary --- typical values by engineering model; WiFi column modelled,
+BLE column derived from it per \S\ref{sec:model}. Not production-tested. The \SI{85}{\percent}
+battery derate additionally assumes a chemistry that can source the \SI{130}{\milli\ampere} radio
+pulse: Li-SOCl$_2$ cells passivate, and the worst pulse is the first one after a long sleep.
+\textbf{The \emph{ranking} of operations and the feasibility \emph{verdict} are robust to the
+modelling; the absolute figures are not.} Full derivation and error budget:
+\texttt{ble-power-budget.tex}. Rig specification: \texttt{datasheet.tex}.
+\par}
+
+\end{document}

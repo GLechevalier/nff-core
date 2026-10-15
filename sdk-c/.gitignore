@@ -1,0 +1,40 @@
+# Generated credentials — NEVER commit. Contains the device private key.
+credentials.h
+credentials_*.h
+
+# Build output
+build/
+build-*/
+
+# Compiled binaries
+*.elf
+*.bin
+*.map
+*.d
+*.o
+*.a
+
+# Arduino IDE
+.arduino/
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+CTestTestfile.cmake
+Testing/
+Makefile
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# IDE / OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db

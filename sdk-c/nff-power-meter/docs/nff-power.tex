@@ -1,0 +1,243 @@
+% nff — Power characteristics: WiFi vs BLE, per operation. CUSTOMER-FACING.
+%
+% Build:  pdflatex nff-power-characteristics.tex
+% Deps:   booktabs, siunitx, xcolor, geometry, tabularx
+%
+% STATUS: PRELIMINARY. WiFi figures are modelled; BLE figures are DERIVED from
+% them via the two-term current model + throughput ratio in §2. Nothing here is
+% production-measured. Do not remove the PRELIMINARY banner until the rig has
+% run (§6) — see ble-power-budget.tex §"How this budget can lie to you".
+
+\documentclass[10pt,a4paper]{article}
+
+\usepackage[top=12mm,bottom=12mm,left=14mm,right=14mm]{geometry}
+\usepackage{booktabs}
+\usepackage{siunitx}
+\usepackage{xcolor}
+\usepackage{tabularx}
+\usepackage{amsmath}
+\usepackage{enumitem}
+\usepackage{fancyhdr}
+\usepackage[hidelinks]{hyperref}
+
+\sisetup{per-mode = symbol, detect-weight = true, group-minimum-digits = 4}
+\DeclareSIUnit{\dBm}{dBm}
+
+\definecolor{warn}{RGB}{176,0,32}
+\definecolor{ok}{RGB}{0,120,60}
+\newcommand{\good}[1]{\textcolor{ok}{\textbf{#1}}}
+\newcommand{\bad}[1]{\textcolor{warn}{\textbf{#1}}}
+\newcommand{\prelim}{}
+\newcommand{\meas}{\textcolor{ok}{$^{\ast}$}}
+
+\pagestyle{fancy}
+\fancyhf{}
+\lhead{\small nff --- power characteristics}
+\chead{\small\textsc{Preliminary}}
+\rhead{\small Rev.\ A --- 2026-07-14}
+\cfoot{\small \thepage}
+
+\setlength{\parindent}{0pt}
+
+\begin{document}
+
+{\LARGE\textbf{nff --- power characteristics on ESP32}}\\[1.5mm]
+{\large WiFi/MQTT vs.\ BLE, per operation --- and what it costs a battery}\\[1mm]
+{\small ESP32-WROOM-32E \textbullet\ Rev.\ A \textbullet\ 2026-07-14 \textbullet\ \textsc{Preliminary}}
+
+
+% ---------------------------------------------------------------------------
+\section{Energy per nff operation}
+\label{sec:ops}
+
+Typical values, \SI{25}{\celsius}. Energy at the module's \SI{3.3}{\volt} rail,
+$E = \SI{3.3}{\volt}\cdot I\cdot t$. BLE column derived from the WiFi column per the derivation in
+\texttt{nff-power-characteristics.tex}. \meas\ marks a figure measured on the shunt rig
+(2026-07-14) and de-embedded to the module's \SI{3.3}{\volt} rail; everything else is modelled.
+
+\begin{center}
+\small
+\begin{tabular}{@{}lrrrrrrr@{}}
+\toprule
+& \multicolumn{3}{c}{\textbf{WiFi / MQTT}} & \multicolumn{3}{c}{\textbf{BLE}} & \\
+\cmidrule(lr){2-4}\cmidrule(lr){5-7}
+\textbf{Operation} & $t$ & $I$ & $E$ & $t$ & $I$ & $E$ & \textbf{$\Delta E$} \\
+\midrule
+\texttt{nff\_init()} \footnotesize NVS, panic hook & \SI{12}{\milli\second} & \SI{40}{\milli\ampere} & \SI{1.6}{\milli\joule} & \SI{12}{\milli\second} & \SI{40}{\milli\ampere} & \SI{1.6}{\milli\joule} & $1.00\times$ \\
+\addlinespace[1mm]
+Link bring-up \meas \footnotesize assoc$+$DHCP / BT init & \SI{3.10}{\second} & \SI{64.7}{\milli\ampere} & \SI{662}{\milli\joule} & \SI{0.26}{\second} & \SI{62}{\milli\ampere} & \SI{53}{\milli\joule} & \good{$0.06\times$} \\
+Time sync \footnotesize SNTP / gateway stamps it & \SI{1.80}{\second} & \SI{95}{\milli\ampere} & \SI{564}{\milli\joule} & --- & --- & \good{\SI{0}{\milli\joule}} & \good{gone} \\
+Secure session \footnotesize mTLS$+$MQTT / GATT & \SI{1.60}{\second} & \SI{110}{\milli\ampere} & \SI{581}{\milli\joule} & \SI{0.15}{\second} & \SI{75}{\milli\ampere} & \SI{37}{\milli\joule} & \good{$0.06\times$} \\
+\addlinespace[1mm]
+Heartbeat, \emph{one packet} \footnotesize 250\,B / 27\,B & \SI{45}{\milli\second} & \SI{120}{\milli\ampere} & \SI{17.8}{\milli\joule} & \SI{2.5}{\milli\second} & \SI{120}{\milli\ampere} & \SI{0.99}{\milli\joule} & \good{$0.06\times$} \\
+Heartbeat, \emph{delivered} \footnotesize 15 adv events & \multicolumn{3}{c}{\footnotesize\itshape (requires the session above)} & \SI{1.50}{\second} & \SI{42}{\milli\ampere} & \SI{208}{\milli\joule} & \footnotesize note 1 \\
+Keepalive \footnotesize MQTT PINGREQ / none & \SI{12}{\milli\second} & \SI{115}{\milli\ampere} & \SI{4.6}{\milli\joule} & --- & --- & \good{\SI{0}{\milli\joule}} & \good{gone} \\
+\addlinespace[1mm]
+Command auth \footnotesize ECDSA-P256 verify & \SI{55}{\milli\second} & \SI{62}{\milli\ampere} & \SI{11.3}{\milli\joule} & \SI{55}{\milli\second} & \SI{62}{\milli\ampere} & \SI{11.3}{\milli\joule} & $1.00\times$ \\
+\quad$\hookrightarrow$ \texttt{ping}\,/\,\texttt{diag} reply & \SI{30}{\milli\second} & \SI{118}{\milli\ampere} & \SI{11.7}{\milli\joule} & \SI{2.5}{\milli\second} & \SI{120}{\milli\ampere} & \SI{1.0}{\milli\joule} & \good{$0.09\times$} \\
+\quad$\hookrightarrow$ \texttt{reboot} & \SI{0.90}{\second} & \SI{88}{\milli\ampere} & \SI{261}{\milli\joule} & \SI{0.90}{\second} & \SI{78}{\milli\ampere} & \SI{232}{\milli\joule} & $0.89\times$ \\
+\addlinespace[1mm]
+Crash report \footnotesize 2.5\,kB & \SI{180}{\milli\second} & \SI{105}{\milli\ampere} & \SI{62}{\milli\joule} & \SI{320}{\milli\second} & \SI{90}{\milli\ampere} & \SI{95}{\milli\joule} & \bad{$1.53\times$} \\
+Enrollment \footnotesize announce $+$ cert rollover & \SI{3.20}{\second} & \SI{112}{\milli\ampere} & \SI{1.18}{\joule} & \SI{1.50}{\second} & \SI{85}{\milli\ampere} & \SI{421}{\milli\joule} & \good{$0.36\times$} \\
+Failed-link retry \footnotesize one attempt & \SI{1.90}{\second} & \SI{108}{\milli\ampere} & \SI{677}{\milli\joule} & \multicolumn{3}{c}{\good{\textbf{structurally eliminated}}} & \footnotesize note 2 \\
+\midrule
+\textbf{OTA} \meas \footnotesize 1.2\,MB image & \textbf{\SI{9.8}{\second}} & \textbf{\SI{150}{\milli\ampere}} & \textbf{\SI{4.89}{\joule}} & \textbf{\SI{80}{\second}} & \textbf{\SI{108}{\milli\ampere}} & \bad{\textbf{\SI{28.5}{\joule}}} & \bad{$\mathbf{5.8\times}$} \\
+\footnotesize\quad in charge & & & \footnotesize\SI{0.41}{\milli\ampere\hour} & & & \footnotesize\SI{2.40}{\milli\ampere\hour} & \footnotesize note 3 \\
+OTA probation soak \footnotesize 5\,s & \SI{5.00}{\second} & \SI{82}{\milli\ampere} & \SI{1.35}{\joule} & \SI{5.00}{\second} & \SI{55}{\milli\ampere} & \SI{0.91}{\joule} & $0.67\times$ \\
+OTA rollback & \SI{0.90}{\second} & \SI{88}{\milli\ampere} & \SI{261}{\milli\joule} & \SI{0.90}{\second} & \SI{78}{\milli\ampere} & \SI{232}{\milli\joule} & $0.89\times$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\begin{description}[leftmargin=12mm,style=nextline,itemsep=1mm]
+  \item[Note 1 --- the window is the cost, not the packet.] One BLE advertisement is
+        \SI{0.99}{\milli\joule}: \emph{eighteen times cheaper} than an MQTT heartbeat. But a
+        \emph{delivered} heartbeat means holding an advertising window open long enough for the
+        gateway to hear it --- \SI{1.5}{\second}, at \SI{208}{\milli\joule}. \textbf{The radio is
+        \SI{7}{\percent} of that; the other \SI{93}{\percent} is simply having the CPU switched on.}
+        Optimise the window, not the packet.
+  \item[Note 2 --- BLE deletes the SDK's worst battery failure mode.] On WiFi, a device that cannot
+        reach its broker retries \emph{forever} on a ladder that saturates at one attempt per minute
+        (\texttt{nff\_core.c:31}, hardcoded): \SI{677}{\milli\joule} each, or
+        \bad{\SI{500}{\milli\ampere\hour} per month} --- \SI{8}{\percent} of a
+        \SI{6000}{\milli\ampere\hour} battery every month, with no telemetry to show for it. An
+        advertise-only BLE node \textbf{has no link to fail}: an unheard advertisement costs exactly
+        what a heard one costs, and nothing more. \good{This is arguably the strongest
+        reliability argument for BLE here, and it is not a power-efficiency argument at all.}
+  \item[Note 3 --- BLE OTA costs \num{5.8}$\times$ more, and it \emph{still} does not matter.]
+        Once the WiFi OTA row was measured \meas\ rather than modelled, the penalty grew from
+        \num{1.29}$\times$ to \bad{\num{5.8}$\times$} --- WiFi turned out to be
+        \num{4.2}$\times$ faster than assumed (\SI{122}{\kilo\byte\per\second}, not
+        \SI{29}{\kilo\byte\per\second}), and BLE has no such headroom. \textbf{The conclusion
+        survives anyway}: \SI{2.40}{\milli\ampere\hour} is \SI{0.04}{\percent} of a
+        \SI{6000}{\milli\ampere\hour} battery, and twelve updates a year is
+        \SI{30}{\milli\ampere\hour} --- \SI{0.6}{\percent} of the annual budget. \textbf{Ship the
+        updates.} A \num{5.8}$\times$ penalty on \SI{0.6}{\percent} is still \SI{0.6}{\percent}.
+\end{description}
+
+% ---------------------------------------------------------------------------
+\section{What this means for a \SI{6000}{\milli\ampere\hour} / 12-month node}
+
+Reference duty cycle: wake every \SI{5}{\minute}, read a sensor, advertise, sleep.
+Budget: \SI{5100}{\milli\ampere\hour} usable (\SI{85}{\percent} derate) over \SI{8760}{\hour}
+$\Rightarrow$ \textbf{\SI{582}{\micro\ampere} mean}, or \textbf{\SI{48.5}{\micro\ampere\hour} per
+cycle}.
+
+\begin{center}
+\begin{tabularx}{\textwidth}{llllX}
+\toprule
+& \textbf{CPU-active} & \textbf{Sleep floor} & \textbf{$I_\text{mean}$} & \textbf{Life} \\
+\midrule
+\textbf{D0} \footnotesize naive, devkit  & \SI{31.2}{\second} & \SI{6.5}{\milli\ampere} & \SI{10.8}{\milli\ampere} & \bad{20 days} --- fails on the \emph{sleep floor alone} \\
+\textbf{D1} \footnotesize naive, custom board & \SI{31.2}{\second} & \SI{20}{\micro\ampere} & \SI{5.01}{\milli\ampere} & \bad{6.1 weeks} --- the literal spec, built the obvious way \\
+\textbf{D2} \footnotesize short wake     & \SI{2.5}{\second}  & \SI{20}{\micro\ampere} & \good{\SI{380}{\micro\ampere}} & \good{18.4 months} --- \textbf{recommended;} no extra parts \\
+\textbf{D3} \footnotesize \SI{30}{\second} window, CPU light-slept & \SI{1.2}{\second} & \SI{20}{\micro\ampere} & \good{\SI{394}{\micro\ampere}} & \good{17.7 months} --- $+$\SI{32.768}{\kilo\hertz} crystal \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\noindent
+\fcolorbox{warn}{white}{\parbox{\dimexpr\textwidth-2\fboxsep-2\fboxrule}{%
+\textbf{A \SI{30}{\second} \emph{CPU-active} window cannot be made to work, on any radio.} The duty
+cycle is \SI{10}{\percent}, so the mean budget of \SI{685}{\micro\ampere} (un-derated) permits at
+most \SI{6.85}{\milli\ampere} while awake. \textbf{No ESP32 executes code at
+\SI{6.85}{\milli\ampere}} --- Espressif's floor is \SIrange{20}{31}{\milli\ampere} (modem sleep,
+\SI{80}{\mega\hertz}, radio \emph{off}). \bad{Over budget by $\geq3\times$ with a perfect battery
+and the radio switched off.}
+
+\medskip
+\textbf{But ``awake for \SI{30}{\second}'' and ``the CPU runs for \SI{30}{\second}'' are different
+requirements}, and they differ by \good{$12\times$} in battery life. D3 keeps the full
+\SI{30}{\second} \emph{advertising window} and runs the CPU for only \SI{1.2}{\second} of it, the
+rest in automatic light sleep with the BT controller holding the advertising timing.
+\textbf{Ceiling: the CPU may run for $\leq\SI{3.9}{\second}$ per \SI{5}{\minute} cycle.}}}
+
+\medskip
+\noindent
+\textbf{The sleep floor is a board property, not a chip property.} A devkit draws
+\bad{\SI{6.5}{\milli\ampere} asleep} (AMS1117 \SI{5}{\milli\ampere} $+$ power LED
+\SI{1.4}{\milli\ampere} $+$ CP2102) --- \bad{\num{11}$\times$ the entire per-cycle budget, while
+doing nothing at all}. A custom board with a low-$I_q$ LDO reaches \good{\SI{20}{\micro\ampere}}.
+\textbf{No firmware recovers a devkit, and any battery-life figure measured on one is meaningless.}
+
+% ---------------------------------------------------------------------------
+\subsection*{The budget, as three numbers}
+
+\begin{center}
+\begin{tabularx}{\textwidth}{llX}
+\toprule
+\textbf{Quantity} & \textbf{Value} & \textbf{Where it comes from} \\
+\midrule
+Cycle period $T$          & \SI{300}{\second}        & Given: wake every \SI{5}{\minute}. \\
+Mean-current budget $I_\text{budget}$ & \SI{582}{\micro\ampere} & $\SI{5100}{\milli\ampere\hour}/\SI{8760}{\hour}$ (\SI{85}{\percent} derate). \\
+Charge per cycle          & \SI{48.5}{\micro\ampere\hour} & $I_\text{budget}\cdot T$. \emph{Everything} the device does in a cycle must fit in this. \\
+\midrule
+\textbf{CPU-active ceiling $t_\text{on,max}$} & \bad{\textbf{\SI{3.9}{\second}}} &
+$T\cdot(I_\text{budget}-I_\text{sleep})/(I_\text{awake}-I_\text{sleep})$, with
+$I_\text{awake}=\SI{43.2}{\milli\ampere}$, $I_\text{sleep}=\SI{20}{\micro\ampere}$.
+\textbf{Every row of the next table is downstream of this one number.} \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+% ---------------------------------------------------------------------------
+\subsection*{Every nff SDK parameter, and what to set it to}
+
+Read from the source, not inferred: \texttt{nff-sdk-c/include/nff.h} (all
+\texttt{\#define}s are \texttt{-D}-overridable) and \texttt{nff-sdk-c/src/nff\_core.c}.
+Charge figures use the operation costs in \S\ref{sec:ops}; \meas\ marks those anchored to
+measurement.
+
+\begin{center}
+\small
+\begin{tabularx}{\textwidth}{@{}llllX@{}}
+\toprule
+\textbf{Parameter} & \textbf{Default} & \textbf{Set to} & \textbf{Cost/yr} & \textbf{Why} \\
+\midrule
+\multicolumn{5}{@{}l}{\textit{\textbf{Tunable today} --- a \texttt{-D} or an \texttt{nff\_config\_t} field}}\\
+\addlinespace[0.6mm]
+\texttt{heartbeat\_interval\_s} & \bad{30} & \good{\textbf{300}} & \bad{\SI{1577}{\milli\ampere\hour}} $\to$ \good{\SI{158}{\milli\ampere\hour}} &
+\bad{The single most expensive default in the SDK.} At \SI{30}{\second} that is \num{1051200} beats/yr at \SI{1.5}{\micro\ampere\hour} each --- \bad{\SI{26}{\percent} of the battery, on keepalives}. One beat per wake is the only affordable rate: set it \emph{equal to the cycle period}. \\
+\addlinespace[0.6mm]
+\texttt{NFF\_OTA\_MIN\_HEALTHY\_MS} & \bad{5000} & \good{\textbf{1000}} & negligible &
+Not about energy --- about the ceiling. A \SI{5}{\second} soak holds the CPU up for \bad{longer than the entire \SI{3.9}{\second} budget}, so a post-OTA cycle cannot close. \SI{1}{\second} still catches a boot loop. \\
+\texttt{NFF\_OTA\_CONFIRM\_TIMEOUT\_S} & 60 & 60 \good{keep} & \SI{0}{} & Runs only after an OTA ($\approx$12/yr) and only until the broker reconnects. Free. \\
+\texttt{NFF\_OTA\_MAX\_TRIAL\_BOOTS} & 3 & 3 \good{keep} & \SI{0}{} & Crash-loop guard. Costs nothing; removing it risks a brick. \\
+\texttt{NFF\_OTA\_MAX\_DL\_RETRIES} & 4 & 4 \good{keep} & $<\SI{0.1}{\milli\ampere\hour}$ & Worst case 4 full downloads $=\SI{20}{\joule}$ \meas, once. Irrelevant against \SI{6000}{\milli\ampere\hour}. \\
+\texttt{NFF\_OTA\_DL\_RETRY\_BACKOFF\_MS} & 2000 & 2000 \good{keep} & \SI{0}{} & Radio idle while backing off. \\
+\texttt{NFF\_OTA\_MIN\_HEAP\_FLOOR} & \SI{20000}{} & keep & \SI{0}{} & RAM gate, not energy. \\
+\texttt{NFF\_MQTT\_BUFFER\_SIZE} & 1024 & keep & \SI{0}{} & RAM. (\bad{Never below 1024} --- OTA commands are $\approx$\SI{400}{\byte} and PubSubClient's \SI{256}{\byte} default silently drops them.) \\
+\texttt{NFF\_TIMESTAMP\_WINDOW\_S} & 300 & keep & \SI{0}{} & Replay window. \bad{Do not widen it to dodge SNTP} --- that is a security control, not a power knob. \\
+\texttt{NFF\_LOG\_LINES} / \texttt{\_LEN} & 32 / 128 & keep & \SI{0}{} & RAM. \\
+\texttt{NFF\_NONCE\_RING\_SIZE} & 16 & keep & \SI{0}{} & RAM. \\
+\midrule
+\multicolumn{5}{@{}l}{\textit{\textbf{\bad{Not tunable at all}} --- these are hardcoded, and each one alone breaks the budget}}\\
+\addlinespace[0.6mm]
+\texttt{BACKOFF\_TABLE\_MS} \footnotesize\texttt{nff\_core.c:31} & \bad{\{1..60\}\,s, \textbf{forever}} & \good{cap $+$ \textbf{give up}} & \bad{\SI{6000}{\milli\ampere\hour}} &
+\bad{The worst battery failure mode in the SDK.} A device that cannot reach its broker retries at one attempt per minute \emph{for ever}: \SI{677}{\milli\joule} each, \bad{\SI{500}{\milli\ampere\hour} per month}, with no telemetry to show for it. One bad gateway flattens the cell in a year. It must cap the ladder and \emph{sleep}. \\
+\addlinespace[0.6mm]
+SNTP \footnotesize\texttt{nff\_port\_esp32\_arduino.c:60} & \bad{unconditional, $\leq\SI{20}{\second}$} & \good{make optional} & \bad{\SI{16.5}{\milli\ampere\hour}} &
+\SI{1.8}{\second} at \SI{95}{\milli\ampere} on \emph{every cold boot} --- and a duty-cycled node cold-boots every cycle. \bad{That is half the entire \SI{3.9}{\second} CPU budget spent on a clock the gateway could stamp,} and up to \SI{20}{\second} if the server is slow. \\
+\addlinespace[0.6mm]
+\texttt{esp\_wifi\_set\_ps()} & \bad{never called} & \good{\texttt{MIN\_MODEM}} & \bad{$\infty$} &
+The radio never powers down. \meas\,\SI{49.7}{\milli\ampere} measured, associated and idle $\Rightarrow$ \bad{\SI{4.3}{days}} on this cell. \textbf{No parameter above matters until this is fixed.} \\
+\addlinespace[0.6mm]
+Sleep support & \bad{does not exist} & \good{add PAL hooks} & \bad{$\infty$} &
+No \texttt{esp\_deep\_sleep}, \texttt{esp\_light\_sleep} or \texttt{esp\_pm\_*} anywhere in the SDK, and \texttt{nff\_start\_task()} never returns. \textbf{Duty-cycling is not configurable --- it is unimplementable.} Needs \texttt{nff\_port\_sleep\_deep/light()} and an \texttt{nff\_run\_once()} entry point. \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\medskip
+\noindent
+\fcolorbox{warn}{white}{\parbox{\dimexpr\textwidth-2\fboxsep-2\fboxrule}{%
+\textbf{Read the table in order.} Only \emph{one} tunable parameter --- \texttt{heartbeat\_interval\_s}
+--- moves the needle, and it saves \SI{1419}{\milli\ampere\hour}/yr. \textbf{Every other lever that
+matters is in the bottom half of the table, and none of them is a setting.} Two are hardcoded
+constants and two are features that do not exist. \bad{A \SI{6000}{\milli\ampere\hour} / 12-month node
+cannot be configured out of the current SDK; it has to be built.} That is the finding, and it is why
+the SDK work list specifies work rather than settings.}}
+
+
+
+\end{document}

@@ -1,0 +1,4 @@
+name: nff
+build:
+  cmake: .
+  kconfig: Kconfig
