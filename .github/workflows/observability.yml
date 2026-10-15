@@ -60,4 +60,4 @@ jobs:
           labels: org.opencontainers.image.revision=${{ github.sha }}
           tags: |
             ghcr.io/glechevalier/${{ matrix.image }}:sha-${{ github.sha }}
-            ghcr.io/glechevalier/${{ matrix.image }}:${{ github.ref_name }}
+            ghcr.io/glechevalier/${{ matrix.image }}:${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.number) || github.ref_name }}
