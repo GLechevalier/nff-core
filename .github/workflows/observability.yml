@@ -1,0 +1,63 @@
+name: Observability images
+
+# Builds the five observability images. It never deploys: nff-stack retags the pinned
+# :sha-<commit> image and ships it (GLechevalier/nff-stack).
+#   pull request -> build only, nothing pushed
+#   push staging -> :sha-<commit> + :staging
+#   push main    -> :sha-<commit> + :main
+# No path filter on push: every commit nff-stack may pin needs its :sha- image. An
+# untouched service is all cache hits, so it costs a minute and a tag.
+on:
+  pull_request:
+    branches: [staging, main]
+  push:
+    branches: [staging, main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image: nff-fleet
+            context: observability/nff-fleet
+            file: observability/nff-fleet/Dockerfile
+          - image: nff-ota
+            context: observability/nff-ota
+            file: observability/nff-ota/Dockerfile
+          - image: nff-diagnosis
+            context: observability/nff-diagnosis
+            file: observability/nff-diagnosis/Dockerfile
+          # Both mock images take the nff-mock root as context so the shared core/ is in scope.
+          - image: nff-mock-controller
+            context: observability/nff-mock
+            file: observability/nff-mock/controller/Dockerfile
+          - image: nff-mock-device
+            context: observability/nff-mock
+            file: observability/nff-mock/device/Dockerfile
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        if: github.event_name != 'pull_request'
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.file }}
+          push: ${{ github.event_name != 'pull_request' }}
+          cache-from: type=gha,scope=${{ matrix.image }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.image }}
+          labels: org.opencontainers.image.revision=${{ github.sha }}
+          tags: |
+            ghcr.io/glechevalier/${{ matrix.image }}:sha-${{ github.sha }}
+            ghcr.io/glechevalier/${{ matrix.image }}:${{ github.ref_name }}

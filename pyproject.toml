@@ -26,9 +26,9 @@ classifiers = [
 # (maturin bindings = "bin"); the `nff` command is that binary, not Python.
 
 [project.urls]
-Homepage = "https://github.com/GLechevalier/nff"
-Repository = "https://github.com/GLechevalier/nff"
-"Bug Tracker" = "https://github.com/GLechevalier/nff/issues"
+Homepage = "https://github.com/GLechevalier/nff-firmware"
+Repository = "https://github.com/GLechevalier/nff-firmware"
+"Bug Tracker" = "https://github.com/GLechevalier/nff-firmware/issues"
 
 [project.optional-dependencies]
 dev = [

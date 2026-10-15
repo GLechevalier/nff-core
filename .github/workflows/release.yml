@@ -3,6 +3,8 @@ name: CI / Release
 on:
   push:
     branches: [main]
+    # The CLI only: the SDK and the observability services ship through their own workflows.
+    paths-ignore: ['sdk-c/**', 'observability/**', '.github/workflows/observability.yml']
 
 jobs:
   # ── 1. Fast gate ────────────────────────────────────────────────────────────
