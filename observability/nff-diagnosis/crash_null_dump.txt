@@ -1,0 +1,31 @@
+ets Jul 29 2019 12:21:46
+
+rst:0x1 (POWERON_RESET),boot:0x13 (SPI_FAST_FLASH_BOOT)
+configsip: 0, SPIWP:0xee
+clk_drv:0x00,q_drv:0x00,d_drv:0x00,cs0_drv:0x00,hd_drv:0x00,wp_drv:0x00
+mode:DIO, clock div:1
+load:0x3fff0030,len:4876
+ho 0 tail 12 room 4
+load:0x40078000,len:16560
+load:0x40080400,len:3500
+entry 0x400805b4
+crash_null: about to deref null ptr
+Guru Meditation Error: Core  1 panic'ed (StoreProhibited). Exception was unhandled.
+
+Core  1 register dump:
+PC      : 0x400d1606  PS      : 0x00060530  A0      : 0x800d3698  A1      : 0x3ffb2240
+A2      : 0x00000001  A3      : 0x00000003  A4      : 0x00000001  A5      : 0xffffffff
+A6      : 0xffffffff  A7      : 0xffffffff  A8      : 0x00000000  A9      : 0x3ffb2220
+A10     : 0x00000025  A11     : 0x3f400120  A12     : 0x00000078  A13     : 0x00000003
+A14     : 0x0001c200  A15     : 0x00000023  SAR     : 0x00000001  EXCCAUSE: 0x0000001d
+EXCVADDR: 0x00000000  LBEG    : 0x40085291  LEND    : 0x400852a1  LCOUNT  : 0xfffffff6
+
+
+Backtrace: 0x400d1603:0x3ffb2240 0x400d3695:0x3ffb2270 0x400880dd:0x3ffb2290
+
+
+
+
+ELF file SHA256: 4403478db
+
+Rebooting...

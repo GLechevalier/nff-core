@@ -1,0 +1,10 @@
+Guru Meditation Error: Core  0 panic'ed (Interrupt wdt timeout on CPU0)
+
+Core  0 register dump:
+PC      : 0x400d61f0  PS      : 0x00060034  A0      : 0x800d6200  A1      : 0x3ffb7100
+A2      : 0x00000000  A3      : 0x3ffb7140  A4      : 0x00000001  A5      : 0x00000000
+EXCCAUSE: 0x00000005  EXCVADDR: 0x00000000
+
+Backtrace: 0x400d61f0:0x3ffb7100 0x400d6200:0x3ffb7120 0x400d1500:0x3ffb7140
+
+Core  0 was running in ISR context:

@@ -1,0 +1,6 @@
+.pio/
+esp32-nffload/include/wifi_secrets.h
+docs/*.aux
+docs/*.log
+docs/*.out
+docs/*.toc

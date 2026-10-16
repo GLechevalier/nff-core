@@ -7,7 +7,7 @@ Thanks for your interest. Contributions are welcome — bug fixes, new board sup
 ## Dev setup
 
 ```bash
-git clone https://github.com/GLechevalier/nff
+git clone https://github.com/GLechevalier/nff-firmware
 cd nff
 python -m venv .venv
 source .venv/bin/activate          # Windows: .venv\Scripts\activate

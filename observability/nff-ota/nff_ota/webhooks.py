@@ -1,0 +1,497 @@
+"""Inbound HTTP webhooks for nff-ota.
+
+nff-ota normally only makes OUTBOUND calls to nff-fleet (see ``fleet.py``). This
+module adds the inbound endpoints that other trusted services call:
+
+    POST /internal/ota-result
+        Header: X-Fleet-Secret: <shared secret>   (settings.fleet_secret == fleet's mcp_secret)
+        Body:   {"device_id": "<id>", "status": "committed"|"rolled_back", "version": "<v>"}
+        Closes the OTA feedback loop: when a device finishes an update and reboots it
+        publishes an ``ota_result`` over MQTT, nff-fleet's router forwards it here, and
+        we finalize the per-device job.
+
+    POST /internal/build-deploy
+        Header: X-Fleet-Secret: <shared secret>
+        Body:   {version, name, device_types[], (artifact_b64 | file_path),
+                 (device_group_id | device_group_name), max_devices_in_flight?, retries?,
+                 build_id?, elf_b64?, branch_name?, author?, committed_at?, changelog?,
+                 parent_version?}
+        One-call "ship this freshly built binary" entrypoint used by the nff-github
+        connector: uploads the artifact (+ optional debug ELF and git lineage), then
+        creates and starts a deployment to the target group. Wraps the existing
+        upload_artifact / create_deployment / start_deployment ops so nff-ota stays the
+        sole owner of deploy logic. The upload enforces the ESP32 image-validity gate
+        (magic 0xE9 + size floor) unless the target group is mock-only — decided by
+        provenance (every member id ``mock-`` and no QEMU member), because L1 mocks and
+        real hardware both self-attest device_type "esp32".
+
+Mirrors nff-fleet's ``control.py`` shared-secret pattern.
+"""
+
+from __future__ import annotations
+
+import base64
+import binascii
+import hmac
+import tempfile
+import uuid
+from datetime import datetime, timezone
+from pathlib import Path
+
+from starlette.requests import Request
+from starlette.responses import JSONResponse
+
+from nff_ota.client import ensure_client, get_client
+from nff_ota.config import settings
+from nff_ota.models.artifact import UploadArtifactParams
+from nff_ota.source.ops import build_and_deploy_source, register_source
+from nff_ota.storage import upload_elf
+from nff_ota.models.deployment import CreateDeploymentParams
+from nff_ota.tools.artifacts.ops import upload_artifact_impl
+from nff_ota.tools.deployments.ops import (
+    create_deployment,
+    finalize_ota_result,
+    group_is_mock_only,
+    group_member_device_types,
+    record_ota_progress,
+    start_deployment,
+)
+
+
+def _secret_ok(request: Request) -> bool:
+    # Require a configured secret — an unset secret must never authenticate, otherwise
+    # an empty header would compare-equal to an empty configured value.
+    if not settings.fleet_secret:
+        return False
+    provided = request.headers.get("x-fleet-secret", "")
+    return bool(provided) and hmac.compare_digest(provided, settings.fleet_secret)
+
+
+async def _ota_result(request: Request) -> JSONResponse:
+    if not _secret_ok(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+
+    # Webhook routes bypass the per-session MCP lifespan, so the Supabase client may not
+    # be initialised yet; ensure it before any downstream get_client() call.
+    await ensure_client()
+
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "invalid JSON body"}, status_code=400)
+
+    device_id = body.get("device_id")
+    status = body.get("status")
+    version = body.get("version")
+    reason = body.get("reason")
+    if not isinstance(device_id, str) or not device_id:
+        return JSONResponse({"error": "device_id is required"}, status_code=400)
+    if status not in ("committed", "rolled_back"):
+        return JSONResponse({"error": "status must be 'committed' or 'rolled_back'"}, status_code=400)
+    if not isinstance(version, str) or not version:
+        return JSONResponse({"error": "version is required"}, status_code=400)
+
+    result = await finalize_ota_result(
+        device_id, status, version, reason=reason if isinstance(reason, str) else None
+    )
+    return JSONResponse(result)
+
+
+async def _ota_progress(request: Request) -> JSONResponse:
+    if not _secret_ok(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+
+    await ensure_client()
+
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "invalid JSON body"}, status_code=400)
+
+    device_id = body.get("device_id")
+    version = body.get("version")
+    stage = body.get("stage")
+    if not isinstance(device_id, str) or not device_id:
+        return JSONResponse({"error": "device_id is required"}, status_code=400)
+    if not isinstance(version, str) or not version:
+        return JSONResponse({"error": "version is required"}, status_code=400)
+    if not isinstance(stage, str) or not stage:
+        return JSONResponse({"error": "stage is required"}, status_code=400)
+
+    progress = body.get("progress")
+    attempt = body.get("attempt")
+    result = await record_ota_progress(
+        device_id,
+        version,
+        stage,
+        progress=progress if isinstance(progress, int) else None,
+        attempt=attempt if isinstance(attempt, int) else None,
+    )
+    # Always 200: progress is lossy telemetry and a stale tick is not the fleet's error.
+    return JSONResponse(result)
+
+
+async def _resolve_group_id(body: dict) -> tuple[str | None, str | None]:
+    """Resolve the deployment target group id from the request body.
+
+    Accepts an explicit ``device_group_id`` or a ``device_group_name`` to look up.
+    Returns (group_id, error); group membership/enrollment is a deliberate step that
+    stays out of this path, so an unknown name is an error rather than an auto-create.
+    """
+    group_id = body.get("device_group_id")
+    if isinstance(group_id, str) and group_id:
+        return group_id, None
+
+    name = body.get("device_group_name")
+    if isinstance(name, str) and name:
+        client = get_client()
+        resp = await client.table("device_groups").select("id").eq("name", name).execute()
+        if not resp.data:
+            return None, f"device_group_name {name!r} not found"
+        return resp.data[0]["id"], None
+
+    return None, "device_group_id or device_group_name is required"
+
+
+async def _build_deploy(request: Request) -> JSONResponse:
+    if not _secret_ok(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+
+    # Webhook routes bypass the per-session MCP lifespan, so the Supabase client may not
+    # be initialised yet; ensure it before any downstream get_client() call.
+    await ensure_client()
+
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "invalid JSON body"}, status_code=400)
+
+    version = body.get("version")
+    name = body.get("name")
+    device_types = body.get("device_types")
+    if not isinstance(version, str) or not version:
+        return JSONResponse({"error": "version is required"}, status_code=400)
+    if not isinstance(name, str) or not name:
+        return JSONResponse({"error": "name is required"}, status_code=400)
+
+    group_id, group_err = await _resolve_group_id(body)
+    if group_err:
+        return JSONResponse({"error": group_err}, status_code=400)
+
+    # The firmware_versions row is multi-tenant (project_id is NOT NULL). Every other
+    # artifact writer resolves the tenant from the target device/group and passes it;
+    # this webhook must too, or a first upload of a new version fails the upsert (23502).
+    # The group is the tenant anchor — mirror create_deployment (deployments/ops.py).
+    client = get_client()
+    grp = await client.table("device_groups").select("project_id").eq("id", group_id).execute()
+    project_id = grp.data[0].get("project_id") if grp.data else None
+    if not project_id:
+        return JSONResponse(
+            {"error": f"device group {group_id!r} has no project_id (tenant); re-provision it"},
+            status_code=400,
+        )
+
+    # device_types is the firmware's target allow-list. A caller may pass it explicitly,
+    # but the target group is the source of truth for what hardware is actually in play:
+    # when the caller didn't supply a usable list, derive it from the self-attested
+    # device_type of the group's members instead of forcing static config.
+    if not (isinstance(device_types, list) and device_types):
+        device_types = await group_member_device_types(group_id)
+    if not device_types:
+        return JSONResponse(
+            {"error": "device_types must be a non-empty list, and none could be "
+                      "derived from the target group's devices (no member has "
+                      "reported a device_type yet)"},
+            status_code=400,
+        )
+
+    # The binary arrives either inline (base64, host-agnostic) or as a path the caller
+    # and nff-ota both see (co-located). Inline bytes are written to a temp file because
+    # upload_artifact reads from a path.
+    tmp_path: Path | None = None
+    file_path = body.get("file_path")
+    artifact_b64 = body.get("artifact_b64")
+    if isinstance(artifact_b64, str) and artifact_b64:
+        try:
+            data = base64.b64decode(artifact_b64, validate=True)
+        except (binascii.Error, ValueError) as e:
+            return JSONResponse({"error": f"artifact_b64 is not valid base64: {e}"}, status_code=400)
+        fd = tempfile.NamedTemporaryFile(prefix="nff-build-", suffix=".bin", delete=False)
+        try:
+            fd.write(data)
+        finally:
+            fd.close()
+        tmp_path = Path(fd.name)
+        file_path = str(tmp_path)
+    elif not (isinstance(file_path, str) and file_path):
+        return JSONResponse({"error": "artifact_b64 or file_path is required"}, status_code=400)
+
+    # Optional debug ELF (base64): stored alongside the .bin for crash symbolication and
+    # never delivered to a device. A bad base64 blob is non-fatal — the deploy proceeds
+    # without the ELF rather than failing the whole rollout over a diagnostics extra.
+    elf_path: str | None = None
+    elf_b64 = body.get("elf_b64")
+    if isinstance(elf_b64, str) and elf_b64:
+        try:
+            elf_path = await upload_elf(version, base64.b64decode(elf_b64, validate=True))
+        except (binascii.Error, ValueError) as e:
+            return JSONResponse({"error": f"elf_b64 is not valid base64: {e}"}, status_code=400)
+        except Exception:  # storage hiccup on the ELF must not abort the firmware rollout
+            elf_path = None
+
+    def _str(key: str) -> str | None:
+        val = body.get(key)
+        return val if isinstance(val, str) and val else None
+
+    # Synthetic (non-0xE9) artifacts are acceptable only when nothing in the target group
+    # boots the bytes — decided by provenance (mock-only membership), not device_type,
+    # because L1 mocks and real hardware both self-attest "esp32".
+    allow_synthetic = await group_is_mock_only(group_id)
+
+    try:
+        upload = await upload_artifact_impl(
+            UploadArtifactParams(
+                name=name, version=version, device_types=device_types, file_path=file_path,
+                project_id=project_id,
+                build_id=_str("build_id"),
+                branch_name=_str("branch_name"),
+                author=_str("author"),
+                committed_at=_str("committed_at"),
+                changelog=body.get("changelog") if isinstance(body.get("changelog"), str) else None,
+                parent_version=_str("parent_version"),
+                elf_path=elf_path,
+                release_version=_str("release_version"),
+            ),
+            allow_synthetic=allow_synthetic,
+        )
+    finally:
+        if tmp_path is not None:
+            tmp_path.unlink(missing_ok=True)
+    if upload.error:
+        return JSONResponse({"error": f"upload failed: {upload.error}"}, status_code=400)
+
+    create_kwargs: dict = {
+        "name": name,
+        "target_version": version,
+        "device_group_id": group_id,
+    }
+    if isinstance(body.get("max_devices_in_flight"), int):
+        create_kwargs["max_devices_in_flight"] = body["max_devices_in_flight"]
+    if isinstance(body.get("retries"), int):
+        create_kwargs["retries"] = body["retries"]
+
+    created = await create_deployment(CreateDeploymentParams(**create_kwargs))
+    if created.error or created.deployment is None:
+        return JSONResponse({"error": f"create_deployment failed: {created.error}"}, status_code=400)
+
+    deployment_id = created.deployment.id
+    started = await start_deployment(deployment_id)
+
+    return JSONResponse(
+        {
+            "deployment_id": deployment_id,
+            "version": version,
+            "delivered": started.delivered,
+            "failed": started.failed,
+            "skipped": started.skipped,
+            # start_deployment sets `error` for soft conditions (e.g. nothing pending);
+            # surface it without failing the whole request.
+            "start_error": started.error,
+        }
+    )
+
+
+async def _ensure_mock_target(request: Request) -> JSONResponse:
+    """Make a spawned nff-mock targetable by a deployment.
+
+    A mock heartbeats through the fleet and gets a cert, but nff-ota targets devices via
+    ``device_groups`` membership + ``ota_status='accepted'`` (see _resolve_accepted_devices),
+    and a deployment inherits its tenant from the group's ``project_id``. This route enrols
+    the mock: it upserts the device row (accepted, with project_id + device_type), finds or
+    creates the named group (carrying project_id), and adds the device to it — all idempotent.
+    nff-builder calls this for the simulated canary tier before build-deploy.
+
+        Body: {device_id, project_id, group_name, device_type?="nff-mock-esp32"}
+        -> {device_group_id, device_id, device_type}
+    """
+    if not _secret_ok(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+
+    await ensure_client()
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "invalid JSON body"}, status_code=400)
+
+    device_id = body.get("device_id")
+    project_id = body.get("project_id")
+    group_name = body.get("group_name")
+    device_type = body.get("device_type") or "nff-mock-esp32"
+    if not isinstance(device_id, str) or not device_id:
+        return JSONResponse({"error": "device_id is required"}, status_code=400)
+    if not isinstance(project_id, str) or not project_id:
+        return JSONResponse({"error": "project_id is required"}, status_code=400)
+    if not isinstance(group_name, str) or not group_name:
+        return JSONResponse({"error": "group_name is required"}, status_code=400)
+
+    client = get_client()
+    now = datetime.now(timezone.utc).isoformat()
+
+    # 1. Upsert the device row: accepted, scoped to the project, with a known device_type so
+    #    the deploy-time compatibility gate matches. Don't clobber a project_id/device_type
+    #    the fleet heartbeat already set, but always force ota_status to accepted.
+    existing = await client.table("devices").select("*").eq("id", device_id).execute()
+    if existing.data:
+        row = existing.data[0]
+        update: dict = {"ota_status": "accepted"}
+        if not row.get("project_id"):
+            update["project_id"] = project_id
+        if not (row.get("device_type") or "").strip():
+            update["device_type"] = device_type
+        await client.table("devices").update(update).eq("id", device_id).execute()
+        device_type = row.get("device_type") or device_type
+    else:
+        try:
+            await client.table("devices").insert(
+                {
+                    "id": device_id,
+                    "name": device_id,
+                    "project_id": project_id,
+                    "device_type": device_type,
+                    "status": "offline",
+                    "firmware_version": "0.0.0",
+                    "agent_connected": False,
+                    "ota_status": "accepted",
+                    "current_firmware_version": None,
+                    "created_at": now,
+                }
+            ).execute()
+        except Exception as exc:  # noqa: BLE001
+            return JSONResponse({"error": f"device upsert failed: {exc}"}, status_code=502)
+
+    # 2. Find or create the named group, carrying the tenant (deployments need group.project_id).
+    grp = (
+        await client.table("device_groups")
+        .select("id")
+        .eq("name", group_name)
+        .eq("project_id", project_id)
+        .limit(1)
+        .execute()
+    )
+    if grp.data:
+        group_id = grp.data[0]["id"]
+    else:
+        group_id = str(uuid.uuid4())
+        try:
+            await client.table("device_groups").insert(
+                {"id": group_id, "name": group_name, "project_id": project_id, "created_at": now}
+            ).execute()
+        except Exception as exc:  # noqa: BLE001
+            return JSONResponse({"error": f"group create failed: {exc}"}, status_code=502)
+
+    # 3. Add membership (idempotent — ignore duplicate key).
+    try:
+        await client.table("device_group_members").insert(
+            {"group_id": group_id, "device_id": device_id}
+        ).execute()
+    except Exception:
+        pass
+
+    return JSONResponse(
+        {"device_group_id": group_id, "device_id": device_id, "device_type": device_type}
+    )
+
+
+async def _firmware_seed(request: Request) -> JSONResponse:
+    """Seed a mock's held firmware source and deploy it (the harness side of the demo).
+
+    The agent-facing fix path is the ``submit_firmware_fix`` MCP tool; this is its sibling
+    for the harness, which seeds an INITIAL (often buggy) revision the device crash-loops on.
+    It shares the same store + build + deploy core, but skips the anti-downgrade gate so the
+    first revision can be any version, and tags the revision author='seed'.
+
+        Body: {device_id, version, source, project_id?, changelog?}
+        -> {deployment_id, version, fault_remaining}
+    """
+    if not _secret_ok(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+
+    await ensure_client()
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "invalid JSON body"}, status_code=400)
+
+    device_id = body.get("device_id")
+    version = body.get("version")
+    source = body.get("source")
+    if not isinstance(device_id, str) or not device_id:
+        return JSONResponse({"error": "device_id is required"}, status_code=400)
+    if not isinstance(version, str) or not version:
+        return JSONResponse({"error": "version is required"}, status_code=400)
+    if not isinstance(source, str) or not source:
+        return JSONResponse({"error": "source is required"}, status_code=400)
+
+    changelog = body.get("changelog") if isinstance(body.get("changelog"), str) else None
+    result = await build_and_deploy_source(
+        device_id, version, source, author="seed", changelog=changelog
+    )
+    if result.error:
+        return JSONResponse({"error": result.error}, status_code=400)
+    return JSONResponse(
+        {
+            "deployment_id": result.deployment_id,
+            "version": result.version,
+            "fault_remaining": result.fault_remaining,
+        }
+    )
+
+
+async def _firmware_register_source(request: Request) -> JSONResponse:
+    """Record a mock's held firmware source WITHOUT building or deploying it.
+
+    The instant-crash demo uses this instead of ``/internal/firmware/seed``: it registers the
+    buggy source so ``get_firmware_source`` returns it (the agent reads + fixes a real bug),
+    but skips the slow L2 compile+boot — the crash the agent inspects is injected separately
+    via nff-fleet ``/internal/inject-crash``, and recovery is the agent's real
+    ``submit_firmware_fix`` compile. Returns in milliseconds regardless of device_type.
+
+        Body: {device_id, version, source, changelog?}
+        -> {version, build_id, fault_remaining}
+    """
+    if not _secret_ok(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+
+    await ensure_client()
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "invalid JSON body"}, status_code=400)
+
+    device_id = body.get("device_id")
+    version = body.get("version")
+    source = body.get("source")
+    if not isinstance(device_id, str) or not device_id:
+        return JSONResponse({"error": "device_id is required"}, status_code=400)
+    if not isinstance(version, str) or not version:
+        return JSONResponse({"error": "version is required"}, status_code=400)
+    if not isinstance(source, str) or not source:
+        return JSONResponse({"error": "source is required"}, status_code=400)
+
+    changelog = body.get("changelog") if isinstance(body.get("changelog"), str) else None
+    result = await register_source(device_id, version, source, author="seed", changelog=changelog)
+    if result.get("error"):
+        return JSONResponse({"error": result["error"]}, status_code=400)
+    return JSONResponse(result)
+
+
+def register(root) -> None:
+    """Register inbound HTTP routes on the FastMCP HTTP app."""
+    root.custom_route("/internal/ota-result", methods=["POST"])(_ota_result)
+    root.custom_route("/internal/ota-progress", methods=["POST"])(_ota_progress)
+    root.custom_route("/internal/build-deploy", methods=["POST"])(_build_deploy)
+    root.custom_route("/internal/ensure-mock-target", methods=["POST"])(_ensure_mock_target)
+    root.custom_route("/internal/firmware/seed", methods=["POST"])(_firmware_seed)
+    root.custom_route("/internal/firmware/register-source", methods=["POST"])(
+        _firmware_register_source
+    )

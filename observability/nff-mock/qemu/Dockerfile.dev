@@ -1,0 +1,35 @@
+# nff-mock-l2 — DEV image (Level 2): the real firmware booted in qemu-system-xtensa.
+#
+# Based on espressif/idf:v5.3.1, which bundles BOTH qemu-system-xtensa (the only build with an
+# `esp32` machine) AND nvs_partition_gen.py (the NVS credential-splice tool) — the same IDF the
+# Stage-3/Stage-4 live runs proved green. No ESP_QEMU_URL download, no standalone esptool (the
+# merged.bin is produced server-side in Stage 4; the supervisor only needs qemu + nvs-gen).
+#
+# Build context is the nff-mock/ ROOT so the shared core (core/) and this package (qemu/) are both
+# visible. Built ONLY on demand — `docker compose --profile l2 build nff-mock-l2` — never by the
+# default `up`, because the IDF base is heavy.
+FROM espressif/idf:v5.3.1
+
+WORKDIR /app
+
+# ncat bridges the emulated NIC to in-cluster services (broker / OTA origin) via QEMU guestfwd.
+RUN apt-get update && apt-get install -y --no-install-recommends ncat \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY core/ core/
+COPY qemu/ qemu/
+
+# Install the supervisor INTO the IDF python env (the one export.sh activates) so its console
+# script and nvs_partition_gen.py share one interpreter — credentials.generate_nvs_bin shells out
+# via sys.executable, which must resolve nvs_partition_gen's deps.
+RUN . "$IDF_PATH/export.sh" && \
+    pip install --no-cache-dir -e ./core && \
+    pip install --no-cache-dir -e ./qemu
+
+COPY qemu/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh
+
+# The entrypoint sources export.sh then execs `nff-mock-l2 "$@"`. CMD is the default subcommand;
+# compose overrides it with `doctor` for the offline build-smoke.
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
+CMD ["run"]

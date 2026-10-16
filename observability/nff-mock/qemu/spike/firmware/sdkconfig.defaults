@@ -1,0 +1,41 @@
+# sdkconfig.defaults — Stage-0 spike. Pinned here so the image is reproducible on the toolchain box.
+
+# ── Target ────────────────────────────────────────────────────────────────
+CONFIG_IDF_TARGET="esp32"
+
+# ── openeth (the only NIC QEMU's esp32 machine emulates; no WiFi radio) ────
+# Bring the network up over the OpenCores Ethernet MAC instead of WiFi.
+CONFIG_ETH_USE_OPENETH=y
+CONFIG_ETH_OPENETH_DMA_RX_BUFFER_NUM=4
+CONFIG_ETH_OPENETH_DMA_TX_BUFFER_NUM=1
+
+# ── Flash / partitions ─────────────────────────────────────────────────────
+# 4 MB image to match the L2 supervisor's flash.bin assumption (config.flash = 4194304).
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+CONFIG_ESPTOOLPY_FLASHSIZE="4MB"
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+
+# ── Coredump → flash (ELF) ─────────────────────────────────────────────────
+# So a real panic yields a resolvable backtrace via the IDF port's
+# nff_port_get_crash_info (#if CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH). De-risks Stage 6 early.
+CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH=y
+CONFIG_ESP_COREDUMP_DATA_FORMAT_ELF=y
+CONFIG_ESP_COREDUMP_CHECKSUM_CRC32=y
+
+# ── mbedTLS — ECDSA P-256 + the cert sizes the fleet chain needs ───────────
+CONFIG_MBEDTLS_ECP_DP_SECP256R1_ENABLED=y
+CONFIG_MBEDTLS_ECDSA_C=y
+
+# ── Watchdogs OFF (QEMU openeth quirk) ─────────────────────────────────────
+# QEMU's emulated openeth interrupt timing trips the Interrupt WDT during the TLS socket select()
+# (esp_vfs_select in tcp_connect), panicking CPU1 mid-handshake. Disable the interrupt + task
+# watchdogs for the emulated target (a real board does not need this).
+CONFIG_ESP_INT_WDT=n
+CONFIG_ESP_TASK_WDT_INIT=n
+CONFIG_ESP_TASK_WDT_EN=n
+
+# ── Misc ───────────────────────────────────────────────────────────────────
+# Roomy main task stack — the spike does TLS + MQTT from app_main before handing off to the task.
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
+CONFIG_LOG_DEFAULT_LEVEL_INFO=y

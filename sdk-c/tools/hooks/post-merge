@@ -1,0 +1,18 @@
+#!/bin/sh
+# nff: auto-regenerate the Arduino library after a merge/pull updates this repo.
+# Source of truth lives in tools/hooks/; install with tools/install-hooks.ps1.
+# Never blocks the merge — sync failures only warn.
+repo_root="$(git rev-parse --show-toplevel)" || exit 0
+
+if command -v python >/dev/null 2>&1; then
+    PY=python
+elif command -v py >/dev/null 2>&1; then
+    PY=py
+else
+    echo "[nff] python not found on PATH — Arduino lib NOT synced" >&2
+    exit 0
+fi
+
+"$PY" "$repo_root/tools/sync_arduino_lib.py" --quiet \
+    || echo "[nff] sync_arduino_lib.py failed — Arduino lib may be stale" >&2
+exit 0

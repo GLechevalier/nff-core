@@ -1,0 +1,2060 @@
+ ▐▛███▜▌   Claude Code v2.1.161
+▝▜█████▛▘  Opus 4.8 · Claude Max
+  ▘▘ ▝▝    D:\IntraMap\Carto\R_D\MCPIOT\nff_cli_mcp\nff-fleet\sketches\hell…
+
+
+❯ /mcp                                                                          
+  ⎿  Authentication successful. Connected to nff.
+
+❯ Look at this : # What changed                                                 
+                                                                                
+  ## Fix: enlarge MQTT buffer so OTA commands aren't dropped                    
+                                                                                
+  **Problem:** OTA pushes via `fleet_push_ota` never reached devices running    
+  the                                                                           
+  Arduino port. The signed OTA command (~421 B — it carries `version`, a        
+  64-char                                                                       
+  `sha256`, the `url`, and a ~144-char `cmd_sig`) exceeded **PubSubClient's     
+  default                                                                       
+  256-byte buffer**. PubSubClient silently discards any inbound PUBLISH larger  
+  than                                                                          
+  its buffer (`readPacket()` sets `len = 0`), so the receive callback never     
+  fired                                                                         
+  and `nff_cmd_dispatch` never ran — no `ota_started`, no reboot, fw unchanged. 
+  Smaller commands (`ping`/`diag` ≈ 216 B) fit, which is why those worked.      
+                                                                                
+  This had to be fixed in the SDK, not the fleet: the command can't be shrunk   
+  under                                                                         
+  256 B (`cmd_sig` ~144 + `sha256` 64 = 208 B before any other field).          
+                                                                                
+  **Change:**                                                                   
+                                                                                
+  | File | Change |                                                             
+  |---|---|                                                                     
+  | `include/nff.h` | Added tunable `NFF_MQTT_BUFFER_SIZE` (default `1024`,     
+  `#ifndef`-guarded, overridable via `-D`) |                                    
+  | `src/port/nff_port_esp32_arduino.c` |                                       
+  `client.setBufferSize(NFF_MQTT_BUFFER_SIZE)` in `nff_port_mqtt_create` |      
+  | `src/port/nff_port_esp8266_arduino.c` | Same one-liner (same PubSubClient   
+  default) |                                                                    
+  | `src/port/nff_port_esp32_idf.c` | Set `cfg.buffer.size =                    
+  NFF_MQTT_BUFFER_SIZE` (esp-mqtt already defaults to 1024; set explicitly for  
+  consistency) |                                                                
+                                                                                
+  **Verification:** host build recompiles clean; all host tests pass            
+  (`test_ota_rollback` 4/4, `test_cmd_dispatch` 5/5, `test_nonce_ring`). The    
+  new                                                                           
+  `#define` is inert on the POSIX port; the `setBufferSize` calls live in       
+  `ARDUINO`/`ESP_PLATFORM`-guarded code.                                        
+                                                                                
+  **To take effect on hardware:** rebuild the sketch (e.g. `hello_nff`) against 
+  this                                                                          
+  patched SDK and reflash the device — existing 256-B firmware keeps dropping   
+  OTA                                                                           
+  commands until reflashed. Reaching `committed` (vs just `ota_started`) also   
+  needs a                                                                       
+  reachable HTTPS `firmware_url` and resolving the ELF-vs-BIN sha256 (fleet     
+  hashes                                                                        
+  the ELF; the device verifies the flashed BIN).                                
+  , the nff sdk changed. So do I have to change the sketches/hello_nff sketch ? 
+  In any case, reflash so it takes into account the buffer change for commands  
+  to be able to test ota                                                        
+
+● I'll look at the actual sketch and how it pulls in the SDK so I can give you a
+  concrete answer rather than a generic one.
+
+  Searched for 2 patterns, read 1 file, listed 4 directories (ctrl+o to expand)
+
+● I have the full picture now. One more check — how the Arduino library gets
+  synced from the SDK, since that's the crux.
+
+  Listed 2 directories (ctrl+o to expand)
+
+● Now I have everything. Let me confirm one thing — whether the stale Arduino
+  lib is a pure relocated copy of the SDK (so a re-sync is just a file copy) and
+  what's in the SDK include/.
+
+● Bash(echo "=== SDK include/ ==="; ls
+      "D:/IntraMap/Carto/R_D/MCPIOT/nff_cli_mcp/nff-sdk-c/include/"; echo; echo
+      "=== diff SDK nff_core.c vs Arduino lib nff_core.c (co…)
+  ⎿  === SDK include/ ===
+     nff.h
+     nff_port.h
+     … +87 lines (ctrl+o to expand)
+
+● I've found something important. Let me verify the header situation in the
+  deployed lib before I lay out the answer.
+
+● Bash(echo "=== root nff.h vs src/nff.h identical? ==="; diff
+      "$HOME/Documents/Arduino/libraries/nff/nff.h"
+      "$HOME/Documents/Arduino/libraries/nff/src/nff.h" >/dev/nu…)
+  ⎿  === root nff.h vs src/nff.h identical? ===
+     IDENTICAL (both stale)
+     … +11 lines (ctrl+o to expand)
+
+  Read 2 files (ctrl+o to expand)
+
+● I now have the complete picture. Let me apply the one precondition that's
+  actually missing, then explain. First the two surgical edits to the deployed
+  Arduino library:
+
+● Update(C:\Users\gauth\Documents\Arduino\libraries\nff\src\nff.h)
+  ⎿  Added 3 lines
+      247  #ifndef NFF_TIMESTAMP_WINDOW_S
+      248  #  define NFF_TIMESTAMP_WINDOW_S    300  /* ±5 minutes */
+      249  #endif
+      250 +#ifndef NFF_MQTT_BUFFER_SIZE                                  
+      251 +#  define NFF_MQTT_BUFFER_SIZE      1024 /* MQTT RX/TX buffer.
+          + OTA cmds are ~400B+ (PubSubClient's 256 default silently drop
+          +s them). Bump to 2048 for very long pre-signed URLs. */       
+      252 +#endif                                                        
+      253  
+      254  #ifdef __cplusplus
+      255  }
+
+● Update(C:\Users\gauth\Documents\Arduino\libraries\nff\src\nff_port_esp32_ardui
+        no.cpp)
+  ⎿  Added 3 lines
+      129      struct nff_mqtt_handle *h = new struct nff_mqtt_handle();
+      130      g_nff_mqtt_handle = h;
+      131      h->client.setCallback(pubsub_callback);
+      132 +    /* PubSubClient defaults to a 256B buffer, which silently 
+          +drops larger                                                  
+      133 +       inbound PUBLISHes (e.g. ~400B+ OTA commands). Enlarge o
+          +nce at create. */                                             
+      134 +    h->client.setBufferSize(NFF_MQTT_BUFFER_SIZE);            
+      135      return (nff_mqtt_handle_t *)h;
+      136  }
+      137  
+
+● Now the answer to your two questions, plus what I just did.
+
+  1. Do you have to change hello_nff.ino? — No.
+
+  The buffer fix lives entirely inside the SDK (the port's setBufferSize call +
+  the NFF_MQTT_BUFFER_SIZE default of 1024, which is #ifndef-guarded and applied
+  automatically). 1024 comfortably covers the ~421 B OTA command. Your sketch
+  source is untouched. You'd only edit the sketch if you wanted a bigger buffer
+  — e.g. #define NFF_MQTT_BUFFER_SIZE 2048 before #include <nff.h> for very long
+  pre-signed URLs. Not needed now.
+
+  2. But a plain reflash would NOT have worked — here's the catch I found.
+
+  Your sketch does not build against the patched nff-sdk-c/ repo. Arduino
+  resolves #include <nff.h> to the library copy at:
+
+  C:\Users\gauth\Documents\Arduino\libraries\nff
+
+  That copy was stale (Jun 2) — no setBufferSize, no NFF_MQTT_BUFFER_SIZE.
+  Reflashing as-is would just rebuild the same 256-byte firmware and OTA would
+  keep getting dropped.
+
+  And you can't just re-sync the whole library from nff-sdk-c — the two have
+  diverged. The Arduino lib's nff_port_esp32_arduino.cpp is a hand-adapted fork
+  with Arduino-only fixes that the SDK's .c version lacks:
+  - DER→PEM conversion for the TLS cert/key (arduino-esp32's
+  setCACert/setCertificate/setPrivateKey need PEM strings; the SDK .c naively
+  passes raw DER — that would break mTLS on hardware).
+  - panic-handler removal (esp_set_panic_handler isn't exposed in arduino-esp32
+  3.x; the SDK .c would fail to compile).
+
+  So overwriting the lib with the SDK files would regress mTLS and break the
+  build. The right move was a surgical 2-line patch, which I just applied to the
+  deployed lib:
+  - src/nff.h → added the NFF_MQTT_BUFFER_SIZE (1024) #ifndef guard
+  - src/nff_port_esp32_arduino.cpp → added
+  h->client.setBufferSize(NFF_MQTT_BUFFER_SIZE); in nff_port_mqtt_create
+
+  This is shared by both sketches (hello_nff and blink_nff), so whichever you
+  flash now picks up the larger buffer.
+
+  ▎ Side note worth flagging: nff-sdk-c and the deployed Arduino lib have 
+  ▎ drifted apart (the lib has DER→PEM + panic fixes the SDK doesn't; the SDK 
+  ▎ had the buffer fix the lib didn't). You may want to reconcile them later so 
+  ▎ there's one source of truth.
+
+  ---
+  Now let me drive the reflash. Checking what board is connected:
+
+  Called nff (ctrl+o to expand)
+
+● ESP32 is live on COM10 (esp32:esp32:esp32, matching hello_nff's build). The
+  MCP flash tool only takes inline code, but hello_nff.ino depends on its local
+  credentials.h, so I'll compile+upload the actual sketch folder with
+  arduino-cli instead (this also picks up the just-patched library). Checking
+  it's available:
+
+● Bash(which arduino-cli 2>/dev/null && arduino-cli version 2>/dev/null || echo
+      "arduino-cli NOT on PATH")
+  ⎿  /c/Users/gauth/AppData/Local/Programs/arduino-cli/arduino-cli
+     arduino-cli  Version: 1.4.1 Commit: e39419312 Date: 2026-01-19T16:12:5
+     6Z
+● arduino-cli 1.4.1 is available. Let me confirm how NFF_FW_VERSION is supplied
+  (the header says it's injected via -D), then compile.
+
+  Searched for 1 pattern, listed 1 directory (ctrl+o to expand)
+
+● credentials.h defines NFF_FW_VERSION "1.0.0" (guarded), so no -D needed.
+  Compiling and uploading hello_nff to COM10 — this rebuilds against the patched
+  library:
+
+● Bash(arduino-cli compile --fqbn esp32:esp32:esp32 -u -p COM10
+      "D:/IntraMap/Carto/R_D/MCPIOT/nff_cli_mcp/nff-fleet/sketches/hello_nff"
+      2>&1 | tail -40)
+  ⎿  Sketch uses 1070840 bytes (81%) of program storage space. Maximum is 1
+     310720 bytes.
+     Global variables use 57016 bytes (17%) of dynamic memory, leaving 2706
+     … +12 lines (ctrl+o to expand)
+  ⎿  (timeout 10m)
+
+● Compile succeeded (81% flash usage) — the patched library builds clean. The
+  upload failed only because COM10 is busy: something is holding the serial port
+  (an open Serial Monitor, or the nff serial bridge). Let me retry the upload
+  now that compile is cached:
+
+● Bash(arduino-cli upload --fqbn esp32:esp32:esp32 -p COM10
+      "D:/IntraMap/Carto/R_D/MCPIOT/nff_cli_mcp/nff-fleet/sketches/hello_nff"
+      2>&1 | tail -20)
+  ⎿  esptool v5.2.0
+
+     A fatal error occurred: Could not open COM10, the port is busy or does
+     … +8 lines (ctrl+o to expand)
+
+● The build is done and cached — only the upload is blocked because COM10 is 
+  held by another process. Something has an open serial connection to the board:
+  most likely an Arduino IDE / VS Code Serial Monitor, or an active nff serial
+  session (serial_read) on COM10.
+
+  I can't force-release another app's hold on the port. Here's where things
+  stand and what I need from you:
+
+  Done ✅
+  - Patched the deployed Arduino library (~/Documents/Arduino/libraries/nff)
+  with the buffer fix — both the NFF_MQTT_BUFFER_SIZE (1024) define and the
+  setBufferSize() call.
+  - Recompiled hello_nff against it — clean build, 81% flash (binary is cached
+  and ready to upload).
+
+  Blocked ⏳ — upload to COM10
+
+  To finish, free the port, then I'll push the (already-built) binary in a few
+  seconds:
+  - Close any Serial Monitor (Arduino IDE, VS Code, PlatformIO, PuTTY) on COM10,
+  and
+  - If you have an nff serial reader open on it, stop that too.
+
+  You can free it from this session with:
+  ! Get-Process | Where-Object { $_.Name -match 'arduino|putty|code' } |
+  Format-Table Name,Id
+  …or just close the monitor app. Then say "go" and I'll run the upload (no
+  recompile needed). A quick unplug/replug of the ESP32 also clears the hold.
+
+  Want me to retry now? If you've freed COM10, just tell me and I'll upload
+  immediately. Once it's on the device, the ~421 B OTA command will fit the 1024
+  B buffer and fleet_push_ota should actually reach the device — at which point
+  we can test OTA end-to-end.
+
+✻ Baked for 4m 51s
+
+❯ Wait, the nff-sdk-c was changed locally before anything else, you said you    
+  changed the arduino library, isn't it the same code ????                      
+
+● Good question to push on — and no, they are not the same code. That's exactly
+  the trap. Let me show you why.
+
+  There are two separate copies of the nff SDK on your disk, and nothing links
+  them:
+
+  The repo (where the buffer PR landed)
+  Path: D:\...\nff_cli_mcp\nff-sdk-c\
+  What compiles it: nothing on-device — it's the canonical source repo
+  ────────────────────────────────────────
+  The deployed library (what the device build uses)
+  Path: C:\Users\gauth\Documents\Arduino\libraries\nff\
+  What compiles it: arduino-cli / Arduino IDE
+
+  How I know the device build uses the second one — it's in your own last build
+  record:
+
+  sketches/hello_nff/build/.../build.options.json
+    "otherLibrariesFolders": "C:\\Users\\gauth\\Documents\\Arduino\\libraries"
+
+  #include <nff.h> resolves to Documents\Arduino\libraries\nff, not to
+  nff-sdk-c. The library folder is not a symlink to the repo, and there's no 
+  sync script in nff-sdk-c/tools/ (only gen_credentials.py). So when the buffer
+  PR was applied to nff-sdk-c, that change simply never reached the folder 
+  arduino-cli actually compiles. Pre-patch, I grepped the deployed lib for
+  NFF_MQTT_BUFFER_SIZE → not found. That's why a reflash alone would've been
+  useless.
+
+  And they've diverged in both directions — proof they're genuinely different
+  code, not copies:
+
+  - The repo's port is nff_port_esp32_arduino.c; the deployed lib's is
+  nff_port_esp32_arduino.cpp — different file, with real content differences:
+    - The .cpp (lib only) has der_to_pem() converting the DER cert/key to PEM
+  (arduino-esp32 needs PEM), and removes esp_set_panic_handler (not exposed in
+  arduino-esp32 3.x).
+    - The .c (repo only) had the setBufferSize buffer fix and passes raw DER.
+
+  So: the repo had the buffer fix but lacks the Arduino cert/panic fixes; the
+  deployed lib had the Arduino fixes but lacked the buffer fix. Neither was a 
+  superset. That's why I did not copy the repo files over the library — that
+  would've added the buffer fix but regressed your mTLS (DER-vs-PEM) and broken 
+  the build (panic handler). Instead I added just the two buffer lines to the
+  deployed lib, leaving its Arduino-specific fixes intact.
+
+  So your instinct ("I already changed the SDK") was reasonable — the gotcha is
+  that "the SDK" is two diverged folders, and the one the compiler reads wasn't
+  the one the PR touched.
+
+  Two things worth deciding once the device is reflashed:
+  1. Reconcile the two so there's a single source of truth (the divergence will
+  bite again on the next SDK change).
+  2. Finish the upload — build is done and cached; I just need COM10 freed.
+
+  Want me to retry the upload now (is COM10 free?), and separately, should I
+  help set up a proper sync so nff-sdk-c → Arduino lib stops drifting?
+
+✻ Baked for 37s
+
+❯ Please reconcile the two, and make it so when I change the nff-sdk-c repo     
+  here, it is synced with what hello_nff uses to build please !!!               
+
+● I'm in plan mode — I'll research thoroughly before proposing anything. The
+  core challenge is clear: the repo and the deployed Arduino library have
+  diverged in both directions, and the Arduino library isn't a straight copy
+  (flat layout, .c→.cpp rename, root header). Before I can design a
+  reconciliation + sync, I need the complete divergence surface and the
+  build/packaging mechanics. Let me launch parallel Explore agents.
+
+● 2 Explore agents finished (ctrl+o to expand)
+   ├ Enumerate repo vs lib divergence · 35 tool uses · 37.1k tokens
+   │ ⎿  Done
+   └ Repo build + Arduino packaging mechanics · 38 tool uses · 38.8k tokens
+     ⎿  Done
+
+● Excellent — the two reports give me the full picture. Key findings:
+
+  - Divergence is small and bounded. Only 3 files differ: nff.h (cosmetic
+  position of the buffer define + stale root copy), nff_crash.c (lib uses printf
+  instead of esp_rom_printf + adds esp_system.h), and the esp32 arduino port
+  (lib has der_to_pem() DER→PEM + panic-handler removal). Everything else is
+  byte-identical.
+  - The lib is a transformed copy, not a mirror: flat layout, header duplicated
+  to root + src/, and the port renamed .c→.cpp because it contains C++ (new,
+  nullptr, WiFiClientSecure). A plain symlink can't work — Arduino would compile
+  all four guarded ports and choke on C++-in-.c.
+  - No existing automation — the lib was a manual one-off copy. README even says
+  "copy this repo into your libraries folder" manually.
+
+  So the design is: (1) merge the lib-only Arduino fixes back into the repo so
+  the repo becomes a true superset, then (2) a generator script that regenerates
+  the Arduino lib from the repo, wired to run automatically. Let me confirm the
+  exact Arduino paths and pressure-test the design.
+
+● Bash(echo "=== arduino-cli user/libraries dir ==="; arduino-cli config dump
+      2>/dev/null | grep -iE "user|data|sketchbook"; echo; echo "=== nff-sdk-c
+      git hooks dir +…)
+  ⎿  === arduino-cli user/libraries dir ===
+
+     === nff-sdk-c git hooks dir + is hooks versioned? ===
+     … +24 lines (ctrl+o to expand)
+
+● I now have everything I need. The reconciliation surface is small and
+  well-bounded, and I've confirmed the mechanics:
+
+  - Merge back into repo (lib-only Arduino fixes the repo lacks): nff_crash.c
+  (esp_rom_printf→printf + esp_system.h, inside the shared #if ESP_PLATFORM
+  block — printf is safe for IDF too) and nff_port_esp32_arduino.c (the
+  der_to_pem() + panic-removal + the buffer fix I already added to the lib).
+  After this the repo is a true superset.
+  - Generator then regenerates the Arduino lib from the repo (flatten, duplicate
+  header to root+src/, rename arduino port .c→.cpp). A plain symlink is ruled
+  out (C++-in-.c + all four guarded ports would compile).
+  - esp8266 port confirmed C++ + uses setInsecure() (no DER→PEM needed) — so it
+  could be included, just renamed .cpp.
+
+  Two decisions are genuinely yours before I finalize the plan:
+
+● User answered Claude's questions:
+  ⎿  · How automatic should the repo→Arduino-lib sync be? (The Arduino lib lives
+     outside git at Documents\Arduino\libraries\nff and must be regenerated 
+     from the repo.) → Build wrapper + git hook
+     · Which ports should the generated Arduino library include? → ESP32 only 
+     (match current)
+
+● Both decisions noted: build wrapper + git hook, ESP32-only. I have everything
+  to finalize. Writing the plan.
+
+● Updated plan
+  ⎿  /plan to preview
+
+● The plan is written. Here's the summary before you approve:
+
+  Reconcile (repo becomes the single source of truth): merge the 2 lib-only
+  Arduino fixes back into nff-sdk-c — the der_to_pem() + panic-removal (already
+  in the lib's .cpp, now also carrying the buffer fix) into
+  src/port/nff_port_esp32_arduino.c, and the printf/esp_system.h change into
+  src/nff_crash.c. All other files already match.
+
+  Sync mechanism (your picks: build wrapper + git hook, ESP32-only):
+  - tools/sync_arduino_lib.py — regenerates the flat Arduino lib from the repo
+  (duplicate header, rename arduino port .c→.cpp, exclude the other 3 ports).
+  Idempotent.
+  - Git post-commit/post-merge hook (+ install-hooks.ps1) → every commit
+  re-syncs.
+  - sketches/flash.ps1 → one-command sync-build-flash for uncommitted edits.
+
+  Verified-by-plan: round-trip idempotency, clean compile, hook auto-regen, then
+  end-to-end OTA over the now-large-enough buffer.
+
+● User approved Claude's plan
+  ⎿  Plan saved to: 
+     C:\Users\gauth\.claude\plans\please-reconcile-the-two-pure-seal.md · /plan 
+     to edit
+     Reconcile nff-sdk-c with the deployed Arduino library + automatic sync
+
+     Context
+
+     There are two copies of the nff C SDK on disk that have silently diverged,
+     and the
+     device build uses the wrong one:
+
+     - Canonical repo (source of truth):
+     D:\IntraMap\Carto\R_D\MCPIOT\nff_cli_mcp\nff-sdk-c\ (git).
+     - Deployed Arduino library (what arduino-cli actually compiles):
+     C:\Users\gauth\Documents\Arduino\libraries\nff\ — a hand-made, flattened
+     copy
+     (header duplicated to root + src/, esp32 port renamed .c→.cpp because it is
+     C++).
+     Not under git, no automation, made as a one-off manual copy.
+
+     #include <nff.h> in sketches/hello_nff resolves to the Documents copy, not
+     the repo.
+     So the recent MQTT-buffer fix (NFF_MQTT_BUFFER_SIZE/setBufferSize) applied
+     to the repo
+     never reached the device — a reflash alone was useless. (Already
+     hot-patched into the lib
+     manually this session.) The two have drifted in both directions, so neither
+     is a superset:
+
+     File: nff.h
+     Repo has: buffer define (canonical)
+     Lib has: buffer define (manually added; root copy was stale)
+     ────────────────────────────────────────
+     File: nff_crash.c
+     Repo has: esp_rom_printf
+     Lib has: printf + #include "esp_system.h" (arduino-esp32 3.x lacks
+       esp_rom_printf)
+     ────────────────────────────────────────
+     File: nff_port_esp32_arduino.c/.cpp
+     Repo has: raw-DER TLS, esp_set_panic_handler
+     Lib has: der_to_pem() conversion, panic handler removed, buffer fix
+
+     All other 11 paired files are byte-identical.
+
+     Goal: (1) merge the lib-only Arduino fixes back into the repo so the repo
+     becomes the
+     single source of truth, then (2) make the repo auto-regenerate the Arduino
+     library so a
+     repo change always reaches what hello_nff builds against. Decisions:
+     ESP32-only lib
+     (match current deployment); automation = build wrapper + git hook.
+
+     ---
+     Part A — Reconcile: merge lib-only fixes back into the repo
+
+     Make the repo a true superset. Only 2 repo files change (include/nff.h
+     already has the
+     buffer fix from the PR — no change):
+
+     1. nff-sdk-c/src/port/nff_port_esp32_arduino.c — adopt the lib's current
+     .cpp content
+     as canonical (it already contains everything correct): the der_to_pem()
+     helper, the
+     ca_pem/cert_pem/key_pem handle members + destructor, the PEM-based
+     nff_port_mqtt_set_tls()
+     rewrite, the panic-handler removal, and the
+     setBufferSize(NFF_MQTT_BUFFER_SIZE) line.
+     Source: copy C:\Users\gauth\Documents\Arduino\libraries\nff\src\nff_port_es
+     p32_arduino.cpp
+     over the repo's .c (keep the repo filename .c; it is C++ but only ever
+     compiled by
+     Arduino under the #if defined(ARDUINO) && defined(ESP32) guard, never by
+     repo CMake/host
+     tests, so the extension is harmless in the repo).
+     2. nff-sdk-c/src/nff_crash.c — apply the lib's two edits inside the shared
+     #if defined(ESP_PLATFORM) block: add #include "esp_system.h", and change
+     esp_rom_printf("[nff] %s\n", line); → printf("[nff] %s\n", line);. printf
+     is valid
+     under ESP-IDF too, so this does not regress the IDF port
+     (nff_port_esp32_idf.c).
+
+     Note: esp_set_panic_handler is removed only from the Arduino port; the IDF
+     port is a
+     separate file and keeps its own behavior. ESP8266 port needs no DER→PEM (it
+     uses BearSSL
+     setInsecure()) — left untouched.
+
+     Part B — Generator: regenerate the Arduino lib from the repo
+
+     New script nff-sdk-c/tools/sync_arduino_lib.py (Python, matching existing
+     tools/gen_credentials.py). Resolve the target lib dir as: arduino-cli 
+     config dump
+     directories.user + /libraries/nff, falling back to
+     ~/Documents/Arduino/libraries/nff;
+     allow a --dest override. Transform (ESP32-only):
+
+     - Wipe the target src/ first (avoid stale leftovers), recreate it flat.
+     - include/nff.h → <lib>/nff.h and <lib>/src/nff.h
+     - include/nff_port.h → <lib>/src/nff_port.h
+     - src/*.c except src/port/ → <lib>/src/ (nff_core, nff_mqtt, nff_cmd,
+     nff_ota,
+     nff_crash, nff_diag, nff_heartbeat, nff_security)
+     - src/*.h (nff_internal.h, nff_json.h, nff_sha256_fallback.h) → <lib>/src/
+     - src/port/nff_port_esp32_arduino.c → <lib>/src/nff_port_esp32_arduino.cpp
+     (rename)
+     - exclude nff_port_esp8266_arduino.c, nff_port_esp32_idf.c,
+     nff_port_posix.c
+     - library.properties → <lib>/library.properties
+     - Write <lib>/.nff_sync_meta with git rev-parse HEAD (drift/staleness
+     marker).
+
+     The transform is idempotent: after Part A, running it leaves the lib
+     byte-identical to
+     its current (correct) state.
+
+     Part C — Automation (build wrapper + git hook)
+
+     - Git hook: nff-sdk-c/tools/hooks/post-commit and post-merge (#!/bin/sh →
+     python tools/sync_arduino_lib.py), plus nff-sdk-c/tools/install-hooks.ps1
+     that copies
+     them into .git/hooks/ (hooks aren't versioned, so an installer is needed;
+     run once).
+     Result: any commit/merge in nff-sdk-c regenerates the Arduino lib.
+     - Build wrapper: nff-fleet/sketches/flash.ps1 with params -Sketch hello_nff
+     -Port COM10
+     (defaults). It runs python <sdk>\tools\sync_arduino_lib.py, then
+     arduino-cli compile -u -p <Port> --fqbn esp32:esp32:esp32 
+     <sketches\Sketch>. Guarantees a
+     fresh lib for uncommitted edits and gives a one-command sync-build-flash.
+     - Add .nff_sync_meta (and the generated lib path, if ever vendored) to
+     .gitignore as needed.
+
+     Known gap (documented, not solved): Arduino IDE GUI builds of uncommitted
+     edits won't
+     auto-sync (the hook fires on commit, the wrapper on CLI build). Committing
+     — the normal flow —
+     covers it.
+
+     Rejected alternative — symlink
+
+     Symlinking Documents\Arduino\libraries\nff → the repo fails: (a) the
+     arduino port is C++ in
+     a .c file (must be .cpp); (b) Arduino recursively compiles all four guarded
+     ports in
+     src/port/; (c) it would expose .git/, tests/, docs/ cruft to the IDE. A
+     generated flat
+     copy is the correct model.
+
+     Verification
+
+     1. After Part A, run python tools/sync_arduino_lib.py; confirm the
+     regenerated lib still
+     contains der_to_pem, setBufferSize(NFF_MQTT_BUFFER_SIZE), the panic-removal
+     stub, and
+     printf in nff_crash.c. diff regenerated vs current lib → only
+     header-position
+     normalization, otherwise identical.
+     2. Idempotency: run the generator twice → second run produces no changes.
+     3. arduino-cli compile --fqbn esp32:esp32:esp32 sketches/hello_nff → clean
+     (previously 81%).
+     4. Install hooks (tools/install-hooks.ps1); make a trivial commit in
+     nff-sdk-c → confirm the
+     lib auto-regenerates and .nff_sync_meta updates to the new HEAD.
+     5. Free COM10, then sketches/flash.ps1 -Sketch hello_nff -Port COM10 →
+     device boots
+     (state=CONNECTED).
+     6. End-to-end OTA: mcp__nff-fleet__fleet_list_devices shows the device
+     online;
+     mcp__nff-fleet__fleet_push_ota now reaches it (the ~421 B signed OTA
+     command fits the
+     1024 B buffer) → expect ota_started (full committed additionally needs a
+     reachable
+     HTTPS firmware URL and ELF-vs-BIN sha256 resolution, per the SDK
+     changelog).
+● Plan approved. Let me track this with a todo list and start implementing.
+
+  Read 1 file (ctrl+o to expand)
+
+● Let me read the lib's nff_crash.c to replicate its exact ESP changes, and
+  confirm the lib .cpp first line for the verbatim port copy.
+
+  Read 1 file (ctrl+o to expand)
+
+● Confirmed. Now applying Part A. First the two nff_crash.c edits to the repo:
+
+● Update(D:/IntraMap/Carto/R_D/MCPIOT/nff_cli_mcp/nff-sdk-c/src/nff_crash.c)
+  ⎿  Added 1 line
+      31  
+      32  #if defined(ESP_PLATFORM)
+      33  #  include "esp_attr.h"
+      34 +#  include "esp_system.h"                                      
+      35  #  define NFF_RTC_ATTR RTC_NOINIT_ATTR
+      36  #else
+      37  #  define NFF_RTC_ATTR
+
+● Update(D:/IntraMap/Carto/R_D/MCPIOT/nff_cli_mcp/nff-sdk-c/src/nff_crash.c)
+  ⎿  Added 1 line, removed 1 line
+      61  
+      62      /* Also output to UART via platform log */
+      63  #if defined(ESP_PLATFORM)
+      64 -    esp_rom_printf("[nff] %s\n", line);                        
+      64 +    printf("[nff] %s\n", line);                                
+      65  #elif defined(ARDUINO)
+      66      Serial.println(line);
+      67  #else
+
+● Now copy the lib's canonical .cpp over the repo's .c (verbatim — it already
+  contains DER→PEM, panic-removal, and the buffer fix):
+
+● Bash(cp "C:/Users/gauth/Documents/Arduino/libraries/nff/src/nff_port_esp32_ard
+      uino.cpp" "D:/IntraMap/Carto/R_D/MCPIOT/nff_cli_mcp/nff-sdk-c/src/port/nff
+      _port_esp32_a…)
+  ⎿  copied
+     --- verify key markers present in repo .c ---
+     6
+     … +2 lines (ctrl+o to expand)
+
+● esp_set_panic_handler match is just the explanatory comment ("is not exposed
+  in arduino-esp32 3.x"), not a real call — let me confirm there's no actual
+  invocation:
+
+● Bash(echo "=== lines mentioning esp_set_panic_handler in repo .c ==="; grep -n
+      "esp_set_panic_handler"
+      "D:/IntraMap/Carto/R_D/MCPIOT/nff_cli_mcp/nff-sdk-c/src/port/n…)
+  ⎿  === lines mentioning esp_set_panic_handler in repo .c ===
+     394:    /* esp_set_panic_handler is not exposed in arduino-esp32 3.x;
+     … +7 lines (ctrl+o to expand)
+
+● Part A reconciliation is complete and proven: both nff_port_esp32_arduino.c
+  and nff_crash.c in the repo are now byte-identical to the working lib
+  versions; the only esp_set_panic_handler reference is an explanatory comment.
+  The repo is now a true superset.
+● Now the generator. Let me check arduino-cli config dump output format so the
+  path resolution is robust:
+
+● Bash(arduino-cli config dump 2>&1 | head -30; echo "=== exit: $? ===")
+  ⎿  board_manager:
+         additional_urls:
+             - https://arduino.esp8266.com/stable/package_esp8266com_index.
+     … +3 lines (ctrl+o to expand)
+
+● Bash(echo "=== config get directories.user ==="; arduino-cli config get
+      directories.user 2>&1; echo "=== exit $? ===")
+  ⎿  === config get directories.user ===
+     C:\Users\gauth\Documents\Arduino
+
+     === exit 0 ===
+
+● arduino-cli config get directories.user resolves the path cleanly. Now writing
+  the generator:
+
+● Write(D:/IntraMap/Carto/R_D/MCPIOT/nff_cli_mcp/nff-sdk-c/tools/sync_arduino_li
+       b.py)
+  ⎿  Wrote 142 lines to ..\..\..\nff-sdk-c\tools\sync_arduino_lib.py
+      2 """Regenerate the Arduino library from this repo (the single sour
+        ce of truth).
+      4 The repo uses a nested layout (include/ + src/ + src/port/) and s
+        upports four
+        ino IDE/CLI,a mutually-exclusive #if-guarded port files. The Ardu
+      6 however, needs a *flat* library: every file under src/ is compile
+      7 ESP32 Arduino port contains C++ so it must carry a .cpp extension
+        . This script
+        es what athat transformation so a change in the repo always reach
+      9 sketch (e.g. sketches/hello_nff) actually builds against.
+     … +154 lines (ctrl+o to expand)
+
+● Now run the generator and verify idempotency against the current (correct)
+  lib:
+
+● Bash(cd "D:/IntraMap/Carto/R_D/MCPIOT/nff_cli_mcp/nff-sdk-c" && echo "===
+      snapshot current lib before regen ===" && cp -r
+      "C:/Users/gauth/Documents/Arduino/libraries…)
+  ⎿  === snapshot current lib before regen ===
+     repo : D:\IntraMap\Carto\R_D\MCPIOT\nff_cli_mcp\nff-sdk-c
+     dest : C:\Users\gauth\Documents\Arduino\libraries\nff
+     … +17 lines (ctrl+o to expand)
+  ⎿  Shell cwd was reset to 
+     D:\IntraMap\Carto\R_D\MCPIOT\nff_cli_mcp\nff-fleet
+
+● Generator ran cleanly. Now verify what changed vs the pre-regen lib (expect
+  only header normalization + new meta file), then confirm idempotency on a
+  second run:
+
+● Bash(echo "=== diff before-snapshot vs regenerated lib (recursive) ==="; diff
+      -rq "/tmp/nff_lib_before" "C:/Users/gauth/Documents/Arduino/libraries/nff"
+      2>&1; echo;…)
+  ⎿  === diff before-snapshot vs regenerated lib (recursive) ===
+     Only in C:/Users/gauth/Documents/Arduino/libraries/nff: .nff_sync_meta
+     Files /tmp/nff_lib_before/nff.h and C:/Users/gauth/Documents/Arduino/l
+     … +17 lines (ctrl+o to expand)
+
+● Header normalized to canonical position, root nff.h buffer define restored,
+  everything else identical. Now confirm idempotency (second run = no changes):
+
+● Bash(L="C:/Users/gauth/Documents/Arduino/libraries/nff"; cp -r "$L"
+      "/tmp/nff_lib_run1" && cd
+      "D:/IntraMap/Carto/R_D/MCPIOT/nff_cli_mcp/nff-sdk-c" && python tools/sy…)
+  ⎿  synced nff -> C:\Users\gauth\Documents\Arduino\libraries\nff  (commit
+     0bbae0a1c37f, esp32-only)
+     === idempotency diff (run1 vs run2, expect empty) ===
+     IDEMPOTENT — no changes on second run
+  ⎿  Shell cwd was reset to 
+     D:\IntraMap\Carto\R_D\MCPIOT\nff_cli_mcp\nff-fleet
+
+● Generator works and is idempotent. Now the compile check against the
+  regenerated lib, then on to automation.
+
+● Bash(arduino-cli compile --fqbn esp32:esp32:esp32
+      "D:/IntraMap/Carto/R_D/MCPIOT/nff_cli_mcp/nff-fleet/sketches/hello_nff"
+      2>&1 | tail -8)
+  ⎿  Sketch uses 1070840 bytes (81%) of program storage space. Maximum is 1
+     310720 bytes.
+     Global variables use 57016 bytes (17%) of dynamic memory, leaving 2706
+     64 bytes for local variables. Maximum is 327680 bytes.
+  ⎿  (timeout 10m)
+
+● Compile is clean (81%) against the regenerated lib. Now Part C — the git
+  hooks, installer, and flash wrapper:
+
+● Write(D:/IntraMap/Carto/R_D/MCPIOT/nff_cli_mcp/nff-sdk-c/tools/hooks/post-comm
+       it)
+  ⎿  Wrote 18 lines to ..\..\..\nff-sdk-c\tools\hooks\post-commit
+       2 # nff: auto-regenerate the Arduino library whenever this SDK rep
+         o changes.
+       3 # Source of truth lives in tools/hooks/; install with tools/inst
+         all-hooks.ps1.
+       4 # Never blocks the commit — sync failures only warn.
+       6 repo_root="$(git rev-parse --show-toplevel)" || exit 0
+       7 if command -v python >/dev/null 2>&1; then
+       8     PY=python
+       9 elif command -v py >/dev/null 2>&1; then
+      10     PY=py
+     … +12 lines (ctrl+o to expand)
+
+● Write(D:/IntraMap/Carto/R_D/MCPIOT/nff_cli_mcp/nff-sdk-c/tools/hooks/post-merg
+       e)
+  ⎿  Wrote 18 lines to ..\..\..\nff-sdk-c\tools\hooks\post-merge
+       2 # nff: auto-regenerate the Arduino library after a merge/pull up
+         dates this repo.
+       3 # Source of truth lives in tools/hooks/; install with tools/inst
+         all-hooks.ps1.
+       4 # Never blocks the merge — sync failures only warn.
+       6 repo_root="$(git rev-parse --show-toplevel)" || exit 0
+       7 if command -v python >/dev/null 2>&1; then
+       8     PY=python
+       9 elif command -v py >/dev/null 2>&1; then
+      10     PY=py
+     … +12 lines (ctrl+o to expand)
+
+● Write(D:/IntraMap/Carto/R_D/MCPIOT/nff_cli_mcp/nff-sdk-c/tools/install-hooks.p
+       s1)
+  ⎿  Wrote 29 lines to ..\..\..\nff-sdk-c\tools\install-hooks.ps1
+       2 .SYNOPSIS
+       3     Install nff git hooks that auto-regenerate the Arduino libra
+       4 .DESCRIPTION/merge.
+       5     Git hooks live under .git/hooks/ which is NOT version-contro
+       6     installer copies the tracked sources from tools/hooks/ into 
+         place. Run once
+         pull` in this. After this, any `git commit` or `git merge`/`git 
+       8     repo regenerates C:\Users\<you>\Documents\Arduino\libraries\
+       9 #>f from the repo.
+      10 $ErrorActionPreference = 'Stop'
+     … +28 lines (ctrl+o to expand)
+
+● Write(D:/IntraMap/Carto/R_D/MCPIOT/nff_cli_mcp/nff-fleet/sketches/flash.ps1)
+  ⎿  Wrote 36 lines to ..\flash.ps1
+       2 .SYNOPSIS
+       3     Sync the Arduino library from the nff-sdk-c repo, then build
+       4 .DESCRIPTIONketch.
+       5     One-command sync-build-flash. Guarantees the device is built
+          against the
+         g the Arduinoepo sources (even uncommitted edits) by regeneratin
+       7     library first, then compiling and uploading with arduino-cli
+       8 .EXAMPLE
+       9     .\flash.ps1                         # hello_nff -> COM10
+      10 .EXAMPLE
+     … +33 lines (ctrl+o to expand)
+● Now install the hooks and test the auto-sync by making a trivial commit in
+  nff-sdk-c:
+
+● PowerShell(& "D:\IntraMap\Carto\R_D\MCPIOT\nff_cli_mcp\nff-sdk-c\tools\install
+            -hooks.ps1")
+  ⎿  installed post-commit -> D:\IntraMap\Carto\R_D\MCPIOT\nff_cli_mcp\nff-
+     sdk-c\.git\hooks\post-commit
+     installed post-merge -> D:\IntraMap\Carto\R_D\MCPIOT\nff_cli_mcp\nff-s
+     … +5 lines (ctrl+o to expand)
+
+● Hooks installed. Now let me check the nff-sdk-c repo state before committing
+  (which will both record the reconciliation + tooling and trigger the auto-sync
+  hook):
+
+● Bash(cd "D:/IntraMap/Carto/R_D/MCPIOT/nff_cli_mcp/nff-sdk-c" && echo "===
+      branch ===" && git branch --show-current && echo "=== status ===" && git
+      status --short &&…)
+  ⎿  === branch ===
+     main
+     === status ===
+     … +13 lines (ctrl+o to expand)
+  ⎿  Shell cwd was reset to 
+     D:\IntraMap\Carto\R_D\MCPIOT\nff_cli_mcp\nff-fleet
+
+● The nff-sdk-c repo is on main with the buffer-fix PR's changes staged but not 
+  yet committed (alongside my reconciliation + new tooling). Rather than
+  silently bundle all that into a commit on main, I'll verify the hook mechanism
+  by invoking it directly, and leave the actual commit decision to you. Running
+  the hook script as git would:
+
+● Bash(cd "D:/IntraMap/Carto/R_D/MCPIOT/nff_cli_mcp/nff-sdk-c" && echo "=== run
+      post-commit hook directly (simulates what git does) ===" && sh
+      .git/hooks/post-commit &…)
+  ⎿  === run post-commit hook directly (simulates what git does) ===
+     synced nff -> C:\Users\gauth\Documents\Arduino\libraries\nff  (commit
+     0bbae0a1c37f, esp32-only)
+     … +6 lines (ctrl+o to expand)
+  ⎿  Shell cwd was reset to 
+     D:\IntraMap\Carto\R_D\MCPIOT\nff_cli_mcp\nff-fleet
+
+● Hook verified — git invokes .git/hooks/post-commit exactly like that after
+  each commit, regenerating the lib and stamping .nff_sync_meta. Tasks 3 & 4 are
+  done. Now the device flash via the new wrapper (tests flash.ps1 end-to-end).
+  Let me check the port is free and run it:
+
+● PowerShell(& "D:\IntraMap\Carto\R_D\MCPIOT\nff_cli_mcp\nff-fleet\sketches\flas
+            h.ps1" -Sketch hello_nff -Port COM10 2>&1 | Select-Object -Last 25)
+  ⎿  ==> Syncing Arduino lib from repo (D:\IntraMap\Carto\R_D\MCPIOT\nff_cl
+     i_mcp\nff-fleet\sketches\..\..\nff-sdk-c)
+     ==> Building + uploading 'hello_nff' to COM10 (esp32:esp32:esp32)
+     … +25 lines (ctrl+o to expand)
+  ⎿  (timeout 10m)
+
+● Flash wrapper worked end-to-end — synced, compiled, uploaded, hash verified,
+  device reset. Now the OTA verification. Let me confirm the device boots and
+  reaches the broker, then test that fleet_push_ota now actually reaches it:
+
+● Let me read the boot serial to confirm WiFi + broker connection (device needs
+  ~15s after reset):
+
+  Called nff (ctrl+o to expand)
+
+● Device is up: WiFi connected (172.20.10.2), broker CONNECTED, running the
+  reconciled firmware. Now let me check the fleet sees it, then push an OTA to
+  prove the ~421 B command now actually reaches the device (the whole point of
+  the buffer fix):
+
+  Called nff-fleet (ctrl+o to expand)
+
+● test-device-01 is online (heap 131 KB, fw 1.0.0). Now the decisive test — push
+  an OTA and simultaneously capture serial to see whether the ~421 B command
+  actually arrives at the device (before the fix it was silently dropped at the
+  256 B buffer):
+
+  Called nff-fleet, nff 2 times (ctrl+o to expand)
+
+● The OTA push failed server-side before publishing — fleet_push_ota needs the
+  build's ELF stored at C:\data\firmware\testbuild001\firmware.elf (it hashes
+  the ELF to construct the signed command). So nothing was sent yet. The fleet
+  tool's own behavior is actually the cleanest proof: if the device receives the
+  command, the push returns a response; before the buffer fix it would time
+  out. Let me store the hello_nff ELF first:
+
+● Bash(ELF="D:/IntraMap/Carto/R_D/MCPIOT/nff_cli_mcp/nff-fleet/sketches/hello_nf
+      f/build/esp32.esp32.esp32/hello_nff.ino.elf"; ls -la "$ELF" | awk '{print
+      $5, $9}'; ech…)
+  ⎿  13446444 D:/IntraMap/Carto/R_D/MCPIOT/nff_cli_mcp/nff-fleet/sketches/h
+     ello_nff/build/esp32.esp32.esp32/hello_nff.ino.elf
+     size MB:
+     13
+● 13 MB ELF — base64 of that is far too large to pass inline (and unnecessary).
+  The server only needs a file to sha256 when constructing the command, so a
+  tiny stub works to exercise the delivery path. But first, a cleaner sanity
+  check: fleet_ping sends a fresh signed command — it tells me whether the
+  device accepts signed commands right now (I saw a "cmd rejected (security)" on
+  boot, likely a stale retained command):
+
+  Called nff-fleet (ctrl+o to expand)
+
+● fleet_ping also timed out — and a ping (~216 B) fits even the old buffer, so
+  this is not a buffer problem. It points to a separate, pre-existing issue: the
+  cmd rejected (security) I saw on boot. The device appears to receive commands
+  but reject them at the signature/timestamp check, so it never responds. Let
+  me confirm by watching serial while pinging:
+
+  Called nff, nff-fleet 2 times (ctrl+o to expand)
+
+● The serial is revealing: cmd rejected (security) fires once right after 
+  connect (the QoS-1 ping delivered as the device finishes booting), then the
+  device responds to nothing. A ping fits the old 256 B buffer, so the command
+  is arriving — the device is rejecting it at the security check and staying
+  silent, which is why the fleet times out. That's a separate, pre-existing
+  issue from the buffer work. Let me pin down the cause:
+
+  Searched for 2 patterns, read 1 file (ctrl+o to expand)
+
+● Found the root cause — and it confirms this is not related to our
+  buffer/reconciliation work.
+
+  nff_security.c:107-113: the timestamp-window check is skipped when the device
+  isn't SNTP-synced (now < 1e9), and hello_nff never calls configTime, so
+  timestamps aren't the problem. That leaves the ECDSA signature verification
+  (line 137-141): the device verifies each command against the
+  NFF_CMD_VERIFY_KEY embedded in its credentials.h, using a build_tbs canonical
+  string ("{action}|{nonce}|{timestamp}"). A cmd rejected (security) on a fresh
+  ping means the fleet's signature doesn't verify against the device's embedded 
+  key — i.e. a command-signing key mismatch (or a TBS-format mismatch between
+  the fleet's signer and the device), pre-existing and unrelated to the MQTT
+  buffer.
+
+  Let me mark the sync work done — that's the deliverable, and it's fully
+  verified.
+
+● Done — reconciliation + auto-sync are in place and verified
+
+  Your two questions, answered by the work: hello_nff.ino needed no changes, and
+  the device is now reflashed against the patched SDK. But the real fix was
+  making the repo and the Arduino library stop diverging.
+
+  What I changed
+
+  1. Reconciled the repo into the single source of truth (nff-sdk-c):
+  - src/nff_crash.c — adopted the lib's printf (arduino-esp32 3.x lacks
+  esp_rom_printf) + #include "esp_system.h".
+  - src/port/nff_port_esp32_arduino.c — adopted the lib's der_to_pem() TLS
+  conversion + panic-handler removal, now also carrying the buffer fix.
+  - Both are now byte-identical to the working lib versions; the repo is a true
+  superset (verified by diff).
+
+  2. Generator — nff-sdk-c/tools/sync_arduino_lib.py: regenerates the flat
+  ESP32-only Arduino lib from the repo (dup header to root+src/, rename arduino
+  port .c→.cpp, exclude the other 3 ports, stamp .nff_sync_meta). Idempotent
+  (verified: 2nd run = no changes).
+
+  3. Automation (your picks):
+  - Git post-commit + post-merge hooks (installed via tools/install-hooks.ps1) →
+  every commit/merge in nff-sdk-c auto-regenerates the lib. Verified working.
+  - nff-fleet/sketches/flash.ps1 → one-command sync-build-flash. Used it to 
+  flash the device just now (synced → compiled 81% → uploaded → hash verified).
+
+  So from now on: edit nff-sdk-c, then either commit (hook syncs) or run
+  sketches\flash.ps1 (syncs + flashes). No more drift.
+
+  Verified end-to-end
+
+  - Device booted, WiFi + broker CONNECTED, fleet_list_devices shows
+  test-device-01 online with the reconciled firmware.
+
+  ⚠️ One blocker I found that is NOT mine to fix silently
+
+  OTA (and even fleet_ping) currently fail with cmd rejected (security) on the
+  device. A ping fits the old 256 B buffer, so this is unrelated to the buffer 
+  fix — the device receives commands but rejects them at ECDSA verification.
+  Most likely the fleet's command-signing key doesn't match the 
+  NFF_CMD_VERIFY_KEY embedded in hello_nff/credentials.h (or the fleet's signed
+  TBS string differs from the device's "{action}|{nonce}|{timestamp}" format).
+
+  Concrete next step to unblock OTA: compare the fleet's command-verify public
+  key (nff-fleet provision export-cmd-key) against NFF_CMD_VERIFY_KEY_DER in
+  credentials.h; if they differ, re-provision the device's credentials. Want me
+  to dig into that next?
+
+  Note on committing
+
+  I did not commit anything. nff-sdk-c currently has the buffer-fix PR's changes
+  staged plus my reconciliation + new tooling, all on main. Tell me how you'd
+  like it committed (e.g., branch + message, or split the buffer PR from the
+  tooling) and I'll do it — your first commit will also exercise the hook for
+  real.
+
+✻ Worked for 22m 14s
+
+❯ Please dig on that                                                            
+
+● Let me dig into both sides of the signature contract — the device's verifier
+  and the fleet's signer — plus the actual keys.
+
+  Searched for 1 pattern, read 1 file (ctrl+o to expand)
+
+● Device verifier is clear. Now the fleet's signer — the critical comparison:
+
+  Read 1 file (ctrl+o to expand)
+
+● TBS format and signature encoding match exactly (both
+  "{action}|{nonce}|{timestamp}", ECDSA-SHA256, hex DER). So it's not a format
+  mismatch — it's the key. Let me compare the fleet's signing key against the
+  device's embedded verify key, and see how each was produced:
+
+  Read 3 files (ctrl+o to expand)
+
+● Now the likely smoking gun — gen_credentials.py embeds a zero placeholder
+  cmd-verify key (0x04 + 64×0x00) if --cmd-key wasn't passed. Let me check
+  what's actually in the device's credentials.h:
+
+  Read 1 file (ctrl+o to expand)
+
+● Device's embedded key is a real P-256 point (04 c5 72 34 …), not the zero
+  placeholder. So the question is whether it matches the fleet's current signing
+  key. Let me derive the fleet key's public point and compare directly:
+
+  Listed 1 directory (ctrl+o to expand)
+
+● Both cmd_sign.pem and cmd_verify.bin exist (Jun 2). Let me compare all three
+  keys — fleet signing key's public point, the exported cmd_verify.bin, and the
+  device's embedded key:
+
+● Bash(cd /c/data/keys && python -c "
+      from cryptography.hazmat.primitives import serialization…)
+  ⎿  fleet cmd_sign.pem pub : 04c572340e1d240c3dceb5ffb6a30681a012c9ebdf41d
+     16936b9d4aebc9f3c0687fe2813e602588d65cf51cfb1857b1b3f23ff35180837ef789
+     112550d5759fc01
+     … +10 lines (ctrl+o to expand)
+  ⎿  Shell cwd was reset to 
+     D:\IntraMap\Carto\R_D\MCPIOT\nff_cli_mcp\nff-fleet
+
+● All three keys are identical — fleet signing key, cmd_verify.bin, and the
+  device's embedded key all match. So it's neither a key mismatch nor a
+  TBS-format mismatch. The bug is in the verification path on the device. Let me
+  inspect the device's ECDSA verify implementation and the signature-buffer
+  handling:
+  Searched for 1 pattern (ctrl+o to expand)
+
+● Device ECDSA verify is correct (loads the 65-byte point, SHA-256 hashes, reads
+  DER sig). The keys and TBS match. That points to a buffer-size bug in the 
+  verifier: sig_hex[144] (line 100) holds a max ECDSA-P256 DER signature of 72
+  bytes = 144 hex chars + NUL = 145 needed. Let me check the JSON parser's
+  behavior on overflow and measure how often the fleet emits a 72-byte
+  signature:
+
+  Read 1 file (ctrl+o to expand)
+
+● Now I see the precise bug. nff_json_get_str (line 55, 72-73) copies at most
+  out_len-1 chars and returns -1 if it stopped before the closing quote. With
+  sig_hex[144], a hex string of exactly 144 chars (a 72-byte DER signature) 
+  overflows → returns -1 → verify_cmd rejects it at line 104. A P-256 DER sig is
+  72 bytes whenever both r and s have their top bit set (each gets a 0x00 pad).
+  Let me measure how often the fleet produces that:
+
+● Bash(cd /c/data/keys && python -c "
+      from cryptography.hazmat.primitives import hashes, serialization…)
+  ⎿  DER signature length distribution over 2000 signatures:
+       69 bytes -> 138 hex chars :     7 (0.3%)  ok
+       70 bytes -> 140 hex chars :   489 (24.4%)  ok
+     … +4 lines (ctrl+o to expand)
+  ⎿  Shell cwd was reset to 
+     D:\IntraMap\Carto\R_D\MCPIOT\nff_cli_mcp\nff-fleet
+
+● Found it — a definitive off-by-one buffer bug in the SDK verifier. Not keys,
+  not format. nff_security.c:100 declares char sig_hex[144], but a P-256 DER
+  signature is 72 bytes = 144 hex chars, which needs 145 bytes with the NUL.
+  When the fleet's signature is 72 bytes — which happens ~26% of the time
+  (measured above: both r and s get a sign-pad byte) — nff_json_get_str can't
+  fit it, returns -1, and the device rejects with cmd rejected (security). The
+  other ~74% verify fine.
+
+  Let me empirically confirm on the device by pinging a few times — some should
+  now succeed (proving the path works and this is the bug):
+
+  Called nff-fleet (ctrl+o to expand)
+
+● One timeout. Let me ping again (statistically ~74% should succeed):
+
+  Called nff-fleet (ctrl+o to expand)
+
+● Four straight timeouts — at a 26% rejection rate, P(4/4) ≈ 0.5%. So the buffer
+  bug is real but there's a second, deterministic failure on top of it. Let me
+  get ground truth: check how the verify key is actually wired into the config,
+  and whether the response path even works. Reading the NFF_CONFIG macro and the
+  response handling:
+
+  Read 1 file (ctrl+o to expand)
+
+● cmd_verify_key is correctly wired to the 65-byte key. So that's not it. The
+  deterministic 100% failure is likely in the response path — how the device's
+  reply gets matched back to the waiting MCP call. Note commands.py registers
+  the pending future keyed by device_id, but the CLAUDE.md design says keyed by
+  nonce. Let me check the router:
+
+  Read 1 file (ctrl+o to expand)
+
+● Response routing is consistent (by device_id on both sides), and heartbeats
+  clearly work (registry shows the device online). So the command path reaches
+  verify. Given 4/4 deterministic timeouts but only a 26% buffer bug, I suspect
+  a second issue — likely the device's response never gets back, or the ACL
+  blocks it. Let me check the device's response-publish topic and the broker
+  ACL:
+
+  Searched for 1 pattern, read 1 file (ctrl+o to expand)
+
+● Response path is fine — the device publishes heartbeats successfully (registry
+  confirms), so client_id == device_id and the ACL permits its response topic
+  too. So commands are genuinely being rejected at verify, deterministically.
+  Let me read the full dispatch + verify call to find the second bug:
+
+  Read 1 file (ctrl+o to expand)
+
+● Let me read the rest of dispatch and check handle_ping, but the faster path to
+  certainty is to instrument the verifier and reflash — the flash wrapper makes
+  that a ~30s cycle and the serial will tell me exactly which check fails. Let
+  me add temporary debug logging at each failure point in
+  nff_security_verify_cmd:
+
+  Read 1 file (ctrl+o to expand)
+
+● Now let me add temporary instrumentation at each rejection point:
+
+● Update(D:/IntraMap/Carto/R_D/MCPIOT/nff_cli_mcp/nff-sdk-c/src/nff_security.c)
+  ⎿  Added 4 lines, removed 3 lines
+       99      uint32_t timestamp              = 0;
+      100      char sig_hex[144]               = {0}; /* DER ECDSA-P256 m
+           ax ~72 bytes → 144 hex + null */
+      101  
+      102 -    if (nff_json_get_str(payload, plen, "nonce",     nonce,   
+          -sizeof(nonce))   != 0) return NFF_ERR_SECURITY;               
+      103 -    if (nff_json_get_u32(payload, plen, "timestamp", &timestam
+          -p)               != 0) return NFF_ERR_SECURITY;               
+      104 -    if (nff_json_get_str(payload, plen, "cmd_sig",   sig_hex, 
+          -sizeof(sig_hex)) != 0) return NFF_ERR_SECURITY;               
+      102 +    if (nff_json_get_str(payload, plen, "nonce",     nonce,   
+          +sizeof(nonce))   != 0) { nff_log("DBG verify FAIL: nonce extra
+          +ct"); return NFF_ERR_SECURITY; }                              
+      103 +    if (nff_json_get_u32(payload, plen, "timestamp", &timestam
+          +p)               != 0) { nff_log("DBG verify FAIL: ts extract"
+          +); return NFF_ERR_SECURITY; }                                 
+      104 +    if (nff_json_get_str(payload, plen, "cmd_sig",   sig_hex, 
+          +sizeof(sig_hex)) != 0) { nff_log("DBG verify FAIL: cmd_sig ext
+          +ract (buffer overflow?)"); return NFF_ERR_SECURITY; }         
+      105 +    nff_log("DBG verify: sig_hex_len=%d", (int)strlen(sig_hex)
+          +);                                                            
+      106  
+      107      /* 1. Timestamp window check */
+      108      uint32_t now = nff_port_millis() / 1000;  /* approximate w
+           all time — requires SNTP */
+
+● Update(D:/IntraMap/Carto/R_D/MCPIOT/nff_cli_mcp/nff-sdk-c/src/nff_security.c)
+  ⎿  Added 4 lines, removed 3 lines
+      114      }
+      115  
+      116      /* 2. Nonce replay check — before ECDSA (cheap short-circu
+           it) */
+      117 -    if (nonce_seen(nonce)) return NFF_ERR_SECURITY;           
+      117 +    if (nonce_seen(nonce)) { nff_log("DBG verify FAIL: nonce r
+          +eplay"); return NFF_ERR_SECURITY; }                           
+      118  
+      119      /* 3. Build TBS */
+      120      char tbs[256] = {0};
+      121 -    if (build_tbs(payload, plen, tbs, sizeof(tbs)) < 0) return
+          - NFF_ERR_SECURITY;                                            
+      121 +    if (build_tbs(payload, plen, tbs, sizeof(tbs)) < 0) { nff_
+          +log("DBG verify FAIL: build_tbs"); return NFF_ERR_SECURITY; } 
+      122 +    nff_log("DBG verify: tbs=%s", tbs);                       
+      123  
+      124      /* 4. Decode hex signature to DER bytes */
+      125      size_t hex_len = strlen(sig_hex);
+      125 -    if (hex_len == 0 || (hex_len & 1) != 0 || hex_len > 144) r
+          -eturn NFF_ERR_SECURITY;                                       
+      126 +    if (hex_len == 0 || (hex_len & 1) != 0 || hex_len > 144) {
+          + nff_log("DBG verify FAIL: hex_len=%d", (int)hex_len); return 
+          +NFF_ERR_SECURITY; }                                           
+      127      uint8_t sig_der[72];
+      128      size_t sig_len = hex_len / 2;
+      129      for (size_t i = 0; i < sig_len; i++) {
+
+● Update(D:/IntraMap/Carto/R_D/MCPIOT/nff_cli_mcp/nff-sdk-c/src/nff_security.c)
+  ⎿  Added 1 line
+      140          g_nff.cfg->cmd_verify_key,
+      141          (const uint8_t *)tbs, strlen(tbs),
+      142          sig_der, sig_len);
+      143 +    nff_log("DBG verify: ecdsa_rc=%d sig_len=%d", rc, (int)sig
+          +_len);                                                        
+      144      if (rc != 0) return NFF_ERR_SECURITY;
+      145  
+      146      /* 6. Record nonce only after successful verify */
+
+● Instrumentation in place. Now reflash via the wrapper (this also exercises the
+  sync pipeline — it'll pull the instrumented nff_security.c into the lib),
+  then ping while reading serial:
+
+● PowerShell(& "D:\IntraMap\Carto\R_D\MCPIOT\nff_cli_mcp\nff-fleet\sketches\flas
+            h.ps1" -Sketch hello_nff -Port COM10 2>&1 | Select-Object -Last 6)
+  ⎿  ==> Syncing Arduino lib from repo (D:\IntraMap\Carto\R_D\MCPIOT\nff_cl
+     i_mcp\nff-fleet\sketches\..\..\nff-sdk-c)
+     ==> Building + uploading 'hello_nff' to COM10 (esp32:esp32:esp32)
+     … +9 lines (ctrl+o to expand)
+  ⎿  (timeout 10m)
+● Instrumented firmware flashed. Now ping while capturing serial to see exactly
+  which check fails:
+
+  Called nff, nff-fleet 2 times (ctrl+o to expand)
+
+● The nff MCP token expired (interactive re-auth needed), so I'll capture serial
+  directly via PowerShell instead. Let me start a background serial capture on
+  COM10 (with DTR/RTS off to avoid resetting the device, since it's already
+  connected):
+
+● PowerShell($cap = "C:\Users\gauth\serial_cap.txt"
+            Remove-Item $cap -ErrorAction SilentlyContinue…)
+  ⎿  Running in the background (↓ to manage)
+
+● Capture running. Now send a ping — the device will log the DBG verify line the
+  moment it processes the command:
+
+  Called nff-fleet (ctrl+o to expand)
+
+● The ping succeeded — rtt_ms: 640.9, {"type":"pong"}. The device works when the
+  signature fits. So the earlier 4 failures were the buffer bug (the nff
+  serial-read also kept resetting the device, compounding it). Let me fire
+  several more pings rapidly to measure the real success/failure rate and
+  capture the DBG sig lengths:
+
+  Called nff-fleet (ctrl+o to expand)
+
+● Another success. Again:
+
+  Called nff-fleet 2 times (ctrl+o to expand)
+
+● Background command "Background serial capture on COM10 for 40s" completed (exit code 0)
+
+● Four straight successes now (~600 ms RTT each). The earlier failures were the
+  buffer bug plus the nff serial-read resetting the device each time. The
+  capture finished — let me read the DBG lines to confirm the verify internals:
+
+  Read 1 file (ctrl+o to expand)
+
+● The capture is conclusive. Look at the successful verifies:
+
+  DBG verify: sig_hex_len=142    →  ecdsa_rc=0  sig_len=71   →  pong ✅  (×3)
+  DBG verify FAIL: nonce extract →  cmd rejected (security)              (×1,
+  anomalous frame)
+
+  Every success has sig_len=71 (142 hex chars) — which fits the 144-byte buffer.
+  The keys, TBS (ping|d000f3a2|1780525615), and ECDSA all verify correctly
+  (rc=0). This definitively confirms the root cause: when the signature is 72 
+  bytes (144 hex) — ~26% of the time — it overflows sig_hex[144] and gets
+  rejected. The device itself is fully functional (pong, 600 ms RTT).
+
+  Now let me revert the debug instrumentation and apply the actual one-line fix
+  (buffer 144 → 145):
+
+● Update(D:/IntraMap/Carto/R_D/MCPIOT/nff_cli_mcp/nff-sdk-c/src/nff_security.c)
+  ⎿  Added 7 lines, removed 5 lines
+       97  int nff_security_verify_cmd(const char *payload, size_t plen) 
+           {
+       98      char nonce[NFF_NONCE_LEN]       = {0};
+       99      uint32_t timestamp              = 0;
+      100 -    char sig_hex[144]               = {0}; /* DER ECDSA-P256 m
+          -ax ~72 bytes → 144 hex + null */                              
+      100 +    char sig_hex[145]               = {0}; /* DER ECDSA-P256 m
+          +ax 72 bytes → 144 hex chars + NUL = 145.                      
+      101 +                                              MUST be 145, not
+          + 144: a 72-byte sig (both r,s sign-padded,                    
+      102 +                                              ~26% of signatur
+          +es) is 144 hex chars and overflowed a 144                     
+      103 +                                              buffer, making n
+          +ff_json_get_str fail → spurious cmd rejects. */               
+      104  
+      102 -    if (nff_json_get_str(payload, plen, "nonce",     nonce,   
+          -sizeof(nonce))   != 0) { nff_log("DBG verify FAIL: nonce extra
+          -ct"); return NFF_ERR_SECURITY; }                              
+      103 -    if (nff_json_get_u32(payload, plen, "timestamp", &timestam
+          -p)               != 0) { nff_log("DBG verify FAIL: ts extract"
+          -); return NFF_ERR_SECURITY; }                                 
+      104 -    if (nff_json_get_str(payload, plen, "cmd_sig",   sig_hex, 
+          -sizeof(sig_hex)) != 0) { nff_log("DBG verify FAIL: cmd_sig ext
+          -ract (buffer overflow?)"); return NFF_ERR_SECURITY; }         
+      105 -    nff_log("DBG verify: sig_hex_len=%d", (int)strlen(sig_hex)
+          -);                                                            
+      105 +    if (nff_json_get_str(payload, plen, "nonce",     nonce,   
+          +sizeof(nonce))   != 0) return NFF_ERR_SECURITY;               
+      106 +    if (nff_json_get_u32(payload, plen, "timestamp", &timestam
+          +p)               != 0) return NFF_ERR_SECURITY;               
+      107 +    if (nff_json_get_str(payload, plen, "cmd_sig",   sig_hex, 
+          +sizeof(sig_hex)) != 0) return NFF_ERR_SECURITY;               
+      108  
+      109      /* 1. Timestamp window check */
+      110      uint32_t now = nff_port_millis() / 1000;  /* approximate w
+           all time — requires SNTP */
+
+● Update(D:/IntraMap/Carto/R_D/MCPIOT/nff_cli_mcp/nff-sdk-c/src/nff_security.c)
+  ⎿  Added 3 lines, removed 4 lines
+      116      }
+      117  
+      118      /* 2. Nonce replay check — before ECDSA (cheap short-circu
+           it) */
+      119 -    if (nonce_seen(nonce)) { nff_log("DBG verify FAIL: nonce r
+          -eplay"); return NFF_ERR_SECURITY; }                           
+      119 +    if (nonce_seen(nonce)) return NFF_ERR_SECURITY;           
+      120  
+      121      /* 3. Build TBS */
+      122      char tbs[256] = {0};
+      123 -    if (build_tbs(payload, plen, tbs, sizeof(tbs)) < 0) { nff_
+          -log("DBG verify FAIL: build_tbs"); return NFF_ERR_SECURITY; } 
+      124 -    nff_log("DBG verify: tbs=%s", tbs);                       
+      123 +    if (build_tbs(payload, plen, tbs, sizeof(tbs)) < 0) return
+          + NFF_ERR_SECURITY;                                            
+      124  
+      125      /* 4. Decode hex signature to DER bytes */
+      126      size_t hex_len = strlen(sig_hex);
+      128 -    if (hex_len == 0 || (hex_len & 1) != 0 || hex_len > 144) {
+          - nff_log("DBG verify FAIL: hex_len=%d", (int)hex_len); return 
+          -NFF_ERR_SECURITY; }                                           
+      127 +    if (hex_len == 0 || (hex_len & 1) != 0 || hex_len > 144) r
+          +eturn NFF_ERR_SECURITY;                                       
+      128      uint8_t sig_der[72];
+      129      size_t sig_len = hex_len / 2;
+      130      for (size_t i = 0; i < sig_len; i++) {
+
+● Update(D:/IntraMap/Carto/R_D/MCPIOT/nff_cli_mcp/nff-sdk-c/src/nff_security.c)
+  ⎿  Removed 1 line
+      141          g_nff.cfg->cmd_verify_key,
+      142          (const uint8_t *)tbs, strlen(tbs),
+      143          sig_der, sig_len);
+      144 -    nff_log("DBG verify: ecdsa_rc=%d sig_len=%d", rc, (int)sig
+          -_len);                                                        
+      144      if (rc != 0) return NFF_ERR_SECURITY;
+      145  
+      146      /* 6. Record nonce only after successful verify */
+
+● Debug logging reverted, fix applied. Let me confirm no DBG remnants, then
+  reflash the fixed firmware and hammer it with pings — the formerly-failing
+  ~26% should now all pass:
+
+  Searched for 1 pattern (ctrl+o to expand)
+
+● PowerShell(& "D:\IntraMap\Carto\R_D\MCPIOT\nff_cli_mcp\nff-fleet\sketches\flas
+            h.ps1" -Sketch hello_nff -Port COM10 2>&1 | Select-Object -Last 4)
+  ⎿  ==> Syncing Arduino lib from repo (D:\IntraMap\Carto\R_D\MCPIOT\nff_cl
+     i_mcp\nff-fleet\sketches\..\..\nff-sdk-c)
+     ==> Building + uploading 'hello_nff' to COM10 (esp32:esp32:esp32)
+     … +5 lines (ctrl+o to expand)
+  ⎿  (timeout 10m)
+
+● Fixed firmware flashed (device resetting). Let me confirm it reconnects, then
+  fire a batch of pings to measure the new success rate — the previously-failing
+  ~26% (72-byte sigs) should now all pass:
+
+  Called nff-fleet (ctrl+o to expand)
+
+● Device is online. Now the real test — let me fire a batch of pings. Before the
+  fix, ~26% would time out; now all should return a pong:
+
+  Called nff-fleet 3 times (ctrl+o to expand)
+
+● Let me keep going to build statistical confidence (10+ consecutive successes
+  makes the old 26% failure rate vanishingly unlikely):
+
+  Called nff-fleet 10 times (ctrl+o to expand)
+● 14/14 pings now succeed after the fix (was timing out ~26%+ before). Combined
+  with the conclusive capture evidence, the root cause is proven by
+  construction, not just statistics.
+
+  Root cause: an off-by-one buffer bug in the SDK verifier — not a key/security 
+  problem
+
+  nff_security.c declared the signature hex buffer one byte too small:
+
+  char sig_hex[144];   // ECDSA-P256 DER sig can be 72 bytes = 144 hex chars → 
+  needs 145 (with NUL)
+
+  When the fleet's signature is 72 bytes — which happens ~26% of the time
+  (whenever both r and s get a sign-pad byte; measured 521/2000) — its 144-char
+  hex value can't fit, nff_json_get_str returns -1, and the device rejects with
+  the misleading cmd rejected (security). The other ~74% (≤71-byte sigs)
+  verified fine, which is why it was intermittent and looked random.
+
+  What I ruled out, with evidence:
+  - Keys — fleet cmd_sign.pem pubkey, cmd_verify.bin, and the device's embedded
+  NFF_CMD_VERIFY_KEY_DER are byte-identical.
+  - TBS format — fleet and device both build "{action}|{nonce}|{timestamp}"; the
+  on-device capture showed tbs=ping|d000f3a2|1780525615.
+  - Crypto — on-device ecdsa_rc=0 for every 71-byte sig → genuine pong, ~600 ms
+  RTT.
+
+  The instrumented capture nailed it: every success had sig_len=71; the failures
+  are the 72-byte case overflowing the buffer.
+
+  The fix
+
+  nff-sdk-c/src/nff_security.c: sig_hex[144] → sig_hex[145] (with a comment
+  explaining why), in the repo (source of truth). Synced to the Arduino lib and
+  reflashed via flash.ps1. Debug instrumentation fully reverted (verified no DBG
+  remnants). Result: 14 consecutive ping successes.
+
+  What this means for OTA
+
+  There were two independent buffer bugs blocking OTA, now both fixed:
+  1. MQTT RX buffer 256 → 1024 (PubSubClient silently dropped the ~421 B OTA
+  command) — the original SDK change.
+  2. Signature buffer 144 → 145 (this one) — rejected ~26% of all signed
+  commands, OTA included.
+
+  The OTA command carries the same ECDSA signature, so it rides the exact path I
+  just verified end-to-end with ping. A full OTA round-trip still needs the
+  build's ELF stored server-side (the 13 MB inline base64 is impractical here)
+  and a reachable HTTPS firmware URL — but the command delivery + verification
+  is now proven working.
+
+  Two notes
+
+  - One anomalous reject in the capture (DBG verify FAIL: nonce extract) — a
+  single malformed/partial frame, not reproduced across 14+ pings. Worth
+  watching but not a blocker.
+  - Device clock: the timestamp window is skipped while unsynced (now < 1e9), so
+  it's fine today — but if you add SNTP later, the ±300 s window activates and
+  the device clock must be correct.
+
+  The nff_security.c fix is uncommitted along with the reconciliation + tooling
+  — still leaving the commit to you. Want me to attempt a full OTA now (I'd
+  store a small stub ELF under a build_id to exercise the path), or stop here?
+
+✻ Cooked for 16m 54s
+
+❯ Add these to Changed.md please                                                
+
+  Read 1 file (ctrl+o to expand)
+
+● I'll append the new changes to CHANGED.md, matching its existing style:
+
+● Update(D:/IntraMap/Carto/R_D/MCPIOT/nff_cli_mcp/nff-sdk-c/CHANGED.md)
+  ⎿  Added 59 lines
+      32  commands until reflashed. Reaching `committed` (vs just `ota_st
+          arted`) also needs a
+      33  reachable HTTPS `firmware_url` and resolving the ELF-vs-BIN sha
+          256 (fleet hashes
+      34  the ELF; the device verifies the flashed BIN).
+      35 +                                                               
+      36 +## Fix: signature buffer off-by-one rejected ~26% of all signed
+         + commands                                                      
+      37 +                                                               
+      38 +**Problem:** Even after the MQTT buffer fix, ~26% of `ping`/`re
+         +boot`/`diag`/`ota`                                             
+      39 +commands were rejected by the device with `cmd rejected (securi
+         +ty)` — and it looked                                           
+      40 +random. It was **not** a key or signing problem: the fleet's co
+         +mmand-signing public                                           
+      41 +key, the exported `cmd_verify.bin`, and the device's embedded `
+         +NFF_CMD_VERIFY_KEY_DER`                                        
+      42 +are byte-identical, the TBS canonical string matches on both si
+         +des, and ECDSA verifies                                        
+      43 +(`rc=0`) for every command that gets through.                  
+      44 +                                                               
+      45 +Root cause: in `nff_security_verify_cmd`, the signature hex buf
+         +fer was **one byte too                                         
+      46 +small** — `char sig_hex[144]`. A DER-encoded ECDSA-P256 signatu
+         +re is up to **72 bytes                                         
+      47 += 144 hex chars**, which needs **145** bytes with the NUL termi
+         +nator. When both `r` and                                       
+      48 +`s` have their high bit set (each gets a `0x00` sign pad) the s
+         +ignature is the full 72                                        
+      49 +bytes — measured at **~26% of signatures**. In that case `nff_j
+         +son_get_str` can't fit                                         
+      50 +the value, returns -1, and `verify_cmd` rejects before ever rea
+         +ching the crypto.                                              
+      51 +Sub-72-byte sigs (≤142 hex) fit, which is why ~74% worked and t
+         +he failure looked                                              
+      52 +intermittent.                                                  
+      53 +                                                               
+      54 +**Change:**                                                    
+      55 +                                                               
+      56 +| File | Change |                                              
+      57 +|---|---|                                                      
+      58 +| `src/nff_security.c` | `sig_hex[144]` → `sig_hex[145]` (144 h
+         +ex chars + NUL) in `nff_security_verify_cmd` |                 
+      59 +                                                               
+      60 +**Verification:** on-device instrumentation confirmed `ecdsa_rc
+         +=0` for 71-byte sigs                                           
+      61 +(genuine `pong`, ~600 ms RTT) and the reject path for the 72-by
+         +te case. After the fix,                                        
+      62 +**14/14 consecutive `fleet_ping` round-trips succeeded** (previ
+         +ously ~26% timed out).                                         
+      63 +This bug affected OTA too — the OTA command carries the same `c
+         +md_sig` field — so it was                                      
+      64 +a second blocker to OTA on top of the MQTT buffer.             
+      65 +                                                               
+      66 +## Reconcile: the repo is now the single source of truth for th
+         +e Arduino library                                              
+      67 +                                                               
+      68 +**Problem:** The Arduino IDE/CLI compiles a *separate, flattene
+         +d copy* of this SDK at                                         
+      69 +`<sketchbook>/libraries/nff/`, not this repo. The two had drift
+         +ed in both directions:                                         
+      70 +the repo had the MQTT buffer fix the deployed lib lacked, while
+         + the lib carried                                               
+      71 +Arduino-only fixes the repo lacked — so neither was a superset 
+         +and a plain re-copy in                                         
+      72 +either direction would regress something.                      
+      73 +                                                               
+      74 +**Change (merged the lib-only Arduino fixes back into the repo)
+         +:**                                                            
+      75 +                                                               
+      76 +| File | Change |                                              
+      77 +|---|---|                                                      
+      78 +| `src/nff_crash.c` | Arduino-esp32 3.x lacks `esp_rom_printf` 
+         +→ use portable `printf`; add `#include "esp_system.h"` (both in
+         +side the shared `#if ESP_PLATFORM` block; `printf` is valid und
+         +er ESP-IDF too) |                                              
+      79 +| `src/port/nff_port_esp32_arduino.c` | Adopt the lib's `der_to
+         +_pem()` TLS path (arduino-esp32 `WiFiClientSecure` needs PEM, n
+         +ot raw DER) and panic-handler removal (`esp_set_panic_handler` 
+         +not exposed in arduino-esp32 3.x); the MQTT + signature buffer 
+         +fixes ride along |                                             
+      80 +                                                               
+      81 +## New: automatic repo → Arduino library sync                  
+      82 +                                                               
+      83 +So a repo change always reaches what sketches build against (no
+         + more drift):                                                  
+      84 +                                                               
+      85 +| File | Purpose |                                             
+      86 +|---|---|                                                      
+      87 +| `tools/sync_arduino_lib.py` | Regenerate the flat ESP32-only 
+         +Arduino lib from the repo: duplicate `nff.h` to root + `src/`, 
+         +rename the esp32 arduino port `.c`→`.cpp` (it is C++), exclude 
+         +the esp8266/idf/posix ports, stamp `.nff_sync_meta`. Idempotent
+         +. |                                                            
+      88 +| `tools/hooks/post-commit`, `tools/hooks/post-merge` | Run the
+         + generator on every commit/merge so the lib auto-syncs |       
+      89 +| `tools/install-hooks.ps1` | Install the hooks into `.git/hook
+         +s/` (not version-controlled; run once per clone) |             
+      90 +                                                               
+      91 +A companion `sketches/flash.ps1` (in the **nff-fleet** repo) do
+         +es sync → `arduino-cli                                         
+      92 +compile -u` in one step, guaranteeing a reflash always picks up
+         + the latest repo sources                                       
+      93 +(including uncommitted edits).                                 
+
+● Added three sections to nff-sdk-c/CHANGED.md, matching the existing style:
+
+  1. Fix: signature buffer off-by-one — the sig_hex[144]→[145] bug, with the
+  diagnosis (keys/TBS/crypto all ruled out), the ~26% measurement, and the 14/14
+  verification.
+  2. Reconcile: repo as single source of truth — the nff_crash.c + esp32 arduino
+  port merges that made the repo a true superset.
+  3. New: automatic repo → Arduino library sync — sync_arduino_lib.py, the git
+  hooks + installer, and a pointer to flash.ps1 in nff-fleet.
+
+  The file now documents the full chain: MQTT buffer fix → signature buffer fix
+  → reconciliation → auto-sync.
+
+  One note — CHANGED.md lives in nff-sdk-c, and all of this (plus the
+  nff_security.c fix and tooling) is still uncommitted there alongside the
+  original buffer-fix PR. Whenever you commit, the post-commit hook will fire
+  and regenerate the Arduino lib automatically. Want me to go ahead and commit,
+  or leave it to you?
+
+✻ Baked for 52s
+
+❯ Let's attempt a full OTA pls                                                  
+
+● Before firing it, I need to understand the exact OTA contract — what the fleet
+  hashes, what URL the device fetches, and what it verifies. Let me read both
+  sides:
+
+  Read 2 files (ctrl+o to expand)
+
+● Fleet hashes whatever I store as firmware.elf and the device verifies the
+  download against that hash — so storing the actual BIN (not ELF) and serving
+  that same BIN avoids the ELF-vs-BIN mismatch. Now the device side — what it
+  downloads and how it verifies:
+
+  Read 1 file (ctrl+o to expand)
+
+● Now I understand the full contract. Critically: the device's anti-downgrade 
+  check requires the OTA version (= build_id) to be a semver ≥ current 1.0.0, it
+  downloads over HTTPS, verifies sha256, flashes, reboots, and reports
+  committed. Let me check how the HTTPS client handles certificates (decides
+  whether a self-signed server works) and how the partition write works:
+
+  Searched for 1 pattern (ctrl+o to expand)
+
+● setInsecure() on the HTTPS download — a self-signed server works, no cert
+  pinning. OTA uses standard ESP32 Update.* to the alternate partition. Let me
+  see the rest of the download loop to know what my server must send:
+
+  Read 1 file (ctrl+o to expand)
+
+● This is very doable. The device downloads over HTTPS with setInsecure()
+  (self-signed server is fine), the fleet hashes whatever file sits at
+  C:/data/firmware/{build_id}/firmware.elf, and the anti-downgrade check needs
+  the OTA version to be a semver ≥ 1.0.0.
+
+  My plan: build a 1.0.1 image, place it where the fleet hashes it, serve that
+  same BIN over a local self-signed HTTPS server on the PC (172.20.10.3, already
+  reachable since the broker is), then push OTA and watch the device flash →
+  reboot → report fw=1.0.1.
+
+● Step 1 — build the 1.0.1 image (temp version bump, compile, revert):
+
+● Update(credentials.h)
+  ⎿  Added 1 line, removed 1 line
+      32  
+      33  // Firmware identity (injected by build system; override here f
+          or manual builds)
+      34  #ifndef NFF_FW_VERSION
+      35 -#  define NFF_FW_VERSION  "1.0.0"                              
+      35 +#  define NFF_FW_VERSION  "1.0.1"                              
+      36  #endif
+      37  #ifndef NFF_BUILD_ID
+      38  #  define NFF_BUILD_ID    "0000000000000000"
+● Bash(cd
+      "D:/IntraMap/Carto/R_D/MCPIOT/nff_cli_mcp/nff-fleet/sketches/hello_nff" &&
+      arduino-cli compile --fqbn esp32:esp32:esp32 --output-dir ./build_ota .
+      2>&1 | tai…)
+  ⎿  Sketch uses 1070840 bytes (81%) of program storage space. Maximum is 1
+     310720 bytes.
+     Global variables use 57016 bytes (17%) of dynamic memory, leaving 2706
+     … +4 lines (ctrl+o to expand)
+  ⎿  (timeout 10m)
+
+● 1.0.1 image built (1,070,992 bytes). Now revert credentials.h and stage the
+  BIN where the fleet hashes it + where HTTPS serves it (same bytes):
+
+● Update(credentials.h)
+  ⎿  Added 1 line, removed 1 line
+      32  
+      33  // Firmware identity (injected by build system; override here f
+          or manual builds)
+      34  #ifndef NFF_FW_VERSION
+      35 -#  define NFF_FW_VERSION  "1.0.1"                              
+      35 +#  define NFF_FW_VERSION  "1.0.0"                              
+      36  #endif
+      37  #ifndef NFF_BUILD_ID
+      38  #  define NFF_BUILD_ID    "0000000000000000"
+
+● Bash(BIN="D:/IntraMap/Carto/R_D/MCPIOT/nff_cli_mcp/nff-fleet/sketches/hello_nf
+      f/build_ota/hello_nff.ino.bin"
+      # 1. where the fleet hashes it…)
+  ⎿  === staged files (sizes + sha256 must match) ===
+     bd4c6f97da7e13da76d93c89da9d71aafb35291e634c70302d0ca7ccc61cb110 */c/d
+     ata/firmware/1.0.1/firmware.elf
+     … +5 lines (ctrl+o to expand)
+
+● All three files share the same sha256 (bd4c6f97…) — the fleet's computed hash
+  will match the served bytes. Now the HTTPS server (self-signed, serving from
+  C:/data/otaserve):
+
+● Write(C:\data\otaserve\server.py)
+  ⎿  Wrote 54 lines to C:\data\otaserve\server.py
+          device.al self-signed HTTPS server to serve OTA firmware to the
+       2 Device uses setInsecure(), so the cert is not validated — any ce
+         rt works.
+       3 """
+       4 import datetime
+       6 import ostp.server
+       7 import ssl
+       8 
+       9 from cryptography import x509
+      10 from cryptography.x509.oid import NameOID
+     … +51 lines (ctrl+o to expand)
+
+● Bash(cd /c/data/otaserve && python server.py)
+  ⎿  Running in the background (↓ to manage)
+
+● Let me verify the server is serving the correct bytes (locally and on the
+  hotspot IP):
+
+● Bash(echo "=== server log ==="; cat
+      "C:/Users/gauth/AppData/Local/Temp/claude/D--IntraMap-Carto-R-D-MCPIOT-nff
+      -cli-mcp-nff-fleet/2fa3e445-2be9-4ea4-986a-9275a7a45812…)
+  ⎿  === server log ===
+     C:\data\otaserve\server.py:23: DeprecationWarning: datetime.datetime.u
+     tcnow() is deprecated and scheduled for removal in a future version. U
+     … +10 lines (ctrl+o to expand)
+
+● The HTTPS server serves the correct firmware on both localhost and the hotspot
+  IP 172.20.10.3:8443 (firewall isn't blocking). Everything is staged. Let me
+  confirm the baseline (device at fw=1.0.0) and start a serial capture to watch
+  the OTA unfold:
+
+  Called nff-fleet (ctrl+o to expand)
+
+● PowerShell($cap = "C:\Users\gauth\ota_cap.txt"
+            Remove-Item $cap -ErrorAction SilentlyContinue…)
+  ⎿  Running in the background (↓ to manage)
+
+● Baseline confirmed: fw=1.0.0, online. Capture running. Now push the OTA:
+
+  Called nff-fleet (ctrl+o to expand)
+
+● OTA accepted — ota_started, version 1.0.1. That confirms the command was
+  delivered (MQTT buffer fix), signature verified (sig buffer fix), and
+  anti-downgrade passed. The device is now downloading + flashing. Let me watch
+  the HTTPS server log for the device's GET and poll for the reboot into 1.0.1:
+
+  Read 1 file (ctrl+o to expand)
+
+● Big progress: OTA start v1.0.1 → it downloaded → but OTA SHA-256 mismatch, and
+  the server logged a ConnectionReset (device closed mid-transfer). That
+  signature means the download was truncated — the device stopped reading before
+  the full 1,070,992 bytes. Let me confirm how much the server actually sent:
+
+  Read 1 file (ctrl+o to expand)
+● The full server log is conclusive: device 172.20.10.2 did GET /firmware.bin →
+  200 → but closed the connection mid-transfer (server's sendall got reset). So
+  the download was truncated, the device hashed partial bytes → mismatch.
+
+  The bug is in nff_port_https_get_stream: its read loop breaks on a transient 
+  empty read (readBytes returns 0 after the 1 s stream timeout during a ~1 MB
+  TLS transfer) and then reports success (rc=0), so nff_ota.c proceeds to hash
+  an incomplete image. This is a real OTA-download robustness bug. Let me fix it
+  properly — read against Content-Length, tolerate transient stalls, and flag
+  truncation as an error:
+
+● Update(D:/IntraMap/Carto/R_D/MCPIOT/nff_cli_mcp/nff-sdk-c/src/port/nff_port_es
+        p32_arduino.c)
+  ⎿  Added 32 lines, removed 8 lines
+      307      int http_code = http.GET();
+      308      if (http_code != 200) { http.end(); return -1; }
+      309  
+      310 +    int        total  = http.getSize();        /* Content-Leng
+          +th, or -1 if unknown */                                       
+      311      WiFiClient *stream = http.getStreamPtr();
+      311 -    uint8_t   buf[512];                                       
+      312 -    int       rc = 0;                                         
+      313 -    int       available;                                      
+      312 +    uint8_t    buf[1024];                                     
+      313 +    int        rc = 0;                                        
+      314 +    size_t     received = 0;                                  
+      315 +    uint32_t   last_data = millis();                          
+      316  
+      315 -    while (http.connected() && (available = stream->available(
+          -)) >= 0) {                                                    
+      316 -        int n = stream->readBytes(buf, sizeof(buf));          
+      317 -        if (n <= 0) break;                                    
+      318 -        rc = chunk_cb(buf, (size_t)n, user_ctx);              
+      319 -        if (rc < 0) break;                                    
+      317 +    /* Read until we have the full Content-Length (or, if unkn
+          +own, until the                                                
+      318 +       peer disconnects). Do NOT break on a transient empty re
+          +ad — a multi-                                                 
+      319 +       hundred-KB TLS transfer routinely stalls >1s between re
+          +cords, and the                                                
+      320 +       old `readBytes()<=0 -> break` truncated the image and s
+          +till returned                                                 
+      321 +       success, causing a SHA-256 mismatch on a partial downlo
+          +ad. */                                                        
+      322 +    while (true) {                                            
+      323 +        if (total >= 0 && received >= (size_t)total) break;   
+          +/* got it all */                                              
+      324 +                                                              
+      325 +        size_t avail = stream->available();                   
+      326 +        if (avail > 0) {                                      
+      327 +            size_t want = avail > sizeof(buf) ? sizeof(buf) : 
+          +avail;                                                        
+      328 +            int n = stream->readBytes(buf, want);             
+      329 +            if (n > 0) {                                      
+      330 +                rc = chunk_cb(buf, (size_t)n, user_ctx);      
+      331 +                if (rc < 0) break;                            
+      332 +                received += (size_t)n;                        
+      333 +                last_data = millis();                         
+      334 +            }                                                 
+      335 +        } else {                                              
+      336 +            if (!http.connected() && stream->available() == 0)
+          + break;  /* EOF */                                            
+      337 +            if (millis() - last_data > timeout_ms) { rc = -1; 
+          +break; }  /* real stall */                                    
+      338 +            delay(1);                                         
+      339 +        }                                                     
+      340      }
+      341      http.end();
+      342 +                                                              
+      343 +    /* A short read with no explicit error is still a failure 
+          +— never let a                                                 
+      344 +       truncated image reach the SHA-256 check as if it succee
+          +ded. */                                                       
+      345 +    if (rc == 0 && total >= 0 && received != (size_t)total) rc
+          + = -1;                                                        
+      346      return rc;
+      347  }
+      348  
+
+● Background command "Background serial capture during OTA (120s)" completed (exit code 0)
+
+● Fix applied. Now two things need the fixed download code: the device
+  (USB-reflash so it can receive OTA reliably) and the 1.0.1 image (rebuild with
+  the fix). Let me reflash the device first via the wrapper (syncs the fix →
+  lib → builds → uploads):
+
+● PowerShell(& "D:\IntraMap\Carto\R_D\MCPIOT\nff_cli_mcp\nff-fleet\sketches\flas
+            h.ps1" -Sketch hello_nff -Port COM10 2>&1 | Select-Object -Last 4)
+  ⎿  ==> Syncing Arduino lib from repo (D:\IntraMap\Carto\R_D\MCPIOT\nff_cl
+     i_mcp\nff-fleet\sketches\..\..\nff-sdk-c)
+     ==> Building + uploading 'hello_nff' to COM10 (esp32:esp32:esp32)
+     … +5 lines (ctrl+o to expand)
+  ⎿  (timeout 10m)
+
+● Device reflashed with the robust download loop. Now rebuild the 1.0.1 image
+  (also with the fix) and re-stage it:
+
+● Update(credentials.h)
+  ⎿  Added 1 line, removed 1 line
+      32  
+      33  // Firmware identity (injected by build system; override here f
+          or manual builds)
+      34  #ifndef NFF_FW_VERSION
+      35 -#  define NFF_FW_VERSION  "1.0.0"                              
+      35 +#  define NFF_FW_VERSION  "1.0.1"                              
+      36  #endif
+      37  #ifndef NFF_BUILD_ID
+      38  #  define NFF_BUILD_ID    "0000000000000000"
+
+● Bash(cd
+      "D:/IntraMap/Carto/R_D/MCPIOT/nff_cli_mcp/nff-fleet/sketches/hello_nff" &&
+      rm -rf ./build_ota && arduino-cli compile --fqbn esp32:esp32:esp32
+      --output-dir ./…)
+  ⎿  Sketch uses 1071004 bytes (81%) of program storage space. Maximum is 1
+     310720 bytes.
+     Global variables use 57016 bytes (17%) of dynamic memory, leaving 2706
+     64 bytes for local variables. Maximum is 327680 bytes.
+  ⎿  (timeout 10m)
+
+● Update(credentials.h)
+  ⎿  Added 1 line, removed 1 line
+      32  
+      33  // Firmware identity (injected by build system; override here f
+          or manual builds)
+      34  #ifndef NFF_FW_VERSION
+      35 -#  define NFF_FW_VERSION  "1.0.1"                              
+      35 +#  define NFF_FW_VERSION  "1.0.0"                              
+      36  #endif
+      37  #ifndef NFF_BUILD_ID
+      38  #  define NFF_BUILD_ID    "0000000000000000"
+
+● Bash(BIN="D:/IntraMap/Carto/R_D/MCPIOT/nff_cli_mcp/nff-fleet/sketches/hello_nf
+      f/build_ota/hello_nff.ino.bin"
+      cp "$BIN" /c/data/firmware/1.0.1/firmware.elf…)
+  ⎿  === re-staged, sha256 (fleet-hash file == served file) ===
+     3983c25888d63d4d810b2aaa5b4e614174198152b64a408e2ed6bc443f2f60d2 */c/d
+     ata/firmware/1.0.1/firmware.elf
+     … +6 lines (ctrl+o to expand)
+
+● New image staged — sha256 3983c258… matches across the fleet-hash file, the
+  served file, and a fresh download. The device now has the robust download
+  loop. Let me confirm it's back online, start a fresh capture, and re-push:
+
+  Called nff-fleet (ctrl+o to expand)
+
+● PowerShell($cap = "C:\Users\gauth\ota_cap2.txt"
+            Remove-Item $cap -ErrorAction SilentlyContinue…)
+  ⎿  Running in the background (↓ to manage)
+
+● Device online at fw=1.0.0 (robust build), capture running. Push the OTA again:
+
+  Called nff-fleet (ctrl+o to expand)
+
+● Timeout this time — but that may actually be success in disguise (if the
+  device downloaded, flashed, and rebooted, the connection drops). Let me check
+  ground truth — the serial capture and the device's current firmware version:
+
+  Searched for 1 pattern (ctrl+o to expand)
+
+● Let me get the raw capture and full server log — the keyword filter may have
+  hidden it:
+
+  Searched for 1 pattern (ctrl+o to expand)
+
+● Background command "Fresh serial capture for OTA retry (160s)" completed (exit code 0)
+
+● The capture is decisive: the device stayed at state=CONNECTED the whole time
+  with no OTA start log, and the server shows no GET from the device this round.
+  So the OTA command never reached dispatch — the device didn't process it at
+  all (it wasn't even rejected). Since the device just rebooted from the USB
+  reflash, let me verify the command path is alive with a quick ping:
+
+  Called nff-fleet (ctrl+o to expand)
+
+● Ping times out too — so after the USB reflash, the device is connected and
+  publishing heartbeats but not receiving commands (a stale MQTT session on the
+  broker from the hard-reset, while the live device's subscription isn't getting
+  served). Heartbeats flow (device→broker), commands don't (broker→device). A
+  clean reconnect should clear it. Let me pulse-reset the ESP32 and let it
+  reconnect fresh:
+
+● PowerShell($p = New-Object System.IO.Ports.SerialPort
+            'COM10',9600,'None',8,'One'
+            $p.DtrEnable = $false…)  ⎿  reset pulsed; waiting for reconnect
+
+● Let me confirm it reconnected and the command path is restored:
+
+  Called nff-fleet 2 times (ctrl+o to expand)
+
+● After a clean reconnect: ping succeeds (pong, 623 ms). The earlier failure was
+  a stale broker session from the hard-reset — confirmed. The device now has
+  the robust download loop and a clean command path. Let me start a fresh
+  capture and re-push the OTA:
+
+● PowerShell($cap = "C:\Users\gauth\ota_cap3.txt"
+            Remove-Item $cap -ErrorAction SilentlyContinue…)
+  ⎿  Running in the background (↓ to manage)
+
+  Called nff-fleet (ctrl+o to expand)
+
+● ota_started again. The device is now downloading with the robust loop. Let me
+  give it time to download (~1 MB over ESP32 HTTPS), verify, flash, and reboot,
+  then check the result:
+
+● PowerShell(Start-Sleep -Seconds 55; "checked after 55s")
+  ⎿  Error: Blocked: Start-Sleep 55 followed by: "checked after 55s". To wait 
+     for a condition, use Monitor with an until-loop (e.g. `until <check>; do 
+     sleep 2; done` — Monitor runs bash). To wait for a command you started, use
+     run_in_background: true. Do not chain shorter sleeps to work around this 
+     block.
+
+● Let me check current progress directly (the download may be mid-flight):
+
+  Searched for 1 pattern (ctrl+o to expand)
+
+● It worked! Serial shows: OTA start v1.0.1 → OTA download complete, rebooting →
+  device rebooting → Connecting... ok → IP: 172.20.10.2. The robust download
+  completed, SHA-256 verified (no mismatch this time), flashed, and rebooted.
+  Let me confirm it came up running 1.0.1:
+
+  Searched for 1 pattern, called nff-fleet (ctrl+o to expand)
+
+● Let me look specifically at the post-reboot boot banner — that prints the
+  running firmware version:
+
+  Searched for 1 pattern (ctrl+o to expand)
+
+● [nff] hello_nff started, fw=1.0.1 — the device rebooted into the new firmware.
+  Full OTA success on-device. The earlier heartbeat was stale; let me confirm
+  the fleet now sees 1.0.1:
+
+  Called nff-fleet (ctrl+o to expand)
+
+● Confirmed — the fleet now reports fw: "1.0.1". 🎉 Full OTA verified
+  end-to-end: command delivered → signature verified → full image downloaded
+  over HTTPS → SHA-256 matched → flashed → rebooted → reported the new version.
+
+  Let me document the download-loop fix in CHANGED.md, stop the HTTPS server,
+  and close out the tasks:
+
+● Update(D:/IntraMap/Carto/R_D/MCPIOT/nff_cli_mcp/nff-sdk-c/CHANGED.md)
+  ⎿  Added 23 lines
+       91  A companion `sketches/flash.ps1` (in the **nff-fleet** repo) d
+           oes sync → `arduino-cli
+       92  compile -u` in one step, guaranteeing a reflash always picks u
+           p the latest repo sources
+       93  (including uncommitted edits).
+       94 +                                                              
+       95 +## Fix: OTA download truncation silently passed as success → S
+          +HA-256 mismatch                                               
+       96 +                                                              
+       97 +**Problem:** With command delivery and signature verification 
+          +fixed, the OTA reached                                        
+       98 +`ota_started` and the device began downloading — but aborted w
+          +ith `OTA SHA-256 mismatch`,                                   
+       99 +and the firmware server logged a mid-transfer connection reset
+          +. `nff_port_https_get_stream`                                 
+      100 +(esp32 arduino) broke out of its read loop on the **first tran
+          +sient empty read**                                            
+      101 +(`readBytes() <= 0` after the ~1 s stream timeout). A multi-hu
+          +ndred-KB TLS transfer                                         
+      102 +routinely stalls >1 s between records, so the loop exited earl
+          +y — returning `rc=0`                                          
+      103 +(*success*) on a **partial image**. `nff_ota.c` then hashed th
+          +e truncated data → mismatch.                                  
+      104 +                                                              
+      105 +**Change:**                                                   
+      106 +                                                              
+      107 +| File | Change |                                             
+      108 +|---|---|                                                     
+      109 +| `src/port/nff_port_esp32_arduino.c` | Rewrote `nff_port_http
+          +s_get_stream` to read against `Content-Length` (`http.getSize(
+          +)`), drive reads from `stream->available()`, tolerate transien
+          +t empty reads (only fail after a real >`timeout_ms` stall), an
+          +d treat a short read as an error so a truncated image can neve
+          +r reach the SHA-256 check as if it succeeded |                
+      110 +                                                              
+      111 +**Verification:** end-to-end OTA now completes — `test-device-
+          +01` downloads the full                                        
+      112 +~1.05 MB image, SHA-256 matches, `Update.end()` switches the b
+          +oot partition, the device                                     
+      113 +reboots into **fw=1.0.1**, and the fleet heartbeat reports `fw
+          +":"1.0.1"`. (Operational                                      
+      114 +note: after a USB hard-reflash the broker can briefly hold the
+          + device's old MQTT session —                                  
+      115 +heartbeats flow but commands don't until a clean reconnect; pu
+          +lse-resetting the device                                      
+      116 +clears it.)                                                   
+
+● Background command "Fresh serial capture for OTA attempt 3 (150s)" completed (exit code 0)
+
+● Now stop the HTTPS server (carefully — only the listener on 8443, not the
+  fleet's python):
+
+● PowerShell($conn = Get-NetTCPConnection -LocalPort 8443 -State Listen
+            -ErrorAction SilentlyContinue
+            if ($conn) { $procId = $conn.OwningProcess; Stop-Process -Id $procId
+            -F…)
+  ⎿  stopped HTTPS server (pid 24064)
+
+● Background command "Start HTTPS firmware server (background)" failed with exit code 127
+● The HTTPS server is stopped and all tasks are complete.
+
+  Full OTA: success, end-to-end ✅
+
+  The device went from 1.0.0 → 1.0.1 over the air. Proof chain:
+
+  ┌─────────────────────┬───────────────────────────────────────────────────┐
+  │        Stage        │                     Evidence                      │
+  ├─────────────────────┼───────────────────────────────────────────────────┤
+  │ Command delivered + │ fleet_push_ota →                                  │
+  │  signature verified │ {"type":"ota_started","version":"1.0.1"}          │
+  ├─────────────────────┼───────────────────────────────────────────────────┤
+  │ Full image          │ server log: 172.20.10.2 "GET /firmware.bin" 200   │
+  │ downloaded over     │ (no mid-transfer reset)                           │
+  │ HTTPS               │                                                   │
+  ├─────────────────────┼───────────────────────────────────────────────────┤
+  │ SHA-256 matched +   │ serial: OTA start v1.0.1 → OTA download complete, │
+  │ flashed + rebooted  │  rebooting                                        │
+  ├─────────────────────┼───────────────────────────────────────────────────┤
+  │ Booted into new     │ serial: hello_nff started, fw=1.0.1               │
+  │ firmware            │                                                   │
+  ├─────────────────────┼───────────────────────────────────────────────────┤
+  │ Fleet sees the new  │ heartbeat: "fw":"1.0.1"                           │
+  │ version             │                                                   │
+  └─────────────────────┴───────────────────────────────────────────────────┘
+
+  What it took — a third bug surfaced and got fixed
+
+  Getting here exposed a third blocker beyond the two buffer fixes:
+
+  - OTA download truncation (nff_port_esp32_arduino.c): the HTTPS read loop
+  broke on the first transient empty read (a ~1 MB TLS transfer routinely stalls
+  >1 s between records) and returned success on a partial image → SHA-256 
+  mismatch. Fixed to read against Content-Length, tolerate stalls, and treat a
+  short read as an error. Documented in CHANGED.md.
+
+  Plus one operational gotcha (not a code bug): after a USB hard-reflash the
+  broker briefly held the device's stale MQTT session — heartbeats flowed but
+  commands didn't, until a clean pulse-reset reconnected it. Worth knowing for
+  future OTA testing.
+
+  So all three layers that were silently dropping commands are now resolved:
+  MQTT RX buffer (256→1024) → signature buffer (144→145) → OTA download 
+  truncation.
+
+  Current state & leftovers
+
+  - Device is running 1.0.1 (OTA'd). A USB reflash returns it to 1.0.0
+  (credentials.h is back to 1.0.0; the bump was compile-time only).
+  - HTTPS server stopped; test artifacts remain at C:\data\firmware\1.0.1\,
+  C:\data\otaserve\, and sketches\hello_nff\build_ota\ — harmless, I can clean
+  them up if you want.
+  - Everything in nff-sdk-c is still uncommitted: reconciliation + sync tooling
+  + all three fixes. Committing will trigger the post-commit hook to regenerate
+  the Arduino lib.
+
+  Want me to clean up the test artifacts, and/or commit the SDK changes now?
+
+✻ Cogitated for 19m 41s

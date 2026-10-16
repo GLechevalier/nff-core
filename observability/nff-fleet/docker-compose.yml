@@ -1,0 +1,15 @@
+services:
+  nff-fleet:
+    build: .
+    ports:
+      - "8883:8883"
+      - "3001:3001"
+      - "3008:3008"   # /link WS bridge (wired USB/PPPoS onboarding)
+    env_file:
+      - .env
+    volumes:
+      - ./data/certs:/data/certs
+      - ./data/firmware:/data/firmware
+      - ./data/keys:/data/keys
+      - ./data/audit:/data/audit
+    restart: unless-stopped

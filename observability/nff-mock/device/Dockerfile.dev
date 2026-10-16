@@ -1,0 +1,17 @@
+# nff-mock — DEV image (Level 1).
+# Build context is the nff-mock/ ROOT (not device/) so both the shared core and the L1
+# device package are visible. Single-stage editable install of both. docker-compose.dev.yml
+# bind-mounts the live source over /app/core/nff_mock_core and /app/device/nff_mock — edit on
+# the host and `docker compose restart nff-mock` to pick it up. No rebuild.
+FROM python:3.12-slim
+
+WORKDIR /app
+
+COPY core/ core/
+COPY device/ device/
+
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir -e ./core && \
+    pip install --no-cache-dir -e ./device
+
+ENTRYPOINT ["nff-mock", "run"]

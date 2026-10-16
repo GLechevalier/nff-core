@@ -1,0 +1,18 @@
+# nff-mock-esp32 — deliberately-vulnerable ESP32 web-config target (demo only).
+FROM python:3.12-slim AS builder
+WORKDIR /app
+COPY pyproject.toml ./
+COPY nff_mock_targets/ nff_mock_targets/
+RUN pip install --no-cache-dir --upgrade pip build && \
+    pip wheel --no-cache-dir --wheel-dir /wheels .
+
+FROM python:3.12-slim
+WORKDIR /app
+COPY --from=builder /wheels /wheels
+RUN pip install --no-cache-dir /wheels/*.whl && rm -rf /wheels
+
+# Bind on all container interfaces; compose maps the ports to host loopback.
+ENV NFF_TARGET_ESP32_BIND=0.0.0.0
+
+EXPOSE 80 1883
+ENTRYPOINT ["nff-mock-esp32"]

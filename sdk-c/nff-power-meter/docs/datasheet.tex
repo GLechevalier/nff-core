@@ -1,0 +1,722 @@
+% nff-power-meter — experiment datasheet
+%
+% Build:  pdflatex datasheet.tex   (run twice for the ToC / references)
+% Deps:   circuitikz, booktabs, siunitx, xcolor, geometry, fancyhdr, enumitem
+%         All are in a standard TeX Live / MiKTeX "full" install.
+
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[margin=22mm]{geometry}
+\usepackage{booktabs}
+\usepackage{siunitx}
+\usepackage{circuitikz}
+\usepackage{xcolor}
+\usepackage{fancyhdr}
+\usepackage{enumitem}
+\usepackage{amsmath}
+\usepackage{tabularx}
+\usepackage[hidelinks]{hyperref}
+
+\sisetup{
+  per-mode              = symbol,
+  range-units           = single,
+  detect-weight         = true,
+  group-minimum-digits  = 4,
+}
+
+\definecolor{warn}{RGB}{176,0,32}
+\definecolor{ok}{RGB}{0,120,60}
+\providecommand{\good}[1]{\textcolor{ok}{\textbf{#1}}}
+\providecommand{\bad}[1]{\textcolor{warn}{\textbf{#1}}}
+\newcommand{\yes}{\textcolor{ok}{\textbf{yes}}}
+\newcommand{\no}{\textcolor{warn}{\textbf{no}}}
+
+\pagestyle{fancy}
+\fancyhf{}
+\lhead{\small nff-power-meter}
+\chead{\small Experiment datasheet}
+\rhead{\small Rev.\ A --- 2026-07-13}
+\cfoot{\small \thepage}
+
+\title{\textbf{nff-power-meter}\\[2mm]
+\large Shunt-based energy measurement of ESP32 firmware operations\\[1mm]
+\normalsize Experiment datasheet --- Revision A}
+\author{Bench rig: STM32 Nucleo-F446RE + ESP32 DevKit}
+\date{2026-07-13}
+
+\begin{document}
+\maketitle
+\thispagestyle{fancy}
+
+\begin{abstract}
+\noindent
+This document specifies the bench rig used to measure the electrical energy consumed
+by an ESP32 device while it executes an \texttt{nff} operation --- principally
+\texttt{nff ota}, the only \texttt{nff} command that places a sustained load
+(WiFi RX + flash writes) on the target. The measurand is \textbf{joules per OTA}.
+A \SI{1}{\ohm} shunt in the ESP32's ground return is sampled at \SI{200}{kSps} by an
+STM32 Nucleo-F446RE, which accumulates charge and energy \emph{in firmware} and reports running
+totals on demand. The host never integrates, and therefore cannot silently drop samples and
+under-report energy.
+
+\medskip
+\noindent
+Three guards decide whether a run is reportable at all, and each exists because the rig produced
+a confident, plausible, \emph{wrong} number during bring-up (\S\ref{sec:honesty}): a DMA-overrun
+counter (dropped conversions), a window cross-check (a lost \texttt{ZERO} once turned a
+\SI{30}{\second} run into \SI{91}{\second} and \SI{26}{\joule}), and an active continuity probe
+(a rig wired to \emph{nothing} reported \SI{590}{\milli\ampere} and a \SI{4.94}{\volt} rail). If
+any fails, no joules figure is reported.
+\end{abstract}
+
+\clearpage
+\tableofcontents
+\clearpage
+
+% ---------------------------------------------------------------------------
+\section{Scope and measurand}
+
+\begin{description}[style=nextline,leftmargin=0pt]
+  \item[Primary measurand] Marginal energy $E_\text{marg}$ (\si{\joule}) consumed by the
+        ESP32 module over and above its idle draw, for the duration of one \texttt{nff}
+        command.
+  \item[Secondary] Mean current, peak current, supply voltage, total charge, run duration.
+  \item[Purpose] (a) reason about battery life; (b) provide a regression gate
+        (\texttt{-{}-max-joules}) so an agent can detect a firmware change that increases
+        power draw.
+\end{description}
+
+\noindent
+The device under test (DUT) is the \emph{whole ESP32 devkit board}, not the ESP32 die.
+The measurement therefore includes the onboard LDO loss, the USB--UART bridge, and the
+power LED. These are constant, so they cancel in the baseline-subtracted marginal figure
+(\S\ref{sec:math}).
+
+% ---------------------------------------------------------------------------
+\section{Measurement principle}
+
+The shunt is placed in the DUT's \textbf{ground return}, not its supply line. The voltage
+developed across it is therefore \emph{ground-referenced} and can be read single-ended by a
+plain ADC input. This is the sole reason the rig needs no instrumentation amplifier.
+
+Because the shunt is low-side, the DUT's local ground (node \texttt{E\_GND}) floats above
+system ground by $I \cdot R_s$ --- up to \SI{300}{\milli\volt} at \SI{300}{\milli\ampere}.
+The voltage actually seen \emph{across the DUT's terminals} is consequently the rail voltage
+minus that lift, and it is that difference --- not the rail alone --- that must multiply the
+current to obtain true power.
+
+% ---------------------------------------------------------------------------
+\section{Schematic}
+
+\subsection{Power path}
+
+\begin{center}
+\begin{circuitikz}[american, scale=0.92, transform shape]
+
+  % ===== Nucleo block ====================================================
+  \draw[thick] (0,-6.2) rectangle (3,1.1);
+  \node[align=center] at (1.5,-2.5) {\small Nucleo\\[-0.5mm]\small F446RE};
+  \node[align=center,anchor=north] at (1.5,-4.6)
+        {\scriptsize USB $\rightarrow$ PC\\[-0.6mm]\scriptsize (only cable)};
+
+  % Nucleo pin stubs
+  \draw (3,0.5)  to[short,-*] (3.4,0.5)  ; \node[anchor=south west] at (3.45,0.55) {\scriptsize\texttt{5V}};
+  \draw (3,-1)   to[short,*-] (3.4,-1)   ; \node[anchor=south west] at (3.05,-0.92){\scriptsize\texttt{PA1}/A1};
+  \draw (3,-4.2) to[short,*-] (3.4,-4.2) ; \node[anchor=south west] at (3.05,-4.12){\scriptsize\texttt{PA0}/A0};
+  \draw (3,-5.5) to[short,*-] (3.4,-5.5) ; \node[anchor=south west] at (3.05,-5.42){\scriptsize\texttt{GND}};
+
+  % ===== supply rail =====================================================
+  \draw (3.4,0.5) to[short] (12,0.5);
+
+  % ===== rail divider (10k/10k) =========================================
+  \draw (5.5,0.5) to[R={$10\,\mathrm{k}$}, *-] (5.5,-1);
+  \draw (5.5,-1)  to[short,*-] (3.4,-1);                    % tap -> PA1
+  \draw (5.5,-1)  to[R={$10\,\mathrm{k}$}] (5.5,-2.6);
+  \draw (5.5,-2.6) to[short] (5.5,-3.1) node[ground]{};
+
+  % optional S/H buffer cap on PA1 (label flipped to the left)
+  \draw (4.2,-1) to[C, l_={$100\,\mathrm{nF}$}, *-] (4.2,-2.4) node[ground]{};
+
+  % ===== optional bulk cap: VIN -> E_GND (NOT to N_GND) ==================
+  \draw (10,0.5) to[C, l_={$100\,\mu\mathrm{F}$}, *-*] (10,-4.2);
+  \node[anchor=east] at (9.75,-3.3) {\scriptsize optional};
+
+  % ===== DUT =============================================================
+  \draw[thick] (11,-3) rectangle (15,0);
+  \node[align=center] at (13,-1.5) {\small ESP32 devkit\\[-0.5mm]\scriptsize (DUT)};
+  \draw (12,0)  to[short,*-] (12,0.5);                       % VIN up to rail
+  \node[anchor=south west] at (12.05,0.05) {\scriptsize\texttt{VIN}};
+  \draw (12,-3) to[short] (12,-4.2);                         % GND down to E_GND
+  \node[anchor=north west] at (12.05,-3.05) {\scriptsize\texttt{GND}};
+  \node[anchor=west,align=left] at (15.15,-1.5) {\scriptsize\textbf{USB:}\\[-0.6mm]\scriptsize not connected};
+
+  % ===== E_GND rail (DUT-local ground, floats above N_GND) ===============
+  \draw (8,-4.2) to[short,*-*] (12,-4.2);
+  \node[anchor=south] at (8.7,-4.08) {\scriptsize\texttt{E\_GND}};
+
+  % ===== shunt sense to PA0 ==============================================
+  \draw (8,-4.2) to[short] (3.4,-4.2);
+
+  % ===== shunt ===========================================================
+  \draw (8,-4.2) to[R={$R_s=1\,\Omega$}] (8,-5.5);
+
+  % ===== N_GND rail ======================================================
+  \draw (8,-5.5) to[short,*-] (3.4,-5.5);
+  \draw (6,-5.5) to[short,*-] (6,-6.1) node[ground]{};
+  \node[anchor=north] at (7.1,-5.70) {\scriptsize\texttt{N\_GND} (ADC reference)};
+
+\end{circuitikz}
+\end{center}
+
+\noindent
+\textbf{Read it as a loop.} Current leaves the Nucleo \texttt{5V} pin, enters the DUT at
+\texttt{VIN}, passes through the entire board, exits at the DUT \texttt{GND} pin, and returns
+to \texttt{N\_GND} through $R_s$. Every milliampere the DUT draws is forced through the shunt.
+\emph{The DUT must have no second ground path} --- see \S\ref{sec:rules}.
+
+\medskip
+\noindent
+\fcolorbox{warn}{white}{\parbox{0.97\textwidth}{%
+\textbf{The return-path trap.} The bulk capacitor $C_b$ returns to \texttt{E\_GND} --- the DUT's
+\emph{own} ground, at the top of the shunt --- \textbf{not} to \texttt{N\_GND}. A component
+returned to \texttt{N\_GND} carries DUT current that bypasses the shunt entirely and is therefore
+invisible to the meter: a silent, systematic under-read. The same rule governs the marker
+pulldown below. Note $C_f$ (on \texttt{PA1}) is exempt: it carries no DUT current, only ADC
+sample-and-hold charge, so it returns to \texttt{N\_GND}.}}
+
+\subsection{Phase marker (Phase 5, optional)}
+
+Drawn separately because its ground return is the easiest thing on this rig to get wrong.
+
+\begin{center}
+\begin{circuitikz}[american, scale=0.92, transform shape]
+
+  % DUT
+  \draw[thick] (0,-1.2) rectangle (3,0.6);
+  \node at (1.5,-0.3) {\small ESP32 (DUT)};
+  \node[anchor=south west] at (3.05,-0.35) {\scriptsize\texttt{GPIO27}};
+  \node[anchor=north east] at (1.45,-1.25) {\scriptsize\texttt{GND}};
+
+  % GPIO -> 1k -> PA10
+  \draw (3,-0.5) to[R, l_={$1\,\mathrm{k}$}, *-*] (5.6,-0.5);
+  \draw (5.6,-0.5) to[short,-o] (7.6,-0.5) node[right]{\small\texttt{PA10} / D2 (5\,V-tolerant)};
+
+  % pulldown -> E_GND
+  \draw (5.6,-0.5) to[R={$10\,\mathrm{k}$}] (5.6,-2.8);
+  \draw (5.6,-2.8) to[short] (1.2,-2.8);
+
+  % DUT GND down to E_GND node
+  \draw (1.2,-1.2) to[short,-*] (1.2,-2.8);
+  \node[anchor=south east] at (1.15,-2.75) {\scriptsize\texttt{E\_GND}};
+
+  % shunt down to N_GND
+  \draw (1.2,-2.8) to[R={$R_s$}] (1.2,-4.3);
+  \draw (1.2,-4.3) to[short] (1.2,-4.7) node[ground]{};
+  \node[anchor=west] at (1.35,-4.55) {\scriptsize\texttt{N\_GND}};
+
+  % annotation
+  \draw[->,thick,warn] (5.0,-3.1) .. controls (4.0,-3.9) and (3.0,-3.5) .. (2.0,-3.2);
+  \node[anchor=west,warn,align=left] at (5.1,-3.35)
+        {\scriptsize\textbf{pulldown returns to \texttt{E\_GND},}\\[-0.6mm]
+         \scriptsize\textbf{above the shunt --- never \texttt{N\_GND}}};
+
+\end{circuitikz}
+\end{center}
+
+\noindent
+Every ESP32 GPIO goes high-impedance during reset, and an OTA \emph{ends} in a reboot --- so
+without the pulldown the marker line floats through precisely the phase transition being
+captured. The \SI{10}{\kilo\ohm} holds it at a defined low; the \SI{1}{\kilo\ohm} protects both
+pins should one end be misconfigured as an output. Returning the pulldown to \texttt{N\_GND}
+would route $\approx\SI{330}{\micro\ampere}$ of DUT current around the shunt.
+
+\medskip
+\noindent
+\textbf{Two markers are better than one.} A single pin distinguishes only ``in a phase / not in a
+phase''. Two pins (e.g.\ GPIO27 + GPIO26 into two FT inputs) give a 2-bit code --- exactly the four
+OTA phases worth separating: download / write / verify / reboot. Same wiring cost.
+
+% ---------------------------------------------------------------------------
+\section{Bill of materials}
+
+\begin{center}
+\begin{tabularx}{\textwidth}{llX}
+\toprule
+\textbf{Ref} & \textbf{Value} & \textbf{Notes} \\
+\midrule
+MCU     & Nucleo-F446RE            & Meter + host link. Only device connected to the PC. \\
+DUT     & ESP32 devkit (WROOM-32)  & Powered exclusively from the Nucleo \SI{5}{\volt} pin. \\
+$R_s$   & \SI{1}{\ohm}, \SI{0.25}{\watt} & Shunt. Ten \SI{10}{\ohm} in parallel is an acceptable substitute (also averages tolerance down). \\
+$R_1,R_2$ & \SIrange{1}{10}{\kilo\ohm} & Rail divider, matched pair; \SI{1}{\percent} preferred (ratio error is a direct gain error on energy). \SI{10}{\kilo\ohm}/\SI{10}{\kilo\ohm} settles with $\approx6\times$ margin --- see \S\ref{sec:adc}. Ratio is \num{2.0} either way. \\
+$C_b$   & \SI{100}{\micro\farad} & \emph{Optional.} Bulk decoupling, \textbf{VIN$\rightarrow$E\_GND only}. \\
+$C_f$   & \SI{100}{\nano\farad}  & \emph{Optional.} PA1 to \texttt{N\_GND}; buffers the ADC sample-and-hold. Not required at \SI{10}{\kilo\ohm}, but harmless insurance. \\
+$R_3$   & \SI{1}{\kilo\ohm}      & Marker series protection (Phase 5). \\
+$R_4$   & \SI{10}{\kilo\ohm}     & Marker pulldown to \texttt{E\_GND} (Phase 5). \\
+\midrule
+\multicolumn{3}{l}{\textit{Reference instrument:} bench multimeter, used for calibration only.} \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+% ---------------------------------------------------------------------------
+\section{Connection table}
+
+\begin{center}
+\begin{tabularx}{\textwidth}{llXl}
+\toprule
+\textbf{Nucleo} & \textbf{Arduino hdr} & \textbf{Connects to} & \textbf{Function} \\
+\midrule
+\texttt{5V}   & CN6-5 & ESP32 \texttt{VIN} (= \texttt{5V}) & Supply rail \\
+\texttt{GND}  & CN6-6 & Bottom of $R_s$ / divider bottom   & System ground, ADC reference \\
+\texttt{PA0}  & A0    & Top of $R_s$ = \texttt{E\_GND}     & Shunt sense, \SI{200}{kSps} \\
+\texttt{PA1}  & A1    & Divider midpoint                    & Rail sense, $V_\text{rail}/2$ \\
+\texttt{PA10} & D2    & ESP32 GPIO27 via \SI{1}{\kilo\ohm}  & Phase marker (optional, 5\,V-tolerant) \\
+\midrule
+\multicolumn{4}{l}{\textbf{ESP32 USB port: not connected.} See \S\ref{sec:rules}.} \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\noindent
+\textbf{Why PA10 and not PA4.} PA4 is a DAC pin and is \emph{not} \SI{5}{\volt}-tolerant.
+The marker's logic high arrives at up to \SI{3.6}{\volt} (\SI{3.3}{\volt} referenced to a
+ground that is itself floating \SI{0.3}{\volt} up), leaving PA4 no headroom. PA10 is an FT pin.
+
+\medskip
+\noindent
+\textbf{Why GPIO27 on the DUT.} Not a strapping pin, not a flash pin (GPIO6--11), not
+input-only (GPIO34/35/36/39), no default peripheral, no boot-time glitch. GPIO13/25/26/33 are
+equivalent alternates. \textbf{Never GPIO12} --- it is the MTDI strapping pin; held high at
+reset it selects a \SI{1.8}{\volt} flash supply and the board will not boot.
+
+% ---------------------------------------------------------------------------
+\section{Electrical design budget}
+
+\subsection{Shunt sizing and LDO headroom}
+
+At the WiFi TX peak, $I_\text{pk} \approx \SI{300}{\milli\ampere}$:
+\[
+V_{R_s} = I_\text{pk} R_s = \SI{0.3}{\volt},
+\qquad
+P_{R_s} = I_\text{pk}^2 R_s = \SI{90}{\milli\watt} \;\;(<\;\SI{250}{\milli\watt}\text{ rating}).
+\]
+The Nucleo's \SI{5}{\volt} pin, when the board is USB-powered, sits near
+\SI{4.7}{\volt} (ST-Link protection diode drop). The DUT's AMS1117 therefore sees
+\[
+V_\text{LDO,in} = \SI{4.7}{\volt} - \SI{0.3}{\volt} = \SI{4.4}{\volt},
+\]
+which is at --- not above --- the AMS1117's worst-case dropout floor for a
+\SI{3.3}{\volt} output.
+
+\medskip
+\noindent
+\fcolorbox{warn}{white}{\parbox{0.97\textwidth}{
+\textbf{Do not increase $R_s$ beyond \SI{1}{\ohm} without addressing headroom.} At
+\SI{2}{\ohm} the peak drop is \SI{0.6}{\volt} and the LDO browns out mid-OTA. If the DUT
+resets or resets intermittently during WiFi TX, the remedies in order of preference are:
+(i) drop to \SI{0.5}{\ohm} (two \SI{1}{\ohm} in parallel), accepting half the sensitivity;
+(ii) fit $C_b$ across VIN--E\_GND; (iii) power the Nucleo from an external \SIrange{7}{12}{\volt}
+supply on its own \texttt{VIN}, which yields a solid \SI{5.0}{\volt} rail.}}
+
+\subsection{ADC scaling, sampling budget, and why the divider is \SI{1}{\kilo\ohm}}
+\label{sec:adc}
+
+Both channels are read by the F446's \SI{12}{bit} SAR ADC against $V_\text{DDA}\approx\SI{3.3}{\volt}$.
+
+\begin{center}
+\begin{tabular}{llll}
+\toprule
+& \textbf{PA0 (shunt)} & \textbf{PA1 (rail)} \\
+\midrule
+Input range at ADC          & \SIrange{0}{0.5}{\volt} (typ.)  & $\approx\SI{2.35}{\volt}$ \\
+Corresponding quantity      & \SIrange{0}{500}{\milli\ampere} & $\approx\SI{4.7}{\volt}$ rail \\
+Full-scale before clipping  & \SI{3.3}{\ampere}               & \SI{6.6}{\volt} rail \\
+Raw LSB                     & \SI{0.806}{\milli\volt} $\rightarrow$ \SI{0.81}{\milli\ampere} & \SI{1.6}{\milli\volt} rail \\
+After $256\times$ decimation & $\approx$ \SI{0.05}{\milli\ampere} & --- \\
+Source impedance            & $\approx R_s$, negligible        & \SI{5}{\kilo\ohm} (Th\'evenin, 10k$\|$10k) \\
+Sampling time               & 15 cyc.                          & 56 cyc. \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent
+Averaging $N=256$ samples recovers $\log_4 N = 4$ effective bits, giving an effective
+\SI{16}{bit} resolution --- roughly \SI{0.05}{\milli\ampere} per count. This is what makes a
+bare \SI{12}{bit} ADC with no front-end usable.
+
+\subsubsection*{Divider impedance: \SI{10}{\kilo\ohm}/\SI{10}{\kilo\ohm} is fine}
+
+The ADC input is an RC: the sample-and-hold capacitor ($C_\text{ADC}\approx\SI{4}{\pico\farad}$)
+charges through the source impedance plus the internal mux resistance
+($R_\text{ADC}\approx\SI{6}{\kilo\ohm}$). Settling to $\tfrac12$\,LSB at \SI{12}{bit} needs
+$\approx\ln(2^{13}) \approx 9\tau$. For a \SI{10}{\kilo\ohm}/\SI{10}{\kilo\ohm} divider
+(a \SI{5}{\kilo\ohm} Th\'evenin source):
+\[
+\tau = (\SI{5}{\kilo\ohm} + \SI{6}{\kilo\ohm})\cdot\SI{4}{\pico\farad} \approx \SI{44}{\nano\second},
+\qquad
+t_\text{settle} \approx 9\tau \approx \SI{0.4}{\micro\second}
+\;\ll\;
+\underbrace{\frac{56}{\SI{22.5}{\mega\hertz}} = \SI{2.49}{\micro\second}}_{\text{available at 56 cyc.}}
+\]
+--- roughly \textbf{6$\times$ margin}. The \num{480}-cycle figure sometimes quoted is the spec for
+a $\approx\SI{200}{\kilo\ohm}$ source, which a resistor divider is nowhere near.
+
+\medskip
+\noindent
+\SI{1}{\kilo\ohm}/\SI{1}{\kilo\ohm} works equally well and has more margin still, at the cost of
+$\approx\SI{2.5}{\milli\ampere}$ drawn from a rail that is already tight for the DUT's peaks
+(\S6.1). That current returns to \texttt{N\_GND} \emph{without passing through the shunt}, so it
+does not corrupt the measurement either way. \textbf{Use whichever you have.} The ratio is
+\num{2.0} in both cases, so \texttt{KDIV} is unchanged.
+
+\medskip
+\noindent
+\textbf{Acceptance check, not an argument.} A source impedance too high for its sampling window
+biases the rail reading \emph{low}, silently --- and every joule scales with the rail. So verify
+it: compare the rail PA1 reports (\texttt{nff power monitor}) against the multimeter. They must
+agree. If PA1 reads low, drop to \SI{1}{\kilo\ohm}/\SI{1}{\kilo\ohm} or fit $C_f$.
+
+\subsection{Sampling budget}
+
+The ADC clock is $\text{PCLK2}/4 = \SI{22.5}{\mega\hertz}$, and a \SI{12}{bit} conversion costs
+$(t_\text{samp} + 12)$ ADC cycles. One scan of both ranks is therefore
+\[
+\underbrace{(15+12)}_{\text{PA0}} + \underbrace{(56+12)}_{\text{PA1}} = \num{95}\ \text{cycles}
+= \SI{4.22}{\micro\second},
+\]
+against the \SI{5.00}{\micro\second} that the \SI{200}{kSps} trigger allows --- about
+\SI{16}{\percent} headroom. If that budget is ever violated the \texttt{ovr} counter says so;
+it is not left to inference. \emph{Measured on the bench:} \num{2040576} samples in
+\SI{10}{\second} ($f_s = \SI{199998}{\hertz}$), $\texttt{ovr} = 0$.
+
+\subsection{$V_\text{DDA}$ tolerance}
+
+The Nucleo's \SI{3.3}{\volt} regulator has a $\pm\SI{2}{\percent}$ tolerance, which appears as a
+$\pm\SI{2}{\percent}$ gain error on \emph{both} channels.
+
+\medskip
+\noindent
+\textbf{This is absorbed by the $R_\text{eff}$ calibration (\S\ref{sec:cal}), not corrected
+independently.} Calibration solves $R_\text{eff}$ from a measured current, so any gain error
+common to the chain --- resistor tolerance, ADC gain, $V_\text{DDA}$ --- lands in that single
+constant. They are not separable, and they do not need to be.
+
+\medskip
+\noindent
+\textit{Not implemented:} the F446 carries a factory VREFINT constant at \texttt{0x1FFF7A2A} from
+which the true $V_\text{DDA}$ could be derived independently
+($V_\text{DDA} = \SI{3.3}{\volt}\cdot\text{VREFINT\_CAL}/\text{VREFINT\_DATA}$). The firmware does
+\emph{not} read it, because calibration already absorbs the error. It would only earn its keep if
+one wanted an \emph{uncalibrated} absolute reading, or to track $V_\text{DDA}$ drift with
+temperature.
+
+% ---------------------------------------------------------------------------
+\section{Firmware integration mathematics}
+\label{sec:math}
+
+Let $k$ index samples taken at $\Delta t = \SI{5}{\micro\second}$ ($f_s = \SI{200}{kSps}$), and
+let $q_k$, $u_k$ be the \emph{raw ADC counts} on PA0 and PA1. With $L = V_\text{DDA}/4096$ the
+volts-per-count, $K$ the divider ratio (\num{2.0} for a matched pair) and $R_\text{eff}$ the
+\emph{calibrated} shunt resistance (\S\ref{sec:cal}) --- not the nominal \SI{1}{\ohm}:
+\[
+I_k = \frac{q_k L}{R_\text{eff}},
+\qquad
+V_{\text{board},k} = \underbrace{K\,u_k L}_{\text{rail}} - \underbrace{q_k L}_{\text{ground lift}} .
+\]
+Energy then collapses into sums the firmware can keep in \emph{exact integers}:
+\[
+E \;=\; \sum_k V_{\text{board},k}\, I_k \,\Delta t
+  \;=\; \frac{L^2}{R_\text{eff}}\cdot\frac{1}{f_s}\;
+        \Big(K \textstyle\sum_k u_k q_k \;-\; \sum_k q_k^2\Big),
+\qquad
+Q \;=\; \frac{L}{R_\text{eff}}\cdot\frac{1}{f_s}\sum_k q_k .
+\]
+
+\noindent
+So the STM32 accumulates only $\sum q$, $\sum q^2$, $\sum u q$, $\sum u$ and $n$ --- as
+\texttt{uint64}, which a \SI{10}{\minute} run at \SI{200}{kSps} does not come close to overflowing
+--- and the host multiplies by constants. A float accumulator would drift over $10^7$ samples;
+these do not.
+
+\medskip
+\noindent
+\textbf{The host never integrates.} This is deliberate: a host-side integrator that misses serial
+frames silently under-reports energy, and the loss is invisible in the output. Here a missed frame
+costs nothing --- the next frame carries the correct cumulative total --- and a missed
+\emph{conversion} cannot hide either, because it sets \texttt{ovr} (\S\ref{sec:honesty}).
+
+\subsection{Baseline subtraction}
+
+A command's cost is defined as the energy \emph{above} the cost of merely being powered on:
+\[
+P_\text{idle} = \frac{E(t_1) - E(t_0)}{t_1 - t_0}\bigg|_\text{DUT idle, WiFi connected},
+\qquad
+\boxed{\;E_\text{marg} = E_\text{total} - P_\text{idle}\cdot T_\text{cmd}\;}
+\]
+$E_\text{marg}$ is the reported headline figure. Because the LDO loss, USB--UART bridge and
+power LED are present in both terms, they cancel.
+
+% ---------------------------------------------------------------------------
+\section{Calibration procedure (Phase 0)}
+\label{sec:cal}
+
+\noindent\fcolorbox{warn}{white}{\parbox{0.97\textwidth}{%
+\textbf{Do not skip, and repeat after \emph{any} rewiring.} Breadboard contact resistance is
+\SIrange{10}{100}{\milli\ohm} \emph{per contact} and sits in series with a \SI{1}{\ohm} shunt.
+It is not negligible, and it changes when a wire is re-seated.}}
+
+\medskip
+\begin{enumerate}[leftmargin=*]
+  \item Wire the rig per the schematic. Flash the meter firmware.
+  \item Hang a known resistive load on the DUT's \SI{3.3}{\volt} rail --- \SI{100}{\ohm}
+        gives $\approx\SI{33}{\milli\ampere}$.
+  \item Read the true current $I_\text{DMM}$ with the multimeter \emph{in series} with that load.
+  \item Read the current $I_\text{rep}$ the STM32 reports, assuming nominal $R_s = \SI{1}{\ohm}$.
+  \item Solve for the effective shunt and persist it:
+        \[ R_\text{eff} = R_\text{nom}\cdot\frac{I_\text{rep}}{I_\text{DMM}} \]
+        This single constant absorbs the resistor's tolerance, the ADC gain error, \emph{and}
+        the breadboard contact resistance.
+  \item Repeat for the divider: measure the rail with the DMM, compare against
+        $2\,V_\text{PA1}$, and store the ratio correction.
+\end{enumerate}
+
+\medskip
+\noindent
+\textbf{Acceptance criterion.} After calibration, the STM32 and the multimeter must agree to
+within a few percent on a purely resistive load. \emph{If they do not, stop} --- nothing built
+on top of this rig is worth anything.
+
+% ---------------------------------------------------------------------------
+\section{Host interface}
+
+ST-Link Virtual COM Port, \SI{921600}{baud}, 8N1, line-oriented ASCII.
+
+\begin{center}
+\begin{tabularx}{\textwidth}{llX}
+\toprule
+\textbf{Dir} & \textbf{Command} & \textbf{Meaning} \\
+\midrule
+H$\rightarrow$M & \texttt{PING}                    & Liveness / identification probe. \\
+H$\rightarrow$M & \texttt{INFO}                    & Firmware identity, $f_s$, calibration constants. \\
+H$\rightarrow$M & \texttt{ZERO}                    & Reset the accumulators and the clock. Acknowledged. \\
+H$\rightarrow$M & \texttt{SNAP}                    & Emit one frame \emph{now}. \\
+H$\rightarrow$M & \texttt{STREAM <0|1>}            & Free-run frames at \SI{10}{\hertz} (live \texttt{monitor} view only). \\
+H$\rightarrow$M & \texttt{WIRECHECK}               & Actively probe whether PA0/PA1 are connected (\S\ref{sec:honesty}). \\
+H$\rightarrow$M & \texttt{CAL <micro\_ohm>}        & Set $R_\text{eff}$. \\
+H$\rightarrow$M & \texttt{KDIV <milli>}            & Set the divider ratio $\times 1000$ (\texttt{2000} = any matched pair). \\
+H$\rightarrow$M & \texttt{VDDA <mv>}               & Set the assumed ADC reference. \\
+M$\rightarrow$H & (frame)                          & One JSON object per line. \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\noindent
+\textbf{Calibration lives on the host} (\texttt{\textasciitilde/.nff/config.json}) and is pushed
+down with \texttt{CAL}/\texttt{KDIV}/\texttt{VDDA} on every connect. The meter is stateless across
+resets; there is one source of truth.
+
+\medskip
+\noindent
+\textbf{Frames are emitted on demand, not free-running.} A meter that chatters continuously leaves
+the host unable to say exactly when accumulation stopped relative to the profiled command exiting
+--- it would over-attribute up to a frame's worth of idle energy to it. \texttt{measure} therefore
+drives \texttt{ZERO} $\rightarrow$ run $\rightarrow$ \texttt{SNAP}.
+
+\begin{verbatim}
+{"t":10200,"n":2040576,"ovr":0,"sq":141600000,"sqq":9832000000,
+ "suq":4.39e11,"su":6.33e9,"qmax":410,"fs":200000,"vdda":3300,
+ "r":1000000,"kdiv":2000}
+\end{verbatim}
+
+\noindent
+The frame carries \emph{raw integer sums}, not derived joules. Two reasons. It keeps the
+accumulation exact --- a float accumulator drifts over $10^7$ samples --- and it means a
+\emph{re}-calibration can re-derive the energy of a past run without re-measuring it.
+
+% ---------------------------------------------------------------------------
+\section{How the rig refuses to lie}
+\label{sec:honesty}
+
+Every guard here exists because the rig produced a confident, plausible, \emph{wrong} number
+during bring-up. None is hypothetical, and \texttt{ovr} alone catches none of the last two.
+
+\subsection{\texttt{ovr} --- dropped conversions}
+
+A missed conversion means the accumulators are an under-count. If $\texttt{ovr} > 0$, or the
+profiled child process exits non-zero, the host reports \texttt{ok: false} and does \textbf{not}
+present a joules figure. A plausible-but-wrong energy number is worse than no number, because it
+will be trusted.
+
+\subsection{Window cross-check --- a lost \texttt{ZERO}}
+
+A \texttt{ZERO} that never lands leaves the meter accumulating \emph{from boot}, so the frame
+describes the board's uptime rather than the command.
+
+\medskip
+\noindent
+\fcolorbox{warn}{white}{\parbox{0.97\textwidth}{%
+\textbf{Observed:} a \SI{30}{\second} run reported \SI{91}{\second} and \SI{26}{\joule} --- with
+$\texttt{ovr}=0$, a perfectly sane \SI{58}{\milli\ampere}, and \texttt{ok: true}. The overrun
+counter cannot catch this: no samples were lost. The \emph{window} was wrong.}}
+
+\medskip
+\noindent
+\texttt{ZERO} is now acknowledged, and the host cross-checks (a) the meter's own elapsed clock
+against how long it actually waited, and (b) that the samples delivered match the claimed $f_s$
+--- if the ADC is not running at $f_s$, every $\Delta t$, and so every joule, is scaled wrong.
+
+\subsection{\texttt{WIRECHECK} --- a rig wired to nothing}
+
+The nastiest failure, and it defeated two designs before this one.
+
+\medskip
+\noindent
+\fcolorbox{warn}{white}{\parbox{0.97\textwidth}{%
+\textbf{An unconnected ADC pin does not read zero --- it holds charge.} With \emph{nothing
+attached at all}, the meter reported \SI{590}{\milli\ampere} and a rail of \SI{4.94}{\volt}. Both
+are entirely plausible. Any passive range check waves them straight through.}}
+
+\medskip
+\noindent
+An internal pull-up/pull-down probe fails too: it reported both pins ``connected'' with nothing
+attached, because \textbf{the F446's ADC cannot read a pad while the GPIO is in digital-input
+mode} (the analog switch is open), and the pulls are \emph{disabled} in analog mode --- so there
+is no configuration in which both work.
+
+\medskip
+\noindent
+What survives is to \textbf{drive the node, release it to analog, and read it immediately}. A real
+source restores its own voltage in nanoseconds (the divider is a few-k$\Omega$ source; the shunt
+node is a near short to ground). A floating node keeps the charge. Measured: a floating PA0 stayed
+\num{1746} counts off, a floating PA1 \num{2425} counts off; a wired node moves under \num{100}.
+
+\medskip
+\noindent
+For the divider, both tests must pass: it must \emph{read} like a \SI{5}{\volt} rail \emph{and}
+spring back. Either alone can be passed by luck --- the bench's floating PA1 sat at a convincing
+\SI{4.94}{\volt} --- but it restored to \SI{0.5}{\volt}, and nothing genuinely connected does that.
+
+\medskip
+\noindent
+\fcolorbox{warn}{white}{\parbox{0.97\textwidth}{%
+\textbf{PA0 is only ever driven LOW.} Driving it high would put the GPIO against the
+\SI{1}{\ohm} shunt straight to ground --- $\approx\SI{65}{\milli\ampere}$, well past the pin's
+\SI{25}{\milli\ampere} rating. PA1 is safe to drive both ways: the divider's series resistance limits
+the current to a few \si{\milli\ampere}.}}
+
+% ---------------------------------------------------------------------------
+\section{Capability envelope}
+
+\begin{center}
+\begin{tabularx}{\textwidth}{clX}
+\toprule
+& \textbf{Quantity} & \textbf{Remark} \\
+\midrule
+\yes & Active-mode current, joules per OTA & The target measurand. \\
+\yes & Idle / connected-but-quiet baseline & Required for marginal subtraction. \\
+\yes & Peak current ($i_\text{max}$)       & Smoothed if $C_b$ is fitted; $Q$ and $E$ remain exact. \\
+\midrule
+\no  & Deep sleep                          & \SI{10}{\micro\ampere}$\times$\SI{1}{\ohm} = \SI{10}{\micro\volt}, roughly $100\times$ below the breadboard noise floor. Unrecoverable without a real front-end (INA228, PPK2). \\
+\no  & \texttt{nff flash}, \texttt{nff monitor} & Require the DUT's USB, which shorts the shunt. \\
+\midrule
+\multicolumn{3}{l}{\textit{Caveat:} the measurement is whole-board, not ESP32-die. Constant, so it cancels in $E_\text{marg}$.} \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+% ---------------------------------------------------------------------------
+\section{Error budget}
+
+\begin{center}
+\begin{tabularx}{\textwidth}{Xllp{58mm}}
+\toprule
+\textbf{Source} & \textbf{Raw} & \textbf{Residual} & \textbf{Treatment} \\
+\midrule
+Shunt tolerance ($\pm\SI{5}{\percent}$)      & \SI{5}{\percent}   & $<\SI{0.5}{\percent}$ & Absorbed by $R_\text{eff}$ calibration. \\
+Breadboard contact resistance                 & \SIrange{1}{10}{\percent} & $<\SI{1}{\percent}$ & Absorbed by calibration; \textbf{drifts on re-seat}. \\
+$V_\text{DDA}$ regulator ($\pm\SI{2}{\percent}$) & \SI{2}{\percent} & $<\SI{0.5}{\percent}$ & Absorbed by $R_\text{eff}$ calibration (\emph{not} VREFINT --- see \S6.4). \\
+Divider ratio                                 & \SI{1}{\percent}   & $<\SI{0.5}{\percent}$ & Calibrated against the DMM. \\
+Divider source impedance                      & ---                & $\approx 0$        & \SIrange{1}{10}{\kilo\ohm} both settle with $\approx6\times$ margin at \num{56} cycles (\S\ref{sec:adc}). Verify the rail against the DMM. \\
+Shunt tempco (self-heating, \SI{90}{\milli\watt}) & --- & $\approx\SI{1}{\percent}$ & Uncorrected. Carbon film $\approx$\SI{300}{ppm\per\celsius}. \\
+ADC INL/DNL                                   & ---                & $\approx\SI{0.2}{\percent}$ & Uncorrected, small. \\
+Aliasing of WiFi TX spikes                    & ---                & sample-rate bound & Mitigated by $f_s=\SI{200}{kSps}$; $C_b$ trades peak fidelity for stability. \\
+Dropped conversions                           & ---                & \textbf{detected} & \texttt{ovr} counter $\rightarrow$ \texttt{ok: false}. \\
+Wrong accumulation window                     & ---                & \textbf{detected} & \texttt{ZERO} ack + host/meter clock cross-check. \\
+Rig not actually wired                        & ---                & \textbf{detected} & \texttt{WIRECHECK} drive-and-release probe. \\
+\midrule
+\textbf{Expected overall} & & $\approx\SIrange{2}{3}{\percent}$ & On active-mode energy, post-calibration. \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\noindent
+The rig is designed for \emph{relative} fidelity: a \SI{2}{\percent} absolute error is
+irrelevant to the regression gate, which compares an OTA against a previously measured OTA
+on the same, un-rewired rig.
+
+% ---------------------------------------------------------------------------
+\section{Operating rules}
+\label{sec:rules}
+
+\begin{enumerate}[leftmargin=*,label=\textbf{R\arabic*.}]
+  \item \textbf{The ESP32 must not be plugged into the PC's USB.} A USB cable ties the DUT's
+        ground to PC ground, which shorts the shunt out. A reading of $\approx\SI{0}{\milli\ampere}$
+        during a known-active phase is the signature of exactly this mistake. It is also the
+        reason \texttt{nff flash} and \texttt{nff monitor} cannot be profiled here.
+  \item \textbf{Only the Nucleo connects to the PC.}
+  \item \textbf{$R_s = \SI{1}{\ohm}$, \SI{0.25}{\watt}.} Do not exceed \SI{1}{\ohm} without
+        bulk capacitance --- the DUT's LDO will brown out (\S6.1).
+  \item \textbf{Recalibrate after any rewiring.} Contact resistance is in the measurement path.
+  \item \textbf{All DUT return currents pass through the shunt.} $C_b$ and the marker pulldown
+        return to \texttt{E\_GND}, never \texttt{N\_GND}.
+\end{enumerate}
+
+% ---------------------------------------------------------------------------
+\section{Verification sequence}
+
+Run in order. Each step gates the next.
+
+\begin{enumerate}[leftmargin=*]
+  \item \textbf{Resistive-load check.} \SI{100}{\ohm} on the DUT's \SI{3.3}{\volt} rail.
+        \texttt{nff power monitor} must agree with the multimeter to within a few percent.
+        \emph{If it does not, nothing else counts.}
+  \item \textbf{Baseline.} \texttt{nff power measure -{}-for 30}, DUT idle and WiFi-connected.
+        Expect tens of \si{\milli\ampere}. A reading near zero means the shunt is shorted ---
+        check R1.
+  \item \textbf{The real number.} \texttt{nff power measure -{}-during "nff ota ..."}
+        $\rightarrow$ joules per OTA. Confirm $\texttt{ovr} = 0$.
+  \item \textbf{Regression gate.} Re-run with \texttt{-{}-max-joules} set just below the measured
+        value; confirm exit status 1.
+  \item \textbf{Agent loop.} Call the \texttt{power\_measure} MCP tool; confirm the agent
+        receives a structured verdict.
+\end{enumerate}
+
+\medskip
+\noindent
+\textbf{Reporting.} State the measured joules-per-OTA plainly, including whether \texttt{ovr}
+was clean. If the rig cannot be made to agree with the multimeter, say so --- do not report a
+number.
+
+% ---------------------------------------------------------------------------
+\section{Measurement log}
+
+\begin{center}
+\begin{tabularx}{\textwidth}{llllllX}
+\toprule
+\textbf{Date} & \textbf{$R_\text{eff}$} & \textbf{$P_\text{idle}$} & \textbf{$E_\text{marg}$} & \textbf{$i_\text{max}$} & \textbf{ovr} & \textbf{Notes} \\
+\midrule
+2026-07-14 & \bad{\SI{1.0}{\ohm} nom.} & \SI{206}{\milli\watt} & \SI{5.37}{\joule} & \SI{314}{\milli\ampere} & 0 & \SI{1}{\mebi\byte} OTA, \texttt{esp32-nffload}. \num{3.06e6} samples. \bad{Uncalibrated} --- resistor measures \SI{1.1}{\ohm}. \\[2mm]
+2026-07-14 & --- & --- & --- & --- & 0 & $f_s$ verified: \num{2040576} samples in \SI{10}{\second} $=$ \SI{199998}{\hertz}. \\[2mm]
+2026-07-13 & --- & --- & --- & --- & --- & \texttt{WIRECHECK} bring-up: wired to \emph{nothing}, the rig read a plausible \SI{590}{\milli\ampere} and a \SI{4.94}{\volt} rail. \\[2mm]
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\vspace{4mm}
+\hrule
+\vspace{2mm}
+\noindent\small
+\textit{Revision A.1 --- rig \textbf{built, debugged and in service} (2026-07-14). It has produced real numbers: see \texttt{nff-power-characteristics.tex}. \bad{Phase 0 calibration still not performed}, so absolute figures carry \SIrange{10}{30}{\percent};
+relative figures are good to a few percent. The measurement log below is real.}
+
+\end{document}

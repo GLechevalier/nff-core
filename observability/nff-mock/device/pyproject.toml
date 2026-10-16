@@ -1,0 +1,29 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "nff-mock"
+version = "0.1.0"
+description = "Pure-software virtual ESP32 — a mock nff device for hardware-free demos"
+requires-python = ">=3.12"
+dependencies = [
+    "nff-mock-core",
+    "aiomqtt>=2.0",
+    "cryptography>=42.0",
+    "pydantic-settings>=2.0",
+    "click>=8.0",
+    "httpx>=0.27",
+    "pyyaml>=6.0",
+]
+
+[project.scripts]
+nff-mock = "nff_mock.cli:cli"
+
+[tool.hatch.build.targets.wheel]
+packages = ["nff_mock"]
+
+# nff-mock-core is a sibling path package in this monorepo (../core). The Docker images
+# install it explicitly before this package; uv resolves it from here for local dev.
+[tool.uv.sources]
+nff-mock-core = { path = "../core", editable = true }

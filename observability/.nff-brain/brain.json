@@ -1,0 +1,60 @@
+{
+  "version": 1,
+  "updatedAt": "2026-09-03T18:15:03.355Z",
+  "nodes": [
+    {
+      "id": "polling-stall-no-wait",
+      "title": "Polling tools without wait_seconds cause agent stalls",
+      "category": "analysis",
+      "content": "MCP polling tools (e.g., get_firmware_fix_status) that instruct 'poll every 30-60s' cause agent stalls when no wait primitive is available. The agent reaches for Bash sleep (blocked by allowlist), stalls indefinitely while renewing its lease every 60s, and never retries. The fix: add server-side blocking (wait_seconds parameter, capped at 90s) so the agent calls once and waits in-process. Applies to all nff status-polling tools.",
+      "color": "#22d3ee",
+      "x": 675.8147058913869,
+      "y": 416.3462158752406,
+      "size": 16,
+      "origin": "agent",
+      "sourceSession": "8f9c4481-aacc-401b-b1d7-376462aff7ea",
+      "lastUpdated": "2026-09-03T18:15:03.354Z",
+      "recallCount": 0
+    },
+    {
+      "id": "nff-github-l2-mounts",
+      "title": "nff-github L2 dev requires separate workspace binds",
+      "category": "decision",
+      "content": "nff-github runs host-native in dev and must mount both /repo/nff-mock and /repo/nff-sdk-c as separate binds. A single /repo path breaks L2 example-espidf builds because the recipe expects both as siblings. Implement via l2_workspace_dirs() in config.py, binding each workspace root separately. Prod layout remains unchanged.",
+      "color": "#fbbf24",
+      "x": 378.93471537962694,
+      "y": 153.4089859620118,
+      "size": 16,
+      "origin": "agent",
+      "sourceSession": "8f9c4481-aacc-401b-b1d7-376462aff7ea",
+      "lastUpdated": "2026-09-03T18:15:03.354Z",
+      "recallCount": 0
+    },
+    {
+      "id": "l2-build-espidf-not-found",
+      "title": "L2 espidf 'No such file or directory' points to mount config",
+      "category": "rules",
+      "content": "When L2 example-espidf builds fail with 'bash: /repo/nff-mock/qemu/l2/example-espidf/build_espidf.sh: No such file or directory (rc=127)', the root cause is the /repo mount, not the firmware. Check that both nff-mock and nff-sdk-c are reachable at the expected paths before debugging the build recipe.",
+      "color": "#4ade80",
+      "x": 599.9270430796344,
+      "y": 198.72855067112943,
+      "size": 16,
+      "origin": "agent",
+      "sourceSession": "8f9c4481-aacc-401b-b1d7-376462aff7ea",
+      "lastUpdated": "2026-09-03T18:15:03.354Z",
+      "recallCount": 0
+    }
+  ],
+  "edges": [
+    {
+      "from": "polling-stall-no-wait",
+      "to": "nff-github-l2-mounts",
+      "strength": 0.2
+    },
+    {
+      "from": "l2-build-espidf-not-found",
+      "to": "nff-github-l2-mounts",
+      "strength": 0.8
+    }
+  ]
+}

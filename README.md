@@ -127,7 +127,7 @@ In-repo reference ([docs/](docs/)): [boards & USB ids](docs/BOARDS.md) · [self-
 
 ## contributing
 
-Bugs and feature requests go to [GitHub Issues](https://github.com/GLechevalier/nff/issues); read [CONTRIBUTING.md](CONTRIBUTING.md) before opening a PR — adding a board is usually a two-line change. Please follow the [Code of Conduct](CODE_OF_CONDUCT.md), and report vulnerabilities via [SECURITY.md](SECURITY.md). Questions and ideas are welcome on [Discord](https://discord.com/invite/QkFCS3mShe).
+Bugs and feature requests go to [GitHub Issues](https://github.com/GLechevalier/nff-firmware/issues); read [CONTRIBUTING.md](CONTRIBUTING.md) before opening a PR — adding a board is usually a two-line change. Please follow the [Code of Conduct](CODE_OF_CONDUCT.md), and report vulnerabilities via [SECURITY.md](SECURITY.md). Questions and ideas are welcome on [Discord](https://discord.com/invite/QkFCS3mShe).
 
 ## license
 

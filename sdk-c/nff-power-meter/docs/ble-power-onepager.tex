@@ -1,0 +1,245 @@
+% nff — BLE battery sensor node: ONE-PAGE power summary
+%
+% Build:  pdflatex ble-power-onepager.tex     (MUST stay ONE page — verify the
+%         log says "Output written ... (1 page")
+% Deps:   extsizes, booktabs, siunitx, xcolor, geometry, multicol
+%
+% Full derivation lives in ble-power-budget.tex. This sheet is deliberately at
+% its size limit: it fits on one A4 page with ~1 line to spare. If an edit
+% pushes it over, recover space in this order: (1) the OTA sub-rows in Table 1,
+% (2) the `nff_loop` idle-tick row, (3) the closing "change the module" note.
+
+\documentclass[9pt,a4paper]{extarticle}
+
+\usepackage[top=7mm,bottom=7mm,left=8mm,right=8mm]{geometry}
+\usepackage{booktabs}
+\usepackage{siunitx}
+\usepackage{xcolor}
+\usepackage{multicol}
+\usepackage{amsmath}
+\usepackage[hidelinks]{hyperref}
+
+\sisetup{per-mode = symbol, detect-weight = true, group-minimum-digits = 4}
+\DeclareSIUnit{\dBm}{dBm}
+
+\definecolor{warn}{RGB}{176,0,32}
+\definecolor{ok}{RGB}{0,120,60}
+\newcommand{\good}[1]{\textcolor{ok}{\textbf{#1}}}
+\newcommand{\bad}[1]{\textcolor{warn}{\textbf{#1}}}
+\newcommand{\meas}{\textcolor{ok}{$^{\ast}$}}
+\newcommand{\mock}{\textcolor{warn}{$\dagger$}}
+
+\setlength{\parindent}{0pt}
+\setlength{\columnsep}{5mm}
+\setlength{\tabcolsep}{2.5pt}
+\renewcommand{\arraystretch}{0.92}
+\linespread{0.95}
+\pagestyle{empty}
+
+\begin{document}
+
+% ===== TITLE ===============================================================
+{\large\textbf{nff on battery --- ESP32-WROOM-32E, BLE-only sensor node}}\hfill
+{\footnotesize Rev.\ A --- 2026-07-14}\\[0.3mm]
+{\scriptsize\itshape Target: \SI{6000}{\milli\ampere\hour}, 12 months, wake every \SI{5}{\minute},
+BLE-advertise to one gateway per site. No WiFi/LTE on the device.}\\[-2mm]
+\rule{\textwidth}{0.4pt}
+
+\vspace{1mm}
+
+% ===== VERDICT =============================================================
+\fcolorbox{warn}{white}{\parbox{\dimexpr\textwidth-2\fboxsep-2\fboxrule}{\scriptsize
+\textbf{VERDICT --- the spec as written fails, and no measurement can rescue it.} Grant every
+advantage: no battery derate (\SI{6000}{\milli\ampere\hour} $\to$ \SI{685}{\micro\ampere} mean
+budget), a \emph{free} sleep ($I_\text{sleep}=0$), radio \emph{off}. The duty cycle is fixed by the
+requirement at $\SI{30}{\second}/\SI{300}{\second}=\SI{10}{\percent}$, so
+$I_\text{awake,max}=\SI{685}{\micro\ampere}/0.10=\bad{\SI{6.85}{\milli\ampere}}$. \textbf{No ESP32
+executes code at \SI{6.85}{\milli\ampere}} --- Espressif's floor (modem sleep, \SI{80}{\mega\hertz},
+radio off) is \SIrange{20}{31}{\milli\ampere}. \bad{Over budget by $\geq3\times$} before the sensor
+is read. \emph{Three numbers, none of them ours: your \si{\milli\ampere\hour}, your duty cycle,
+Espressif's datasheet.}\\[0.4mm]
+\textbf{The fix is time, not milliamps.} ``Awake \SI{30}{\second}'' $\neq$ ``CPU runs
+\SI{30}{\second}'' --- a \good{$12\times$} difference in battery life, and the spec is silent on
+which one gets built. \textbf{Ceiling: the CPU may run for $\mathbf{\leq\SI{3.9}{\second}}$ per
+\SI{5}{\minute} cycle}
+$\;[\,t_\text{on,max}=T(I_\text{budget}-I_\text{sleep})/(I_\text{awake}-I_\text{sleep})\,]$.
+}}
+
+\vspace{1mm}
+
+% ===== DESIGNS =============================================================
+{\scriptsize
+\begin{tabular}{@{}llllll@{}}
+\toprule
+& \textbf{Board} & \textbf{CPU-active} & \textbf{Sleep floor} & \textbf{$I_\text{mean}$}\,\mock & \textbf{Life} (on \SI{5100}{\milli\ampere\hour} usable) \\
+\midrule
+\textbf{D0} & Devkit & \SI{31.2}{\second} & \SI{6.5}{\milli\ampere} & \SI{10.8}{\milli\ampere} & \bad{20 days} --- fails on the \emph{sleep floor alone} \\
+\textbf{D1} & Custom & \SI{31.2}{\second} & \SI{20}{\micro\ampere}  & \SI{5.01}{\milli\ampere} & \bad{6.1 weeks} --- the literal spec, built the obvious way \\
+\textbf{D2} & Custom & \SI{2.5}{\second}  & \SI{20}{\micro\ampere}  & \SI{380}{\micro\ampere}  & \good{18.4 months} --- \textbf{recommended.} Short wake; no extra parts \\
+\textbf{D3} & Custom & \SI{1.2}{\second}  & \SI{20}{\micro\ampere}  & \SI{394}{\micro\ampere}  & \good{17.7 months} --- literal \SI{30}{\second} window, CPU light-slept; $+$\SI{32.768}{\kilo\hertz} xtal \\
+\midrule
+\multicolumn{4}{@{}l}{\textit{Budget --- mean current must not exceed}} & \textbf{\SI{582}{\micro\ampere}} & \textit{(\SI{5100}{\milli\ampere\hour}/\SI{8760}{\hour}; \SI{48.5}{\micro\ampere\hour} per cycle)} \\
+\bottomrule
+\end{tabular}
+
+\vspace{0.6mm}
+D2 and D3 land within \SI{5}{\percent} of each other --- \textbf{do not choose between them on
+battery life.} Take D3 only if one gateway must round-robin many nodes, or if the \SI{30}{\second}
+window is contractual. \textbf{Once the CPU sleeps, \emph{boot $+$ init} --- not the radio --- is the
+largest line item.} \bad{The two paths have different BOMs: decide before layout.}
+}
+
+\vspace{1.5mm}
+
+\begin{multicols}{2}
+
+% ===== TABLE 1: nff tool energy ============================================
+{\scriptsize
+\textbf{1 --- Energy per nff operation on ESP32}\,\mock\ \textit{(at the \SI{3.3}{\volt} rail)}\\[0.5mm]
+\begin{tabular}{@{}p{27mm}rrr@{}}
+\toprule
+\textbf{Operation} & \textbf{$t$} & \textbf{$I$} & \textbf{$E$} \\
+\midrule
+\texttt{nff\_init()} \tiny NVS + hook  & \SI{12}{\milli\second}  & \SI{40}{\milli\ampere}  & \SI{1.6}{\milli\joule} \\
+WiFi associate + DHCP \meas             & \SI{3.1}{\second}       & \SI{64.7}{\milli\ampere}& \SI{662}{\milli\joule} \\
+SNTP \tiny cold boot, hardcoded         & \SI{1.8}{\second}       & \SI{95}{\milli\ampere}  & \SI{564}{\milli\joule} \\
+\texttt{nff\_connect()} \tiny mTLS      & \SI{1.6}{\second}       & \SI{110}{\milli\ampere} & \SI{581}{\milli\joule} \\
+Heartbeat pub \tiny QoS1, 250\,B        & \SI{45}{\milli\second}  & \SI{120}{\milli\ampere} & \SI{17.8}{\milli\joule} \\
+MQTT keepalive PINGREQ                  & \SI{12}{\milli\second}  & \SI{115}{\milli\ampere} & \SI{4.6}{\milli\joule} \\
+\texttt{nff\_loop()} idle tick          & \SI{0.4}{\milli\second} & \SI{38}{\milli\ampere}  & \SI{0.05}{\milli\joule} \\
+Cmd ECDSA-P256 verify \tiny CPU         & \SI{55}{\milli\second}  & \SI{62}{\milli\ampere}  & \SI{11.3}{\milli\joule} \\
+\;$\hookrightarrow$ \texttt{ping}/\texttt{diag} & \SIrange{18}{30}{\milli\second} & \SI{118}{\milli\ampere} & \SIrange{7}{12}{\milli\joule} \\
+\;$\hookrightarrow$ \texttt{reboot}     & \SI{0.9}{\second}       & \SI{88}{\milli\ampere}  & \SI{261}{\milli\joule} \\
+Crash report \tiny 2.5\,kB + NVS        & \SI{180}{\milli\second} & \SI{105}{\milli\ampere} & \SI{62}{\milli\joule} \\
+Reconnect \tiny one failed TLS          & \SI{1.9}{\second}       & \SI{108}{\milli\ampere} & \SI{677}{\milli\joule} \\
+Bootstrap announce + rollover           & \SI{3.2}{\second}       & \SI{112}{\milli\ampere} & \SI{1.18}{\joule} \\
+\midrule
+\textbf{OTA total} \meas \tiny 1.2\,MB  & \textbf{\SI{9.9}{\second}} & \textbf{\SI{150}{\milli\ampere}} & \textbf{\SI{4.92}{\joule}} \\
+OTA probation soak \tiny 5\,s           & \SI{5.0}{\second}       & \SI{82}{\milli\ampere}  & \SI{1.35}{\joule} \\
+OTA rollback                            & \SI{0.9}{\second}       & \SI{88}{\milli\ampere}  & \SI{261}{\milli\joule} \\
+\bottomrule
+\end{tabular}
+
+\vspace{0.6mm}
+\textbf{OTA is not the problem} --- \meas\,\SI{0.41}{\milli\ampere\hour}, \SI{0.007}{\percent} of the
+battery. \bad{WiFi is.} As the SDK ships (it never calls \texttt{esp\_wifi\_set\_ps()}) an
+associated ESP32 idles at \meas\,\SI{49.7}{\milli\ampere}: \bad{4.3 days} on this cell. The
+default \SI{30}{\second} heartbeat alone costs \SI{1577}{\milli\ampere\hour}/yr,
+\SI{26}{\percent} of the battery. \textbf{BLE-only was not a preference --- it is the only
+transport that closes.}
+}
+
+\vspace{1.5mm}
+
+% ===== SLEEP FLOOR (callout) ==============================================
+\fcolorbox{warn}{white}{\parbox{\dimexpr\columnwidth-2\fboxsep-2\fboxrule}{\scriptsize
+\textbf{2 --- The sleep floor is a \emph{board} property, not a chip property}\,\mock\\[0.3mm]
+\textbf{Custom \good{\SI{20}{\micro\ampere}}}: module \SI{10}{\micro\ampere} (deep sleep, RTC timer)
+$+$ low-$I_q$ LDO \SI{1.6}{\micro\ampere} $+$ sensor standby \& leakage \SI{8}{\micro\ampere}. That
+is \SI{3.4}{\percent} of budget.\\[0.3mm]
+\textbf{Devkit \bad{\SI{6.5}{\milli\ampere}}}: AMS1117 \bad{\SI{5000}{\micro\ampere}} $+$ power LED
+\bad{\SI{1400}{\micro\ampere}} $+$ CP2102 \SI{100}{\micro\ampere} $+$ the above ---
+\bad{$11\times$ the entire per-cycle budget, asleep.}\\[0.3mm]
+\bad{A devkit fails the requirement while doing nothing at all.} No firmware recovers this; any
+battery-life figure measured on one is meaningless.}}
+
+\columnbreak
+
+% ===== TABLE 3: nff SDK settings ==========================================
+{\scriptsize
+\textbf{3 --- Optimal nff SDK settings under a power constraint}\\[0.5mm]
+\bad{First: the SDK cannot run on this device today.} Verified in source --- \textbf{no BLE}
+(\texttt{nff\_port.h} exposes only \texttt{nff\_port\_mqtt\_*} and \texttt{\_https\_get\_stream};
+zero NimBLE/bluedroid hits in any firmware) and \textbf{no sleep} (no \texttt{esp\_deep\_sleep} /
+\texttt{esp\_pm\_*} anywhere).\\[0.8mm]
+\begin{tabular}{@{}p{26mm}p{11mm}p{40mm}@{}}
+\toprule
+\textbf{Symbol} & \textbf{Set} & \textbf{Why} \\
+\midrule
+\texttt{heartbeat\_} \texttt{interval\_s} & $30\to\mathbf{300}$ & The only shipped power knob (Kconfig max). One heartbeat per wake. \\
+\texttt{NFF\_MQTT\_} \texttt{BUFFER\_SIZE} & $\mathbf{1024}$ & \bad{A landmine, not a knob.} The OTA cmd is 420\,B; PubSubClient's 256\,B default drops it \emph{silently}. \\
+\texttt{NFF\_TIMESTAMP\_} \texttt{WINDOW\_S} & $300\to\mathbf{3600}$ & No SNTP when duty-cycled; the RTC's internal RC drifts $\pm\SI{5}{\percent}$. At 300 it rejects valid commands. \\
+\texttt{NFF\_LOG\_LINES} $\times$\texttt{\_LINE\_LEN} & $\mathbf{8\times96}$ & Lives in \texttt{RTC\_NOINIT} --- retained through deep sleep, so it costs standby current. \\
+\texttt{NFF\_OTA\_MAX\_} \texttt{DL\_RETRIES} & $4\to\mathbf{2}$ & Each retry is a fresh TLS handshake. Die fast; retry next cycle. \\
+\texttt{NFF\_OTA\_MIN\_} \texttt{HEALTHY\_MS} & \textbf{5000} & \textbf{Unchanged.} The \SI{5}{\second} soak \emph{exceeds} the \SI{3.9}{\second} ceiling --- budget a long-wake exception. \\
+\bottomrule
+\end{tabular}
+
+\vspace{0.6mm}
+\bad{Two hardcoded behaviours must become configurable.} \textbf{(a)} The reconnect ladder
+(\texttt{nff\_core.c:31}) saturates at \SI{60}{\second} and retries \emph{forever}:
+\SI{57}{\micro\ampere\hour} an attempt $=$ \bad{\SI{500}{\milli\ampere\hour}/month} against a dead
+gateway, with no telemetry to show for it --- \textbf{the SDK's worst battery failure mode.}
+\textbf{(b)} SNTP (\texttt{nff\_port\_esp32\_arduino.c:60}) is unconditional and blocks
+\texttt{nff\_connect()} up to \SI{20}{\second} on every cold boot: \bad{$5\times$ the entire
+CPU-active budget}, every cycle.
+
+\vspace{0.6mm}
+\textbf{To build:} \texttt{nff\_port\_ble\_adv\_*}, \texttt{nff\_port\_sleep\_deep/light()},
+\texttt{nff\_run\_once()}, RTC\_NOINIT state carry, a packed 27-B codec, a gateway MQTT bridge.
+\textbf{The PAL is the clean seam --- an addition, not a rewrite.}
+}
+
+\vspace{1.5mm}
+
+% ===== TABLE 4: ESP32 / BLE params ========================================
+{\scriptsize
+\textbf{4 --- Optimal ESP32 / BLE parameters}\\[0.5mm]
+\begin{tabular}{@{}p{27mm}p{8mm}p{8mm}p{31mm}@{}}
+\toprule
+\textbf{Setting} & \textbf{D2} & \textbf{D3} & \textbf{Why} \\
+\midrule
+\texttt{BT\_NIMBLE\_ENABLED} & \multicolumn{2}{c}{\texttt{y}} & 60\,kB less RAM, shorter init. \textbf{Init is on the critical path.} \\
+\texttt{BT\_CLASSIC\_ENABLED} & \multicolumn{2}{c}{\texttt{n}} & BR/EDR unused; costs init $+$ RAM. \\
+WiFi & \multicolumn{2}{c}{\textbf{never init}} & \bad{An init'd-but-idle WiFi stack holds the RF/PLL domain up.} \\
+\texttt{BOOTLOADER\_SKIP\_} \texttt{VALIDATE\_IN\_} \texttt{DEEP\_SLEEP} & \multicolumn{2}{c}{\texttt{y}} & Saves \SIrange{100}{200}{\milli\second} \emph{every cycle} $=$ \SIrange{2}{3}{\percent} of budget, for one flag. \\
+\texttt{BOOTLOADER\_} \texttt{LOG\_LEVEL} & \multicolumn{2}{c}{\texttt{NONE}} & UART chatter is pure cost. \\
+\texttt{DEFAULT\_CPU\_} \texttt{FREQ\_MHZ} & \multicolumn{2}{c}{\texttt{80}} & The window is \emph{waiting}-bound, not compute-bound. \\
+\texttt{RTC\_CLK\_SRC} & \texttt{INT\_RC} & \texttt{EXT\_} \texttt{CRYS} & \bad{The BOM fork.} D2: no xtal (it costs \SI{200}{\milli\second}/wake). D3: mandatory. \\
+\texttt{PM\_ENABLE} $+$ \texttt{TICKLESS\_IDLE} $+$ \texttt{BTDM\_MODEM\_SLEEP} & \texttt{n} & \texttt{y} & D3 only. \bad{All three, or none} --- miss one and the CPU silently stays awake: you have built D1. \\
+\midrule
+Adv type & \multicolumn{2}{c}{\texttt{NONCONN\_IND}} & Non-connectable \emph{and} non-scannable: a scannable adv forces RX on after every packet. \\
+Adv interval & \SI{100}{\milli\second} & \SI{500}{\milli\second} & 15 events / \SI{1.5}{\second}; 60 events / \SI{30}{\second}. \\
+TX power & \multicolumn{2}{c}{\textbf{\SI{+9}{\dBm}}} & \good{Spend the link margin.} The radio is on \SI{2.5}{\milli\second}/\SI{100}{\milli\second}, so max power costs $<\SI{1}{\percent}$; a \emph{missed} adv costs \SI{60}{\percent} of a cycle. \bad{Turning the radio down is exactly backwards.} \\
+BLE address & \multicolumn{2}{c}{static, \textbf{fixed}} & Not a rotating RPA --- the gateway keys dedup on it. \\
+\bottomrule
+\end{tabular}
+
+\vspace{0.6mm}
+\textbf{The 31-byte advert.} BLE 4.2 legacy; \bad{no extended advertising on this part --- 31\,B,
+not 255}. MSD framing 4\,B $\Rightarrow$ \textbf{27\,B payload}: \texttt{ver}\,1 $+$ \texttt{seq}\,2
+$+$ \texttt{flags}\,1 $+$ \texttt{fw\_id}\,2 $+$ \texttt{batt}\,1 $+$ \textbf{sensor 16} $+$ CMAC
+tag 4 --- exactly full. \textbf{Identity is free:} the 6-B static address is already in the header.
+The nff heartbeat (250-B JSON) \bad{does not fit, by $8\times$} --- the gateway must
+\emph{reconstruct} it. \bad{Bluedroid's \texttt{config\_adv\_data()} silently inserts a 3-B Flags
+AD} --- use \texttt{\_raw()}, or the sensor field shrinks from 16\,B to 13\,B.
+}
+
+\end{multicols}
+
+\vspace{-2mm}
+\rule{\textwidth}{0.4pt}
+
+% ===== FOOTER: what's real =================================================
+{\scriptsize
+\mock\ \bad{MOCK.} \textbf{Every current and duration above is invented} --- plausible, internally
+consistent, \emph{not measured}. \textbf{Real:} everything about the SDK (read from source), the
+BLE 4.2 / ESP32 capability limits, and the arithmetic. \textbf{The verdict does not depend on the
+mocks} (see box); what the mocks \emph{do} control is the D2/D3 margin --- 18 months, or 11, or 30.
+\emph{Do not promise a customer 12 months on this table yet.}
+\;\textbf{One measurement converts this sheet:} it all hinges on $I_\text{awake}$, which is tens of
+\si{\milli\ampere} --- \emph{inside} the shunt rig's range (only the \SI{20}{\micro\ampere} sleep
+floor is not; that needs a PPK2/INA228, and the rig's own datasheet says so). Flash a bare BLE
+advertiser --- no nff, no WiFi, no sensor --- mount per \texttt{datasheet.tex} (\bad{DUT USB
+\emph{not} connected}), run \texttt{nff power measure -{}-for 30}. \bad{Run \texttt{WIRECHECK} and
+Phase-0 calibration first} --- Phase 0 has never been done, so the rig has no $R_\text{eff}$ and
+will report a confident, wrong number (wired to \emph{nothing}, it once read
+\SI{590}{\milli\ampere}).
+\;\textbf{If the BOM is not frozen, change the module:} an ESP32-C3/C6 is the same price and
+footprint class, with BLE 5.0 (extended adv $\Rightarrow$ 255-B payload, so the nff heartbeat fits
+\emph{as-is}) and $\approx$half the active current. \emph{The design closes on the WROOM-32E
+anyway} --- at $1.5\times$ margin instead of $\approx3\times$. A recommendation, not a blocker.
+\hfill\textit{Derivation: \texttt{ble-power-budget.tex}}
+}
+
+\end{document}

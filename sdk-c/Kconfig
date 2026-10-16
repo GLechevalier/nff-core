@@ -1,0 +1,96 @@
+menu "nff SDK"
+
+config NFF_HEARTBEAT_INTERVAL_S
+    int "Heartbeat publish interval (seconds)"
+    default 30
+    range 5 300
+    help
+        How often the device publishes a retained heartbeat to
+        nff/devices/{id}/heartbeat. Lower values improve presence
+        detection speed at the cost of slightly more MQTT traffic.
+
+config NFF_LOG_LINES
+    int "RTC pre-crash log buffer size (lines)"
+    default 32
+    range 8 64
+    help
+        Number of log lines kept in RTC memory across software resets.
+        These are included verbatim in crash reports. Each line is
+        NFF_LOG_LINE_LEN (128) bytes.
+
+config NFF_NONCE_RING_SIZE
+    int "Command nonce ring buffer size"
+    default 16
+    range 4 64
+    help
+        Number of command nonces remembered for replay prevention.
+        When the ring is full, the oldest nonce is evicted. Set
+        higher if your device receives many commands per hour.
+
+config NFF_TIMESTAMP_WINDOW_S
+    int "Command timestamp acceptance window (seconds)"
+    default 300
+    range 60 3600
+    help
+        Commands with timestamps older than this many seconds from the
+        device's current time are rejected. Requires SNTP to be
+        synchronised before nff_connect() for meaningful protection.
+
+config NFF_OTA_CONFIRM_TIMEOUT_S
+    int "OTA confirm window before automatic rollback (seconds)"
+    default 60
+    range 10 600
+    help
+        After an OTA, the new image runs on probation. If it does not
+        reconnect to the broker (and pass any registered health check)
+        within this window, the device automatically reverts to the
+        previous image and reports "rolled_back".
+
+config NFF_OTA_MAX_TRIAL_BOOTS
+    int "Unconfirmed OTA trial boots tolerated before rollback"
+    default 3
+    range 2 10
+    help
+        Crash-loop guard. A freshly-flashed image that reboots this many
+        times without confirming itself healthy is treated as bad and
+        rolled back. A healthy image confirms within seconds of the
+        first boot, so this only trips on a crash loop.
+
+config NFF_OTA_MAX_DL_RETRIES
+    int "OTA download attempts before giving up"
+    default 4
+    range 1 16
+    help
+        A transient TLS stall mid-download is retried with an HTTP Range
+        header from where it stopped (the SHA-256 context is kept in RAM),
+        so a dropped transfer does not restart from byte 0. This caps the
+        number of resume attempts per OTA. In-session only — not persisted
+        across reboots.
+
+config NFF_OTA_DL_RETRY_BACKOFF_MS
+    int "Delay between OTA resume attempts (ms)"
+    default 2000
+    range 0 30000
+    help
+        How long to wait before retrying a stalled OTA download.
+
+config NFF_OTA_MIN_HEAP_FLOOR
+    int "OTA health gate minimum free-heap floor (bytes)"
+    default 20000
+    range 0 200000
+    help
+        A freshly-flashed image is not committed unless min_free_heap stays
+        above this floor (plus the soak window below and any registered
+        health check). Catches an image that connects but is leaking heap.
+
+config NFF_OTA_MIN_HEALTHY_MS
+    int "OTA health gate soak window (ms)"
+    default 5000
+    range 0 60000
+    help
+        The new image must remain healthy (connected + above the heap floor
+        + any registered health check) continuously for this long before it
+        is committed. Catches an image that connects then degrades. Must be
+        comfortably less than NFF_OTA_CONFIRM_TIMEOUT_S * 1000.
+
+endmenu
